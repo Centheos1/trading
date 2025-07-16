@@ -281,5 +281,3 @@ if __name__ == "__main__":
                 #     print(f"{i + 1} {individual}")
                 # .h5_serialise()
                 # db.write_optimised_parameters(symbol=f"{symbol}_{strategy}_{tf}", results=individual.h5_serialise())
-
-
