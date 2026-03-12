@@ -7,6 +7,7 @@ from utils import STRAT_PARAMS, resample_timeframe, get_library
 from database import Hdf5Client
 from models import BacktestResult
 from strategies import obv, ichimoku, support_resistance
+from strategies import orderflow as orderflow_strategy
 
 
 class Nsga2:
@@ -28,6 +29,9 @@ class Nsga2:
             h5_db = Hdf5Client(exchange)
             self.data = h5_db.get_data(symbol, from_time, to_time)
             self.data = resample_timeframe(self.data, tf)
+
+        elif self.strategy == "orderflow":
+            pass
 
         elif self.strategy in ["sma", "psar", "atr", "gpsar"]:
             self.lib = get_library()
@@ -160,6 +164,9 @@ class Nsga2:
         elif self.strategy == "gpsar":
             params["initial_acc"] = min(params["initial_acc"], params["max_acc"])
             params["acc_increment"] = min(params["acc_increment"], params["max_acc"] - params["initial_acc"])
+
+        elif self.strategy == "orderflow":
+            pass
 
         return params
 
@@ -358,6 +365,28 @@ class Nsga2:
                 bt.num_trades = self.lib.GradientPsar_get_num_trades(self.obj)
                 bt.sharpe_ratio = self.lib.GradientPsar_get_sharpe_ratio(self.obj)
                 bt.cagr = self.lib.GradientPsar_get_cagr(self.obj)
+
+                if bt.pnl == 0:
+                    bt.pnl = -float("inf")
+                    bt.max_dd = float("inf")
+                    bt.num_trades = 0
+                    bt.sharpe_ratio = -float("inf")
+                    bt.cagr = -float("inf")
+
+            return population
+
+        elif self.strategy == "orderflow":
+
+            for bt in population:
+                try:
+                    bt.pnl, bt.max_dd, bt.num_trades, bt.sharpe_ratio, bt.cagr = \
+                        orderflow_strategy.backtest(
+                            self.exchange, self.symbol,
+                            self.from_time, self.to_time,
+                            bt.parameters
+                        )
+                except Exception:
+                    bt.pnl = 0
 
                 if bt.pnl == 0:
                     bt.pnl = -float("inf")

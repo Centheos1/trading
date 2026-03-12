@@ -4,6 +4,7 @@ from database import Hdf5Client
 
 from utils import resample_timeframe, STRAT_PARAMS, get_library
 from strategies import obv, ichimoku, support_resistance
+from strategies import orderflow as orderflow_strategy
 
 
 def get_data(exchange: str, symbol: str, tf: str, from_time: int, to_time: int) -> pd.DataFrame:
@@ -101,4 +102,10 @@ def run(exchange: str, symbol: str, strategy: str, tf: str, from_time: int, to_t
         print("Retruned from get cagr")
         # cagr = 0.0
 
+        return pnl, max_drawdown, num_trades, sharpe_ratio, cagr
+
+    if strategy == "orderflow":
+        pnl, max_drawdown, num_trades, sharpe_ratio, cagr = orderflow_strategy.backtest(
+            exchange, symbol, from_time, to_time, params
+        )
         return pnl, max_drawdown, num_trades, sharpe_ratio, cagr

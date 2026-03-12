@@ -1,4 +1,6 @@
 import logging
+import os
+import sys
 from datetime import datetime, timezone, timedelta
 from typing import Tuple
 import time
@@ -9,6 +11,14 @@ from exchanges.binance import BinanceClient
 from exchanges.oanda import OandaClient
 
 logger = logging.getLogger()
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__),
+                                 'backtestingCpp', 'orderflow', 'build'))
+
+try:
+    import orderflow_engine as ofe
+except ImportError:
+    ofe = None
 
 
 class DataCollector:
@@ -186,6 +196,178 @@ class DataCollector:
             batch_end = min(current + timedelta(minutes=max_minutes), to_date)
             yield int(current.timestamp() * 1000), int(batch_end.timestamp() * 1000)
             current = batch_end
+
+
+class TickDataCollector:
+    """Collects real-time tick and depth data from Binance via Python WebSocket
+    and stores it in HDF5 via the C++ engine for order flow backtesting."""
+
+    def __init__(self, exchange: str = "binance", futures: bool = True):
+        if ofe is None:
+            raise RuntimeError(
+                "orderflow_engine C++ module not built. "
+                "Build: cd backtestingCpp/orderflow && ./build.sh"
+            )
+
+        self.exchange = exchange
+        self.futures = futures
+
+        os.makedirs("data", exist_ok=True)
+        store_path = os.path.join("data", f"{exchange}_ticks.h5")
+        self.store = ofe.TickStore(store_path)
+        self.engine = ofe.OrderFlowEngine()
+        self.engine.set_tick_store(self.store, "")
+
+        if futures:
+            self.ws_base = "wss://fstream.binance.com/ws/"
+            self.rest_base = "https://fapi.binance.com/fapi/v1/depth"
+        else:
+            self.ws_base = "wss://stream.binance.com:9443/ws/"
+            self.rest_base = "https://api.binance.com/api/v3/depth"
+
+    def collect(self, symbol: str, duration_seconds: int = 0):
+        import asyncio
+        import json as pyjson
+
+        symbol_upper = symbol.upper()
+        symbol_lower = symbol.lower()
+
+        self.engine.set_tick_store(self.store, symbol_upper)
+
+        logger.info(f"Starting tick data collection for {symbol_upper}")
+
+        self._fetch_depth_snapshot(symbol_upper)
+
+        trade_count = 0
+        depth_count = 0
+
+        async def _run():
+            nonlocal trade_count, depth_count
+            import websockets
+
+            trade_uri = f"{self.ws_base}{symbol_lower}@trade"
+            depth_uri = f"{self.ws_base}{symbol_lower}@depth@100ms"
+
+            async def read_trades():
+                nonlocal trade_count
+                async for ws in websockets.connect(trade_uri):
+                    try:
+                        async for msg in ws:
+                            j = pyjson.loads(msg)
+                            trade = ofe.Trade()
+                            trade.timestamp = j["T"]
+                            trade.price = float(j["p"])
+                            trade.quantity = float(j["q"])
+                            trade.is_buyer_maker = j["m"]
+                            self.engine.process_trade(trade)
+                            trade_count += 1
+                    except websockets.ConnectionClosed:
+                        logger.warning("Trade WS reconnecting...")
+                        continue
+
+            async def read_depth():
+                nonlocal depth_count
+                async for ws in websockets.connect(depth_uri):
+                    try:
+                        async for msg in ws:
+                            j = pyjson.loads(msg)
+                            update = ofe.DepthUpdate()
+                            update.timestamp = j.get("E", 0)
+                            update.first_update_id = j.get("U", 0)
+                            update.final_update_id = j.get("u", 0)
+                            update.is_snapshot = False
+                            bids = []
+                            for b in j.get("b", []):
+                                lv = ofe.DepthLevel()
+                                lv.price = float(b[0])
+                                lv.quantity = float(b[1])
+                                bids.append(lv)
+                            asks = []
+                            for a in j.get("a", []):
+                                lv = ofe.DepthLevel()
+                                lv.price = float(a[0])
+                                lv.quantity = float(a[1])
+                                asks.append(lv)
+                            update.bids = bids
+                            update.asks = asks
+                            self.engine.process_depth(update)
+                            depth_count += 1
+                    except websockets.ConnectionClosed:
+                        logger.warning("Depth WS reconnecting...")
+                        continue
+
+            async def status_printer():
+                while True:
+                    await asyncio.sleep(10)
+                    logger.info(f"Collected {trade_count} trades, {depth_count} depth updates")
+
+            tasks = [
+                asyncio.create_task(read_trades()),
+                asyncio.create_task(read_depth()),
+                asyncio.create_task(status_printer()),
+            ]
+
+            if duration_seconds > 0:
+                await asyncio.sleep(duration_seconds)
+            else:
+                logger.info("Collecting... Press Ctrl+C to stop.")
+                done = asyncio.Event()
+                try:
+                    await done.wait()
+                except asyncio.CancelledError:
+                    pass
+
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        try:
+            asyncio.run(_run())
+        except KeyboardInterrupt:
+            logger.info("Collection interrupted by user")
+        finally:
+            self.store.flush()
+            self.store.close()
+            logger.info(
+                f"Tick data collection complete for {symbol_upper}: "
+                f"{trade_count} trades, {depth_count} depth updates"
+            )
+
+    def _fetch_depth_snapshot(self, symbol: str):
+        import requests as req
+        import json as pyjson
+
+        try:
+            resp = req.get(self.rest_base, params={"symbol": symbol, "limit": 1000})
+            resp.raise_for_status()
+            j = resp.json()
+
+            snapshot = ofe.DepthUpdate()
+            snapshot.timestamp = int(time.time() * 1000)
+            snapshot.first_update_id = j.get("lastUpdateId", 0)
+            snapshot.final_update_id = snapshot.first_update_id
+            snapshot.is_snapshot = True
+
+            bids = []
+            for b in j.get("bids", []):
+                lv = ofe.DepthLevel()
+                lv.price = float(b[0])
+                lv.quantity = float(b[1])
+                bids.append(lv)
+            asks = []
+            for a in j.get("asks", []):
+                lv = ofe.DepthLevel()
+                lv.price = float(a[0])
+                lv.quantity = float(a[1])
+                asks.append(lv)
+            snapshot.bids = bids
+            snapshot.asks = asks
+
+            self.engine.process_depth(snapshot)
+            logger.info(f"Loaded depth snapshot: {len(bids)} bids, {len(asks)} asks")
+        except Exception as e:
+            logger.error(f"Failed to fetch depth snapshot: {e}")
+
 
     # WIP - test this, if it works turn the filter back on in database
     # from typing import Generator, Tuple

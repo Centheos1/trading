@@ -1,0 +1,69 @@
+{
+  "tide": {
+    "update_interval_ms": 60000,
+    "risk_multiplier_default": 1.0,
+    "es_budget_global": 1000.0,
+    "max_position_usd": 10000.0,
+    "vol_regime_thresholds": [0.4, 0.8, 1.5],
+    "lsi_weights": [0.33, 0.33, 0.34],
+    "risk_mult_by_regime": [1.0, 0.8, 0.5, 0.0],
+    "lsi_reduce_threshold": 1.5,
+    "lsi_reduce_slope": 0.2
+  },
+  "wave": {
+    "update_interval_ms": 5000,
+    "eta_mr_threshold": 0.3,
+    "eta_bo_threshold": 0.7,
+    "eta_neutral_threshold": 0.5,
+    "dispersion_threshold": 0.02,
+    "dispersion_critical": 0.05,
+    "ar_critical": 0.85,
+    "ar_recover": 0.70,
+    "reduced_size_fraction": 0.5
+  },
+  "ripple": {
+    "wall_min_quality": 0.5,
+    "wall_quality_weights": [0.25, 0.25, 0.25, 0.25],
+    "confirmation_window_ms": 30000,
+    "expand_threshold_sigma": 1.0,
+    "max_hold_time_ms": 300000,
+    "cooldown_ms": 10000,
+    "scale_out_fractions": [0.33, 0.33, 0.34],
+    "vol_ratio_clamp": [0.25, 2.0],
+    "proximity_sigma": 2.0,
+    "bounce_microprice_shift_ticks": 3.0,
+    "bounce_imbalance_thresh": 0.1,
+    "exhaustion_cvd_slope_thresh": 0.01,
+    "breakout_depth_fail_ratio": 0.3,
+    "breakout_depth_fail_abs": 0.0,
+    "breakout_cvd_slope_thresh": 0.05,
+    "exhaustion_impact_ratio": 1.5,
+    "max_scale_ins": 1,
+    "scale_in_threshold_sigma": 2.0,
+    "scale_in_cvd_slope_min": 0.02,
+    "trailing_stop_sigma": 2.0,
+    "wall_scan_depth": 50,
+    "wall_depth_multiple": 3.0,
+    "wall_cancel_window": 20,
+    "state_activation_threshold": 0.6,
+    "state_margin": 0.15
+  },
+  "risk": {
+    "es_confidence_level": 0.95,
+    "target_risk_usd": 50.0,
+    "sigma_target": 0.60,
+    "maker_fee_bps": 2.0,
+    "taker_fee_bps": 4.0,
+    "leverage": 1.0,
+    "budget_exit_threshold": 0.90
+  },
+  "execution": {
+    "bounce_order_type": "LIMIT",
+    "breakout_order_type": "MARKET",
+    "slippage_tolerance_bps": 5.0
+  },
+  "testing": {
+    "replay_tolerance": 0.0,
+    "benchmark_latency_target_us": 100
+  }
+}

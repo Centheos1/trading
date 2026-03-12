@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import List, Optional
+
+from execution.models import AccountInfo, Order, OrderSide, OrderType, Position
+
+
+class BrokerInterface(ABC):
+    """Abstract broker connection. Implement per exchange/broker."""
+
+    @abstractmethod
+    async def connect(self) -> bool:
+        ...
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        ...
+
+    @abstractmethod
+    async def get_account_info(self) -> AccountInfo:
+        ...
+
+    @abstractmethod
+    async def place_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        quantity: float,
+        order_type: OrderType = OrderType.MARKET,
+    ) -> Order:
+        ...
+
+    @abstractmethod
+    async def cancel_order(self, symbol: str, broker_order_id: str) -> bool:
+        ...
+
+    @abstractmethod
+    async def get_open_orders(self, symbol: str) -> List[Order]:
+        ...
+
+    @abstractmethod
+    async def get_position(self, symbol: str) -> Optional[Position]:
+        ...
+
+    @abstractmethod
+    async def close_position(self, symbol: str) -> Optional[Order]:
+        ...
+
+    @abstractmethod
+    def is_connected(self) -> bool:
+        ...

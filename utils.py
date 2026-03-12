@@ -39,6 +39,15 @@ STRAT_PARAMS = {
         "max_acc": {"name": "Max. Acceleration", "type": float, "min": 0.05, "max": 1, "decimals": 2},
         "gradient_threshold": {"name": "Gradient Threshold","type": float, "min": 15, "max": 800, "decimals": 2},
         "gradient_period": {"name": "Gradient Period", "type": int, "min": 1, "max": 10}
+    },
+    "orderflow": {
+        "imbalance_threshold": {"name": "Imbalance Threshold", "type": float, "min": 1.5, "max": 10.0, "decimals": 2},
+        "stacked_imbalance_levels": {"name": "Stacked Imbalance Levels", "type": int, "min": 2, "max": 10},
+        "absorption_volume_ratio": {"name": "Absorption Volume Ratio", "type": float, "min": 2.0, "max": 20.0, "decimals": 2},
+        "cvd_divergence_lookback": {"name": "CVD Divergence Lookback", "type": int, "min": 20, "max": 500},
+        "exhaustion_lookback_bars": {"name": "Exhaustion Lookback Bars", "type": int, "min": 3, "max": 20},
+        "signal_strength_min": {"name": "Min Signal Strength", "type": float, "min": 0.1, "max": 0.9, "decimals": 2},
+        "tick_size": {"name": "Tick Size", "type": float, "min": 0.001, "max": 100.0, "decimals": 3},
     }
 }
 

@@ -1,0 +1,10 @@
+pandas
+numpy
+h5py
+requests
+oandapyV20
+python-dotenv
+PySide6
+pybind11
+websockets
+python-binance
