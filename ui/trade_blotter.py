@@ -1,4 +1,4 @@
-"""Signal log table with model-based rendering, source/category filtering,
+"""Signal log table with model-based rendering, layer-based filtering,
 and Qt's built-in row virtualization via QTableView + QAbstractTableModel.
 """
 from __future__ import annotations
@@ -14,30 +14,39 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QSortFilterProxyModel
 from PySide6.QtGui import QColor, QFont
 
-from execution.models import SignalEntry, SignalCategory
+from execution.models import SignalEntry, SignalCategory, _CATEGORY_LAYER_MAP
 
-_COLUMNS = ["Time", "Source", "Category", "Type", "Side", "Price",
+_COLUMNS = ["Time", "Layer", "Category", "Type", "Side", "Price",
             "Strength", "Description"]
 _COL_COUNT = len(_COLUMNS)
 
 _MAX_ROWS = 2000
 
 _CAT_COLORS = {
-    SignalCategory.RIPPLE_ENTRY:          QColor(30, 200, 100),
-    SignalCategory.RIPPLE_EXIT:           QColor(255, 180, 60),
-    SignalCategory.RIPPLE_PREPARE:        QColor(100, 160, 220),
-    SignalCategory.RIPPLE_CANCEL:         QColor(255, 80, 80),
-    SignalCategory.RIPPLE_REARM:          QColor(160, 140, 220),
-    SignalCategory.EXECUTION:             QColor(255, 215, 0),
-    SignalCategory.LEGACY_RAW:            QColor(180, 180, 200),
-    SignalCategory.CONTEXT:               QColor(120, 120, 150),
-    SignalCategory.DIAGNOSTIC:            QColor(100, 100, 130),
-    SignalCategory.STRATEGY_ARM:          QColor(80, 200, 120),
-    SignalCategory.STRATEGY_DISARM:       QColor(200, 100, 80),
+    SignalCategory.TIDE:                 QColor(210, 170, 60),
+    SignalCategory.WAVE:                 QColor(100, 130, 200),
+    SignalCategory.RIPPLE_ENTRY:         QColor(30, 200, 100),
+    SignalCategory.RIPPLE_EXIT:          QColor(255, 180, 60),
+    SignalCategory.RIPPLE_PREPARE:       QColor(100, 160, 220),
+    SignalCategory.RIPPLE_CANCEL:        QColor(255, 80, 80),
+    SignalCategory.RIPPLE_REARM:         QColor(160, 140, 220),
+    SignalCategory.TRADE_LIFECYCLE:      QColor(220, 240, 255),
+    SignalCategory.EXECUTION:            QColor(255, 215, 0),
+    SignalCategory.LEGACY_RAW:           QColor(130, 130, 150),
+    SignalCategory.CONTEXT:              QColor(120, 120, 150),
+    SignalCategory.DIAGNOSTIC:           QColor(100, 100, 130),
+    SignalCategory.STRATEGY_ARM:         QColor(80, 200, 120),
+    SignalCategory.STRATEGY_DISARM:      QColor(200, 100, 80),
     SignalCategory.STRATEGY_STATE_CHANGE: QColor(140, 160, 220),
 }
 
-_STRATEGY_CATEGORIES = {
+_BOLD_FONT = QFont("Menlo", 11, QFont.Bold)
+
+# ---- layer-based filter sets ----
+
+_FILTER_STRATEGY = {
+    SignalCategory.TIDE,
+    SignalCategory.WAVE,
     SignalCategory.STRATEGY_ARM,
     SignalCategory.STRATEGY_DISARM,
     SignalCategory.STRATEGY_STATE_CHANGE,
@@ -46,8 +55,28 @@ _STRATEGY_CATEGORIES = {
     SignalCategory.RIPPLE_EXIT,
     SignalCategory.RIPPLE_CANCEL,
     SignalCategory.RIPPLE_REARM,
+    SignalCategory.TRADE_LIFECYCLE,
     SignalCategory.CONTEXT,
     SignalCategory.EXECUTION,
+}
+
+_FILTER_TRADE = {
+    SignalCategory.TRADE_LIFECYCLE,
+    SignalCategory.EXECUTION,
+}
+
+_FILTER_RIPPLE = {
+    SignalCategory.RIPPLE_PREPARE,
+    SignalCategory.RIPPLE_ENTRY,
+    SignalCategory.RIPPLE_EXIT,
+    SignalCategory.RIPPLE_CANCEL,
+    SignalCategory.RIPPLE_REARM,
+}
+
+_FILTER_RAW = {
+    SignalCategory.LEGACY_RAW,
+    SignalCategory.CONTEXT,
+    SignalCategory.DIAGNOSTIC,
 }
 
 _CONTEXT_SIGNAL_PREFIXES = (
@@ -81,6 +110,8 @@ class _SignalTableModel(QAbstractTableModel):
             return self._display(entry, col)
         if role == Qt.ForegroundRole:
             return self._foreground(entry, col)
+        if role == Qt.FontRole:
+            return self._font(entry, col)
         if role == Qt.TextAlignmentRole:
             return int(Qt.AlignCenter)
         if role == Qt.UserRole:
@@ -113,7 +144,7 @@ class _SignalTableModel(QAbstractTableModel):
             dt = datetime.fromtimestamp(e.timestamp / 1000, tz=timezone.utc)
             return dt.strftime("%H:%M:%S.%f")[:-3]
         if col == 1:
-            return e.source
+            return _CATEGORY_LAYER_MAP.get(e.category, e.source)
         if col == 2:
             return e.category.value
         if col == 3:
@@ -133,13 +164,19 @@ class _SignalTableModel(QAbstractTableModel):
 
     @staticmethod
     def _foreground(e: SignalEntry, col: int) -> Optional[QColor]:
-        if col == 3 or col == 2:
+        if col in (1, 2, 3):
             return _CAT_COLORS.get(e.category)
         if col == 4:
             if e.side == "BUY":
                 return QColor(30, 200, 100)
             elif e.side == "SELL":
                 return QColor(255, 80, 80)
+        return None
+
+    @staticmethod
+    def _font(e: SignalEntry, col: int) -> Optional[QFont]:
+        if e.category == SignalCategory.TRADE_LIFECYCLE:
+            return _BOLD_FONT
         return None
 
 
@@ -172,8 +209,8 @@ class _CategoryFilterProxy(QSortFilterProxyModel):
 
 
 class TradeBlotter(QWidget):
-    """Signal/trade log table with structured entries, filtering, and
-    virtualised rendering."""
+    """Signal/trade log table with structured entries, layer-based filtering,
+    and virtualised rendering."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -193,32 +230,27 @@ class TradeBlotter(QWidget):
 
         header_row.addStretch()
 
-        header_row.addWidget(self._make_label("Source:"))
-        self._source_combo = QComboBox()
-        self._source_combo.addItem("All", None)
-        self._source_combo.addItem("Strategy", "strategy")
-        self._source_combo.addItem("Ripple", "ripple")
-        self._source_combo.addItem("Legacy", "legacy")
-        self._source_combo.addItem("Execution", "execution")
-        self._source_combo.setMaximumWidth(100)
-        self._source_combo.currentIndexChanged.connect(self._on_filter_changed)
-        header_row.addWidget(self._source_combo)
+        header_row.addWidget(self._make_label("Filter:"))
 
-        header_row.addWidget(self._make_label("  Show:"))
-        self._strategy_btn = QCheckBox("Strategy")
-        self._strategy_btn.setStyleSheet("color: #b4b4c8; font-size: 10px;")
-        self._strategy_btn.toggled.connect(self._on_strategy_toggled)
-        header_row.addWidget(self._strategy_btn)
+        self._btn_strategy = QCheckBox("Strategy")
+        self._btn_strategy.setStyleSheet("color: #b4b4c8; font-size: 10px;")
+        self._btn_strategy.toggled.connect(self._on_strategy_toggled)
+        header_row.addWidget(self._btn_strategy)
 
-        self._ripple_only_btn = QCheckBox("Ripple only")
-        self._ripple_only_btn.setStyleSheet("color: #b4b4c8; font-size: 10px;")
-        self._ripple_only_btn.toggled.connect(self._on_ripple_only_toggled)
-        header_row.addWidget(self._ripple_only_btn)
+        self._btn_trade = QCheckBox("Trade")
+        self._btn_trade.setStyleSheet("color: #dceeff; font-size: 10px; font-weight: bold;")
+        self._btn_trade.toggled.connect(self._on_trade_toggled)
+        header_row.addWidget(self._btn_trade)
 
-        self._exec_only_btn = QCheckBox("Exec only")
-        self._exec_only_btn.setStyleSheet("color: #b4b4c8; font-size: 10px;")
-        self._exec_only_btn.toggled.connect(self._on_exec_only_toggled)
-        header_row.addWidget(self._exec_only_btn)
+        self._btn_ripple = QCheckBox("Ripple")
+        self._btn_ripple.setStyleSheet("color: #64a0dc; font-size: 10px;")
+        self._btn_ripple.toggled.connect(self._on_ripple_toggled)
+        header_row.addWidget(self._btn_ripple)
+
+        self._btn_raw = QCheckBox("Raw")
+        self._btn_raw.setStyleSheet("color: #828296; font-size: 10px;")
+        self._btn_raw.toggled.connect(self._on_raw_toggled)
+        header_row.addWidget(self._btn_raw)
 
         clear_btn = QPushButton("Clear")
         clear_btn.setMaximumWidth(50)
@@ -236,7 +268,7 @@ class TradeBlotter(QWidget):
         self._proxy = _CategoryFilterProxy(self)
         self._proxy.setSourceModel(self._model)
 
-        self._strategy_btn.setChecked(True)
+        self._btn_strategy.setChecked(True)
 
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -248,9 +280,9 @@ class TradeBlotter(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._table.setColumnWidth(0, 90)   # Time
-        self._table.setColumnWidth(1, 60)   # Source
-        self._table.setColumnWidth(2, 100)  # Category
-        self._table.setColumnWidth(3, 190)  # Type
+        self._table.setColumnWidth(1, 65)   # Layer
+        self._table.setColumnWidth(2, 110)  # Category
+        self._table.setColumnWidth(3, 180)  # Type
         self._table.setColumnWidth(4, 40)   # Side
         self._table.setColumnWidth(5, 80)   # Price
         self._table.setColumnWidth(6, 55)   # Strength
@@ -313,57 +345,43 @@ class TradeBlotter(QWidget):
 
     # ---- filter callbacks ----
 
-    def _on_filter_changed(self, _idx):
-        src = self._source_combo.currentData()
-        if src is None:
-            self._proxy.set_source_filter(None)
-            self._proxy.set_category_filter(None)
-        elif src == "strategy":
-            self._proxy.set_source_filter(None)
-            self._proxy.set_category_filter(_STRATEGY_CATEGORIES)
-        else:
-            self._proxy.set_source_filter({src})
-            self._proxy.set_category_filter(None)
-        self._clear_checkboxes()
+    def _apply_filter(self, cats: Optional[Set[SignalCategory]]):
+        self._proxy.set_source_filter(None)
+        self._proxy.set_category_filter(cats)
 
     def _on_strategy_toggled(self, checked):
         if checked:
             self._clear_checkboxes(skip="strategy")
-            self._source_combo.blockSignals(True)
-            self._source_combo.setCurrentIndex(0)
-            self._source_combo.blockSignals(False)
-            self._proxy.set_source_filter(None)
-            self._proxy.set_category_filter(_STRATEGY_CATEGORIES)
+            self._apply_filter(_FILTER_STRATEGY)
         else:
-            self._proxy.set_source_filter(None)
-            self._proxy.set_category_filter(None)
+            self._apply_filter(None)
 
-    def _on_ripple_only_toggled(self, checked):
+    def _on_trade_toggled(self, checked):
+        if checked:
+            self._clear_checkboxes(skip="trade")
+            self._apply_filter(_FILTER_TRADE)
+        else:
+            self._apply_filter(None)
+
+    def _on_ripple_toggled(self, checked):
         if checked:
             self._clear_checkboxes(skip="ripple")
-            self._source_combo.blockSignals(True)
-            self._source_combo.setCurrentIndex(0)
-            self._source_combo.blockSignals(False)
-            self._proxy.set_source_filter({"ripple"})
-            self._proxy.set_category_filter(None)
+            self._apply_filter(_FILTER_RIPPLE)
         else:
-            self._proxy.set_source_filter(None)
+            self._apply_filter(None)
 
-    def _on_exec_only_toggled(self, checked):
+    def _on_raw_toggled(self, checked):
         if checked:
-            self._clear_checkboxes(skip="exec")
-            self._source_combo.blockSignals(True)
-            self._source_combo.setCurrentIndex(0)
-            self._source_combo.blockSignals(False)
-            self._proxy.set_source_filter({"execution"})
-            self._proxy.set_category_filter(None)
+            self._clear_checkboxes(skip="raw")
+            self._apply_filter(_FILTER_RAW)
         else:
-            self._proxy.set_source_filter(None)
+            self._apply_filter(None)
 
     def _clear_checkboxes(self, skip=""):
-        for name, btn in [("strategy", self._strategy_btn),
-                          ("ripple", self._ripple_only_btn),
-                          ("exec", self._exec_only_btn)]:
+        for name, btn in [("strategy", self._btn_strategy),
+                          ("trade", self._btn_trade),
+                          ("ripple", self._btn_ripple),
+                          ("raw", self._btn_raw)]:
             if name != skip:
                 btn.blockSignals(True)
                 btn.setChecked(False)

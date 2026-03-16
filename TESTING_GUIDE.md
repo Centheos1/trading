@@ -1047,7 +1047,7 @@ Tests that depend on configuration should either:
 | `test_crossvenue_wave.py` (Python) | 9 tests | Passing | 8 |
 | `test_bubble_pipeline.py` (Python) | 63 checks | Passing | UI-Phase 1 |
 | `test_bucket_model.py` (Python) | 64 checks | Passing | UI-Phase 1 |
-| `test_strategy_ui.py` (Python) | 117 checks | Passing | UI-Phase 2 |
+| `test_strategy_ui.py` (Python) | 163 checks | Passing | UI-Phase 2 + Signal Log |
 | `test_ui_cleanup.py` (Python) | 38 checks | Passing | UI-Phase 3 |
 | `test_strategy_store.py` (Python) | 63 checks | Passing | UI-Phase 4 |
 | `test_integration_e2e.py` (Python) | 57 checks | Passing | UI-Phase 5 |
@@ -1077,7 +1077,7 @@ Tests that depend on configuration should either:
 | 8 | `test_crossvenue_wave.py` | Cross-venue → Wave integration: correlation/divergence → BREAKDOWN boost, baseline preservation, reset, accessors, determinism | **Done** (9 tests) |
 | UI-1 | `test_bucket_model.py` | TimeBucket OHLC, bucket assignment/alignment, visible window computation, dynamic slice_ms, bucket axis rendering, backward compat, determinism | **Done** (64 checks) |
 | UI-1 | `test_bubble_pipeline.py` (updated) | Bubble pipeline regression: pruning uses wider visible window (300s default), all existing checks preserved | **Done** (63 checks) |
-| UI-2 | `test_strategy_ui.py` | StrategyMode/StrategyUIState enums, SignalCategory extensions, SignalEntry metadata, state machine, ARM/DISARM, signal emission, blotter filter, diagnostics panel, heatmap overlay, settings migration, backward compat | **Done** (117 checks) |
+| UI-2 | `test_strategy_ui.py` | StrategyMode/StrategyUIState enums, SignalCategory extensions (TIDE, WAVE, TRADE_LIFECYCLE), layer display map, SignalEntry metadata, state machine, ARM/DISARM, signal emission, layer-based blotter filters (Strategy/Trade/Ripple/Raw), diagnostics panel, heatmap overlay, settings migration, backward compat | **Done** (163 checks) |
 | UI-3 | `test_ui_cleanup.py` | Hidden elements (Tick Size, Imbalance), sizing gating on strategy state, Replay disabled, account panel placeholder lifecycle, backward compat | **Done** (38 checks) |
 | UI-4 | `test_strategy_store.py` | HDF5 schema versioning, signal write/read roundtrip, snapshot buffered write/flush, session event persistence, time-range filtering, legacy file detection, readonly open, reopen persistence, default fields | **Done** (63 checks) |
 | UI-5 | `test_integration_e2e.py` | Cross-workstream integration: session lifecycle (bucketing + strategy + HDF5), state gating, blotter filtering, bucket + overlay coexistence, time-range filtering, diagnostics panel, deterministic replay, account panel lifecycle | **Done** (57 checks) |
@@ -1159,7 +1159,7 @@ python tests/test_bucket_model.py
 # Bubble pipeline regression (63 checks)
 python tests/test_bubble_pipeline.py
 
-# Strategy UI tests (117 checks)
+# Strategy UI tests (163 checks)
 python tests/test_strategy_ui.py
 
 # UI cleanup tests (38 checks)
@@ -1220,10 +1220,12 @@ python tests/test_bucket_model.py && python tests/test_bubble_pipeline.py && pyt
 |---|---|
 | `test_strategy_mode_enum` | StrategyMode enum values: OBSERVE, PAPER, LIVE |
 | `test_strategy_ui_state_enum` | StrategyUIState enum: all 7 states present |
-| `test_signal_category_extensions` | STRATEGY_ARM, STRATEGY_DISARM, STRATEGY_STATE_CHANGE added; originals preserved |
+| `test_signal_category_extensions` | STRATEGY_ARM, STRATEGY_DISARM, STRATEGY_STATE_CHANGE, TIDE, WAVE, TRADE_LIFECYCLE added; originals preserved |
 | `test_signal_entry_strategy_fields` | New fields (wave_regime, tide_bias, risk_budget_pct, lifecycle_state, archetype) default correctly |
 | `test_strategy_to_ripple_mapping` | StrategyMode → RippleMode mapping (OBSERVE→LOG_ONLY, PAPER→PAPER, LIVE→LOG_ONLY) |
-| `test_blotter_strategy_categories` | _STRATEGY_CATEGORIES includes strategy + ripple categories, excludes LEGACY_RAW/DIAGNOSTIC |
+| `test_blotter_strategy_categories` | _FILTER_STRATEGY includes strategy + ripple + TIDE/WAVE/TRADE_LIFECYCLE, excludes LEGACY_RAW/DIAGNOSTIC |
+| `test_trade_filter` | _FILTER_TRADE contains TRADE_LIFECYCLE + EXECUTION only |
+| `test_layer_display_map` | _CATEGORY_LAYER_MAP maps every SignalCategory to a display layer |
 | `test_blotter_add_strategy_entries` | TradeBlotter accepts strategy SignalEntry rows |
 | `test_diagnostics_panel_state_badge` | Badge defined for all 7 states; set_strategy_state updates; clear resets to DISARMED |
 | `test_diagnostics_panel_snapshot` | Panel shows Tide bias, Archetype, Stop/Target, Hold time, ES Used from snapshot |
@@ -1374,6 +1376,65 @@ python tests/test_bucket_model.py && python tests/test_bubble_pipeline.py && pyt
 - **Dynamic slice_ms:** `max(HEATMAP_SLICE_MS, visible_window_ms // 1200)`. Keeps intensity image bounded.
 - **Pruning with wider window:** Trade cutoff = `trade_now - visible_window_ms * 2`. Wider window → more trades retained.
 - **chart_now invariant:** `max(t, min(d, t + MAX_DEPTH_LEAD_MS))` — unchanged by bucket model.
+
+---
+
+## 20.13 Multi-View MVVM Architecture Tests
+
+**Run commands:**
+
+```bash
+QT_QPA_PLATFORM=offscreen python tests/test_market_state.py
+QT_QPA_PLATFORM=offscreen python tests/test_candle_chart_view.py
+QT_QPA_PLATFORM=offscreen python tests/test_multi_view.py
+```
+
+### test_market_state.py (9 tests, 30 checks)
+
+| Test | What It Validates |
+|---|---|
+| `test_defaults` | MarketState initializes with correct defaults (chart_now=0, disarmed, empty deques) |
+| `test_mid_price` | mid_price property computes correctly for all bid/ask combinations |
+| `test_has_candles` | has_candles reflects deque population |
+| `test_has_strategy` | has_strategy reflects snapshot assignment |
+| `test_shared_candle_deque` | HeatmapWidget and MarketState share the same candle deque object |
+| `test_shared_candle_multiple_trades` | Multiple trades aggregate into shared candle bucket correctly |
+| `test_signal_deque_bounded` | Signal deque respects maxlen of 2000 |
+| `test_custom_params` | Custom bucket_duration_ms and visible_window_ms are respected |
+| `test_external_candle_deque` | Externally-provided candle deque is used directly |
+
+### test_candle_chart_view.py (11 tests, 23 checks)
+
+| Test | What It Validates |
+|---|---|
+| `test_construction` | CandleChartView stores market state reference, auto-scale default, empty overlays |
+| `test_paint_empty` | Painting with no candles does not crash |
+| `test_paint_with_candles` | Painting with candle data records paint time |
+| `test_auto_scale` | Auto-scale sets price_min/max from visible candles |
+| `test_auto_scale_disabled` | Auto-scale off preserves manually set price range |
+| `test_overlay_registration` | Overlays can be registered and are called by _draw_overlays |
+| `test_ts_to_x_helper` | _ts_to_x maps timestamps to pixel coordinates correctly |
+| `test_price_to_y_helper` | _price_to_y maps prices to pixel coordinates correctly |
+| `test_shared_data_no_copy` | View sees new candles appended to MarketState.candles |
+| `test_double_click_resets_auto_scale` | Double-click re-enables auto-scale |
+| `test_nice_tick` | _nice_tick produces reasonable axis tick spacing |
+
+### test_multi_view.py (12 tests, 34 checks)
+
+| Test | What It Validates |
+|---|---|
+| `test_candle_deque_shared` | HeatmapWidget writes candles to MarketState.candles |
+| `test_candle_deque_not_duplicated` | Two views reading same deque see same data |
+| `test_strategy_dashboard_construction` | StrategyDashboardView creates strategy panel, blotter, account panel |
+| `test_strategy_dashboard_update_from_state` | update_from_state pushes strategy_ui_state to panel |
+| `test_signal_broadcast_to_both_blotters` | Signals are received by both OF and SD blotters |
+| `test_blotter_instances_are_independent` | OF and SD blotters maintain independent data |
+| `test_tab_widget_created` | QTabWidget has 3 tabs with correct labels |
+| `test_tab_switching` | Tab switching changes currentIndex correctly |
+| `test_market_state_sync_fields` | MarketState fields can be updated and read back |
+| `test_candle_view_reads_latest` | CandleChartView reads from MarketState without needing push |
+| `test_repaint_gating_logic` | Only the active tab index receives repaint calls |
+| `test_deterministic_candle_sharing` | Same trades produce identical candle data regardless of view count |
 
 ---
 

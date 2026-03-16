@@ -121,7 +121,7 @@ class TradeSlice:
 class HeatmapWidget(QWidget):
     """Bookmap-style order book heatmap with time-based scrolling."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, candle_store: deque | None = None):
         super().__init__(parent)
         self.setMinimumSize(600, 400)
         self.setMouseTracking(True)
@@ -140,7 +140,9 @@ class HeatmapWidget(QWidget):
                                    * self._num_visible_buckets)
         self._slice_ms = max(HEATMAP_SLICE_MS,
                              self._visible_window_ms // 1200)
-        self._buckets: deque = deque(maxlen=200)
+        # Candle deque may be supplied externally (shared with other views
+        # via MarketState) or created locally for standalone use / tests.
+        self._buckets: deque = candle_store if candle_store is not None else deque(maxlen=200)
 
         self._cur_bids = {}
         self._cur_asks = {}
@@ -1083,7 +1085,9 @@ class HeatmapWidget(QWidget):
 
         # --- Phase 2: render bubbles (colour from buy/sell imbalance) ---
         buy_path = QPainterPath()
+        buy_path.setFillRule(Qt.FillRule.WindingFill)
         sell_path = QPainterPath()
+        sell_path.setFillRule(Qt.FillRule.WindingFill)
 
         visible_count = 0
         r_min = MAX_BUBBLE_RADIUS + 1.0

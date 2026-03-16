@@ -15,7 +15,7 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QToolBar, QComboBox, QPushButton, QLabel, QLineEdit,
-    QStatusBar, QMessageBox
+    QStatusBar, QMessageBox, QTabWidget,
 )
 from PySide6.QtCore import Qt, QTimer, Signal as QtSignal, QSettings
 from PySide6.QtGui import QFont, QAction, QPainter, QColor, QPen
@@ -26,6 +26,9 @@ from ui.cvd_widget import CVDWidget
 from ui.trade_blotter import TradeBlotter
 from ui.account_panel import AccountPanel
 from ui.strategy_panel import StrategyDiagnosticsPanel
+from ui.market_state import MarketState
+from ui.candle_chart_view import CandleChartView
+from ui.strategy_dashboard_view import StrategyDashboardView
 from execution.models import (
     RippleMode, SignalCategory, SignalEntry,
     SizingConfig, SizingMode, StrategyMode, StrategyUIState,
@@ -343,6 +346,7 @@ class MainWindow(QMainWindow):
         self._strategy_mode = StrategyMode.OBSERVE
         self._strategy_ui_state = StrategyUIState.DISARMED
         self._prev_strategy_ui_state = StrategyUIState.DISARMED
+        self._last_strategy_snap = None
         self._strategy_store: Optional[StrategyStore] = None
         self._ripple_min_confidence = 0.0
         self._health = _HealthSnapshot()
@@ -368,6 +372,11 @@ class MainWindow(QMainWindow):
 
         self._settings = QSettings("OrderFlowTrading", "MainWindow")
         self._load_strategy_settings()
+
+        self._market_state = MarketState(
+            bucket_duration_ms=self._candle_duration_ms,
+            visible_window_ms=self._candle_duration_ms,
+        )
 
         self._setup_ui()
         self._setup_toolbar()
@@ -414,6 +423,11 @@ class MainWindow(QMainWindow):
     # UI layout
     # ------------------------------------------------------------------
 
+    # Tab indices (class-level constants)
+    _TAB_ORDER_FLOW = 0
+    _TAB_CANDLE = 1
+    _TAB_STRATEGY = 2
+
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -421,13 +435,34 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(2, 2, 2, 2)
         main_layout.setSpacing(2)
 
+        # --- Multi-view tab container ------------------------------------
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setDocumentMode(True)
+        self._tab_widget.setStyleSheet("""
+            QTabBar::tab {
+                background: #14162a; color: #8888aa;
+                padding: 6px 18px; border: 1px solid #22243a;
+                border-bottom: none; min-width: 100px;
+                font-family: Menlo; font-size: 10px;
+            }
+            QTabBar::tab:selected {
+                background: #1c1e38; color: #d0d0e8;
+                border-bottom: 2px solid #5588cc;
+            }
+            QTabWidget::pane { border: none; }
+        """)
+        self._tab_widget.currentChanged.connect(self._on_tab_changed)
+
+        # ============ Tab 1: Order Flow (existing layout) ================
+        of_widget = QWidget()
+        of_layout = QVBoxLayout(of_widget)
+        of_layout.setContentsMargins(0, 0, 0, 0)
+        of_layout.setSpacing(2)
+
         main_splitter = QSplitter(Qt.Vertical)
 
         top_splitter = QSplitter(Qt.Horizontal)
 
-        # --- Left column: VP aligned to heatmap + status below ----------
-        # Must have exactly 2 widgets to match _chart_stack's 2 widgets
-        # so splitter height sync keeps VP and heatmap vertically aligned.
         self._left_col = QSplitter(Qt.Vertical)
         self._volume_profile = VolumeProfileWidget()
         self._status_panel = _StatusPanel()
@@ -438,16 +473,16 @@ class MainWindow(QMainWindow):
         self._left_col.setStretchFactor(1, 1)
         self._left_col.setChildrenCollapsible(False)
 
-        # --- Right column: heatmap + CVD --------------------------------
         self._chart_stack = QSplitter(Qt.Vertical)
-        self._heatmap = HeatmapWidget()
+        self._heatmap = HeatmapWidget(
+            candle_store=self._market_state.candles,
+        )
         self._cvd = CVDWidget()
         self._chart_stack.addWidget(self._heatmap)
         self._chart_stack.addWidget(self._cvd)
         self._chart_stack.setStretchFactor(0, 3)
         self._chart_stack.setStretchFactor(1, 1)
 
-        # Keep VP and heatmap heights in sync when user drags either splitter.
         self._syncing_splitters = False
         self._chart_stack.splitterMoved.connect(self._sync_left_to_chart)
         self._left_col.splitterMoved.connect(self._sync_chart_to_left)
@@ -467,6 +502,7 @@ class MainWindow(QMainWindow):
         bottom_right.setStretchFactor(0, 1)
         bottom_right.setStretchFactor(1, 1)
         bottom_right.setChildrenCollapsible(False)
+        bottom_right.setMaximumHeight(400)
 
         bottom_splitter.addWidget(self._blotter)
         bottom_splitter.addWidget(bottom_right)
@@ -478,7 +514,28 @@ class MainWindow(QMainWindow):
         main_splitter.setStretchFactor(0, 3)
         main_splitter.setStretchFactor(1, 1)
 
-        main_layout.addWidget(main_splitter)
+        of_layout.addWidget(main_splitter)
+
+        # ============ Tab 2: Candle Chart ================================
+        self._candle_view = CandleChartView(self._market_state)
+
+        # ============ Tab 3: Strategy Dashboard ==========================
+        self._strategy_dashboard = StrategyDashboardView(self._market_state)
+
+        # ============ Add tabs ===========================================
+        self._tab_widget.addTab(of_widget, "Order Flow")
+        self._tab_widget.addTab(self._candle_view, "Chart")
+        self._tab_widget.addTab(self._strategy_dashboard, "Strategy")
+
+        main_layout.addWidget(self._tab_widget)
+
+    def _on_tab_changed(self, index: int):
+        """Refresh the newly-visible tab immediately."""
+        if index == self._TAB_CANDLE:
+            self._candle_view.update()
+        elif index == self._TAB_STRATEGY:
+            self._strategy_dashboard.update_from_state()
+            self._strategy_dashboard.update()
 
     def _sync_left_to_chart(self, pos, idx):
         """Mirror the chart_stack split position to the left column."""
@@ -1152,6 +1209,7 @@ class MainWindow(QMainWindow):
         duration_ms = self._candle_combo.currentData()
         self._candle_duration_ms = duration_ms
         self._heatmap.set_bucket_duration_ms(duration_ms)
+        self._market_state.bucket_duration_ms = duration_ms
         if self._engine:
             self._engine.get_volume_profile().set_window(duration_ms)
         vp_idx = self._vp_window_combo.findData(duration_ms)
@@ -1278,8 +1336,37 @@ class MainWindow(QMainWindow):
             )
         logger.info("Strategy state: %s -> %s", old.value, new_state.value)
 
+    def _snap_metadata(self):
+        """Extract tide_bias and wave_regime from the last cached snapshot."""
+        snap = self._last_strategy_snap
+        if snap is None:
+            return "", ""
+        try:
+            tide_bias = str(getattr(
+                getattr(snap, "tide", None), "bias", "")).split(".")[-1]
+        except Exception:
+            tide_bias = ""
+        try:
+            wave_regime = str(getattr(
+                getattr(snap, "wave", None), "regime", "")).split(".")[-1]
+        except Exception:
+            wave_regime = ""
+        return tide_bias, wave_regime
+
+    def _broadcast_entry(self, entry: SignalEntry):
+        """Send a signal entry to both the Order Flow blotter and Strategy
+        Dashboard blotter, plus persist to the strategy store."""
+        self._blotter.add_entry(entry)
+        self._strategy_dashboard.blotter.add_entry(entry)
+        if self._strategy_store:
+            try:
+                self._strategy_store.write_signal(entry)
+            except Exception as e:
+                logger.error("Strategy store signal write error: %s", e)
+
     def _emit_strategy_signal(self, category: SignalCategory, description: str):
         now_ms = int(time.time() * 1000)
+        tide_bias, wave_regime = self._snap_metadata()
         entry = SignalEntry(
             timestamp=now_ms,
             signal_type=category.value,
@@ -1287,13 +1374,10 @@ class MainWindow(QMainWindow):
             category=category,
             description=description,
             lifecycle_state=self._strategy_ui_state.value,
+            tide_bias=tide_bias,
+            wave_regime=wave_regime,
         )
-        self._blotter.add_entry(entry)
-        if self._strategy_store:
-            try:
-                self._strategy_store.write_signal(entry)
-            except Exception as e:
-                logger.error("Strategy store signal write error: %s", e)
+        self._broadcast_entry(entry)
 
     _ARM_STYLE_ARMED = (
         "QPushButton { background-color: #5f1e1e; color: #ff8888; "
@@ -1442,11 +1526,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Always log to blotter (pass pre-parsed intent_name)
         entry = ripple_decision_to_entry(decision, state_name,
                                          intent_name=intent_name)
         if entry:
-            self._blotter.add_entry(entry)
+            tide_bias, wave_regime = self._snap_metadata()
+            entry.tide_bias = tide_bias
+            entry.wave_regime = wave_regime
+            entry.lifecycle_state = self._strategy_ui_state.value
+            self._broadcast_entry(entry)
 
         # Record emission
         self._ripple_cooldown.record(
@@ -1479,6 +1566,12 @@ class MainWindow(QMainWindow):
             f"{status} qty={order.fill_quantity:.6f}"
             + (f" | {order.ripple_reason}" if order.ripple_reason else "")
         )
+        self._strategy_dashboard.blotter.add_signal(
+            int(order.timestamp * 1000), f"EXEC_{side}",
+            order.fill_price, 1.0,
+            f"{status} qty={order.fill_quantity:.6f}"
+            + (f" | {order.ripple_reason}" if order.ripple_reason else "")
+        )
         self._account_panel.add_order(order)
 
     def _on_signal_received(self, signal):
@@ -1492,6 +1585,10 @@ class MainWindow(QMainWindow):
                 fill_price = p
 
         self._blotter.add_signal(
+            signal.timestamp, signal.type_name(),
+            fill_price, signal.strength, signal.description
+        )
+        self._strategy_dashboard.blotter.add_signal(
             signal.timestamp, signal.type_name(),
             fill_price, signal.strength, signal.description
         )
@@ -1577,8 +1674,8 @@ class MainWindow(QMainWindow):
             ob = self._engine.get_order_book()
             snap = ob.get_snapshot()
 
-            bids = snap.get_bids()[:1000]
-            asks = snap.get_asks()[:1000]
+            bids = snap.get_bids()[:200]
+            asks = snap.get_asks()[:200]
             best_bid = snap.best_bid
             best_ask = snap.best_ask
             snap_ts = snap.timestamp
@@ -1714,6 +1811,7 @@ class MainWindow(QMainWindow):
                 self._strat_tick_counter = 0
                 if self._engine and hasattr(self._engine, 'get_strategy_snapshot'):
                     snap = self._engine.get_strategy_snapshot()
+                    self._last_strategy_snap = snap
                     self._strategy_panel.update_snapshot(snap)
                     self._update_strategy_state_from_snapshot(snap)
                     self._update_heatmap_overlay_from_snapshot(snap)
@@ -1731,6 +1829,9 @@ class MainWindow(QMainWindow):
                 self._account_panel.update_account(
                     acct.balance, acct.available_balance, acct.positions
                 )
+                self._strategy_dashboard.account_panel.update_account(
+                    acct.balance, acct.available_balance, acct.positions
+                )
                 if self._exec_manager.armed:
                     side = self._exec_manager.current_side
                     qty = self._exec_manager.current_qty
@@ -1740,8 +1841,24 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("Exec manager update error: %s", e)
 
-        # --- Phase 7: repaint + timing (always runs) ----------------------
-        self._heatmap.update()
+        # --- Phase 7: sync MarketState + repaint active tab ----------------
+        ms = self._market_state
+        ms.chart_now = self._heatmap.chart_now
+        ms.visible_window_ms = self._heatmap._visible_window_ms
+        ms.bucket_duration_ms = self._heatmap._bucket_duration_ms
+        ms.best_bid = self._last_valid_bid
+        ms.best_ask = self._last_valid_ask
+        ms.strategy_snapshot = self._last_strategy_snap
+        ms.strategy_ui_state = self._strategy_ui_state
+
+        active_tab = self._tab_widget.currentIndex()
+        if active_tab == self._TAB_ORDER_FLOW:
+            self._heatmap.update()
+        elif active_tab == self._TAB_CANDLE:
+            self._candle_view.update()
+        elif active_tab == self._TAB_STRATEGY:
+            self._strategy_dashboard.update_from_state()
+            self._strategy_dashboard.update()
 
         elapsed = (time.monotonic() - t0) * 1000.0
         self._health.record_tick(elapsed)

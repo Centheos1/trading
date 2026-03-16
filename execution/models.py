@@ -55,12 +55,15 @@ class StrategyUIState(Enum):
 
 
 class SignalCategory(Enum):
+    TIDE = "TIDE"
+    WAVE = "WAVE"
     CONTEXT = "CONTEXT"
     RIPPLE_PREPARE = "RIPPLE_PREPARE"
     RIPPLE_ENTRY = "RIPPLE_ENTRY"
     RIPPLE_EXIT = "RIPPLE_EXIT"
     RIPPLE_CANCEL = "RIPPLE_CANCEL"
     RIPPLE_REARM = "RIPPLE_REARM"
+    TRADE_LIFECYCLE = "TRADE_LIFECYCLE"
     LEGACY_RAW = "LEGACY_RAW"
     EXECUTION = "EXECUTION"
     DIAGNOSTIC = "DIAGNOSTIC"
@@ -80,16 +83,34 @@ class SuppressionReason(Enum):
 
 # Maps C++ RippleIntent name → (SignalCategory, display_name, is_buy_side)
 _RIPPLE_INTENT_MAP = {
-    "PREPARE_BOUNCE_LONG":   (SignalCategory.RIPPLE_PREPARE, "RIPPLE_PREPARE_BOUNCE_LONG",  True),
-    "PREPARE_BOUNCE_SHORT":  (SignalCategory.RIPPLE_PREPARE, "RIPPLE_PREPARE_BOUNCE_SHORT", False),
-    "ENTER_BOUNCE_LONG":     (SignalCategory.RIPPLE_ENTRY,   "RIPPLE_ENTER_BOUNCE_LONG",    True),
-    "ENTER_BOUNCE_SHORT":    (SignalCategory.RIPPLE_ENTRY,   "RIPPLE_ENTER_BOUNCE_SHORT",   False),
-    "ENTER_BREAKOUT_LONG":   (SignalCategory.RIPPLE_ENTRY,   "RIPPLE_ENTER_BREAKOUT_LONG",  True),
-    "ENTER_BREAKOUT_SHORT":  (SignalCategory.RIPPLE_ENTRY,   "RIPPLE_ENTER_BREAKOUT_SHORT", False),
-    "EXIT_BOUNCE":           (SignalCategory.RIPPLE_EXIT,    "RIPPLE_EXIT_BOUNCE",          None),
-    "EXIT_BREAKOUT":         (SignalCategory.RIPPLE_EXIT,    "RIPPLE_EXIT_BREAKOUT",        None),
-    "REARM_FOR_NEXT_BOUNCE": (SignalCategory.RIPPLE_REARM,   "RIPPLE_REARM",                None),
-    "CANCEL_PASSIVE_ORDERS": (SignalCategory.RIPPLE_CANCEL,  "RIPPLE_CANCEL_PASSIVE",       None),
+    "PREPARE_BOUNCE_LONG":   (SignalCategory.RIPPLE_PREPARE,   "RIPPLE_PREPARE_BOUNCE_LONG",  True),
+    "PREPARE_BOUNCE_SHORT":  (SignalCategory.RIPPLE_PREPARE,   "RIPPLE_PREPARE_BOUNCE_SHORT", False),
+    "ENTER_BOUNCE_LONG":     (SignalCategory.TRADE_LIFECYCLE,  "ENTRY_BOUNCE_LONG",           True),
+    "ENTER_BOUNCE_SHORT":    (SignalCategory.TRADE_LIFECYCLE,  "ENTRY_BOUNCE_SHORT",          False),
+    "ENTER_BREAKOUT_LONG":   (SignalCategory.TRADE_LIFECYCLE,  "ENTRY_BREAKOUT_LONG",         True),
+    "ENTER_BREAKOUT_SHORT":  (SignalCategory.TRADE_LIFECYCLE,  "ENTRY_BREAKOUT_SHORT",        False),
+    "EXIT_BOUNCE":           (SignalCategory.TRADE_LIFECYCLE,  "EXIT_BOUNCE",                 None),
+    "EXIT_BREAKOUT":         (SignalCategory.TRADE_LIFECYCLE,  "EXIT_BREAKOUT",               None),
+    "REARM_FOR_NEXT_BOUNCE": (SignalCategory.RIPPLE_REARM,     "RIPPLE_REARM",                None),
+    "CANCEL_PASSIVE_ORDERS": (SignalCategory.RIPPLE_CANCEL,    "RIPPLE_CANCEL_PASSIVE",       None),
+}
+
+_CATEGORY_LAYER_MAP = {
+    SignalCategory.TIDE:                 "TIDE",
+    SignalCategory.WAVE:                 "WAVE",
+    SignalCategory.RIPPLE_PREPARE:       "RIPPLE",
+    SignalCategory.RIPPLE_ENTRY:         "RIPPLE",
+    SignalCategory.RIPPLE_EXIT:          "RIPPLE",
+    SignalCategory.RIPPLE_CANCEL:        "RIPPLE",
+    SignalCategory.RIPPLE_REARM:         "RIPPLE",
+    SignalCategory.TRADE_LIFECYCLE:      "TRADE",
+    SignalCategory.EXECUTION:            "EXEC",
+    SignalCategory.STRATEGY_ARM:         "STRATEGY",
+    SignalCategory.STRATEGY_DISARM:      "STRATEGY",
+    SignalCategory.STRATEGY_STATE_CHANGE: "STRATEGY",
+    SignalCategory.LEGACY_RAW:           "RAW",
+    SignalCategory.CONTEXT:              "CONTEXT",
+    SignalCategory.DIAGNOSTIC:           "DIAG",
 }
 
 
@@ -216,10 +237,8 @@ def ripple_decision_to_intent(decision, state_name: str = "",
     if mapping is None:
         return None
     cat, _, is_buy = mapping
-    if cat == SignalCategory.RIPPLE_ENTRY:
-        intent_type = "entry"
-    elif cat == SignalCategory.RIPPLE_EXIT:
-        intent_type = "exit"
+    if cat in (SignalCategory.RIPPLE_ENTRY, SignalCategory.TRADE_LIFECYCLE):
+        intent_type = "exit" if intent_name.startswith("EXIT_") else "entry"
     elif cat == SignalCategory.RIPPLE_CANCEL:
         intent_type = "cancel"
     elif cat == SignalCategory.RIPPLE_REARM:
