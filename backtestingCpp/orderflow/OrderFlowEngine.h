@@ -63,6 +63,8 @@ public:
     ripple::RippleEngine& get_ripple() { return ripple_; }
     const ripple::RippleEngine& get_ripple() const { return ripple_; }
 
+    StrategySnapshot get_strategy_snapshot() const;
+
     void reset_ripple();
 
     void process_trade(const Trade& trade);

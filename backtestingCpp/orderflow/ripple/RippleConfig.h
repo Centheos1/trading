@@ -188,6 +188,13 @@ struct RippleConfig {
     bool        console_diagnostics      = false;  // compact per-event stdout log
     std::string diagnostics_path;                   // JSONL file path (empty = memory only)
     bool        replay_mode              = false;
+
+    // ---- paper fills (Phase 6) ----
+    bool        paper_fills              = false;   // auto-fill entries and exits in backtest mode
+
+    // ---- HMM inference (Phase 7) ----
+    bool        hmm_enabled              = false;   // use HMMBasedInference instead of ScoreBasedInference
+    std::string hmm_model_path;                     // JSON file with trained HMM parameters
 };
 
 } // namespace orderflow::ripple

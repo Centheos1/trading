@@ -22,6 +22,9 @@ void TradeLifecycleEngine::reset() {
     scale_out_idx_          = 0;
     scale_out_pending_      = false;
     pending_intent_     = {};
+    cumulative_pnl_     = 0.0;
+    peak_equity_        = 0.0;
+    max_drawdown_       = 0.0;
 }
 
 double TradeLifecycleEngine::side_sign() const {
@@ -304,6 +307,13 @@ void TradeLifecycleEngine::transition_to(LifecycleState new_state, int64_t times
 
 void TradeLifecycleEngine::begin_exit(ExitType type, int64_t timestamp) {
     if (state_ == LifecycleState::EXIT) return;
+
+    double trade_pnl = side_sign() * (last_microprice_ - entry_price_) * quantity_;
+    cumulative_pnl_ += trade_pnl;
+    peak_equity_ = std::max(peak_equity_, cumulative_pnl_);
+    double dd = peak_equity_ - cumulative_pnl_;
+    max_drawdown_ = std::max(max_drawdown_, dd);
+
     last_exit_type_ = type;
     transition_to(LifecycleState::EXIT, timestamp);
     emit_exit_intent(type, timestamp);

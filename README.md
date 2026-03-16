@@ -1,5 +1,8 @@
 # Trading App - Backtesting & Order Flow Engine
 
+#### Activate Virtual Environment
+source ./.venv/bin/activate
+
 A multi-strategy backtesting and optimisation platform with a C++ order flow engine and Bookmap-style UI.
 
 ---
@@ -7,7 +10,7 @@ A multi-strategy backtesting and optimisation platform with a C++ order flow eng
 ## Prerequisites
 
 - **macOS** (tested on Apple Silicon)
-- **Python 3.9+** with a virtual environment at `.venv/`
+- **Python 3.12+** with a virtual environment at `.venv/`
 - **Homebrew** packages: `boost`, `hdf5`, `openssl`, `cmake`, `nlohmann-json`, `pybind11`
 - **pip** packages: see `requirements.txt`
 

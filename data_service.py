@@ -185,8 +185,8 @@ class DataCollector:
     @staticmethod
     def _generate_batches(from_timestamp_ms: int, to_timestamp_ms: int, max_minutes=5000) -> Tuple[int, int]:
         # Convert from and to milliseconds to datetime
-        from_date = datetime.utcfromtimestamp(from_timestamp_ms / 1000)
-        to_date = datetime.utcfromtimestamp(to_timestamp_ms / 1000)
+        from_date = datetime.fromtimestamp(from_timestamp_ms / 1000, tz=timezone.utc)
+        to_date = datetime.fromtimestamp(to_timestamp_ms / 1000, tz=timezone.utc)
 
         # Extend to end of day for 'to_date'
         to_date = to_date.replace(hour=23, minute=59, second=59)
@@ -379,8 +379,8 @@ class TickDataCollector:
     #         reversed: bool = False
     # ) -> Generator[Tuple[int, int], None, None]:
     #     # Convert from and to milliseconds to datetime
-    #     from_date = datetime.utcfromtimestamp(from_timestamp_ms / 1000)
-    #     to_date = datetime.utcfromtimestamp(to_timestamp_ms / 1000)
+    #     from_date = datetime.fromtimestamp(from_timestamp_ms / 1000, tz=timezone.utc)
+    #     to_date = datetime.fromtimestamp(to_timestamp_ms / 1000, tz=timezone.utc)
     #
     #     # Extend to end of day for 'to_date'
     #     to_date = to_date.replace(hour=23, minute=59, second=59)

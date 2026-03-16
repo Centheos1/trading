@@ -27,7 +27,7 @@ The strategy is built on these principles:
 
 ```mermaid
 flowchart TB
-    subgraph TIDE ["TIDE — Macro / Risk / Allocation"]
+    subgraph TIDE ["TIDE — Macro"]
         direction LR
         T1[Macro Bias]
         T2[Capital Allocation]
@@ -35,7 +35,7 @@ flowchart TB
         T4[Position Sizing Throttle]
     end
 
-    subgraph WAVE ["WAVE — Regime / Structure / Filter"]
+    subgraph WAVE ["WAVE — Regime Filter"]
         direction LR
         W1[Regime Classification]
         W2[Factor / PCA Models]
@@ -43,7 +43,7 @@ flowchart TB
         W4[Permission Matrix]
     end
 
-    subgraph RIPPLE ["RIPPLE — Execution / Microstructure"]
+    subgraph RIPPLE ["RIPPLE — Execution"]
         direction LR
         R1[Wall Detection]
         R2[Liquidity Map]
@@ -591,20 +591,17 @@ The system has **five states** (STABLE, ABSORPTION, EXHAUSTION, WITHDRAWAL, REFI
 ```mermaid
 stateDiagram-v2
     [*] --> STABLE
-    STABLE --> ABSORPTION : wall_holding AND aggressive_flow_high
-    STABLE --> EXHAUSTION : aggressive_flow_declining
-    STABLE --> WITHDRAWAL : wall_depth_drops_rapidly
-    ABSORPTION --> STABLE : aggressive_flow_subsides
-    ABSORPTION --> EXHAUSTION : wall_eroded AND flow_declining
-    ABSORPTION --> WITHDRAWAL : wall_pulled_during_absorption
-    ABSORPTION --> REFILL : wall_holds_and_new_depth_appears
-    EXHAUSTION --> STABLE : new_resting_liquidity_appears
-    EXHAUSTION --> REFILL : depth_rebuilds
-    EXHAUSTION --> WITHDRAWAL : remaining_depth_pulled
-    WITHDRAWAL --> STABLE : price_moves_through_and_stabilizes
-    WITHDRAWAL --> REFILL : depth_rebuilds_at_new_level
-    REFILL --> STABLE : sufficient_depth_restored
-    REFILL --> WITHDRAWAL : rebuilt_depth_pulled_again
+    STABLE --> ABSORPTION : sustained wall interaction
+    ABSORPTION --> EXHAUSTION : wall eroded
+    ABSORPTION --> WITHDRAWAL : wall pulled
+    EXHAUSTION --> WITHDRAWAL : remaining depth pulled
+    EXHAUSTION --> REFILL : depth rebuilds
+    WITHDRAWAL --> REFILL : new depth appears
+    REFILL --> STABLE : liquidity restored
+
+    ABSORPTION --> STABLE : pressure fades
+    EXHAUSTION --> STABLE : new resting liquidity
+    WITHDRAWAL --> STABLE : price stabilizes
 ```
 
 **Dwell behavior:** Each state has an implicit self-transition (state remains unchanged if no trigger fires). The `RippleStateTracker` in C++ deduplicates consecutive emissions of the same state and tracks dwell time.

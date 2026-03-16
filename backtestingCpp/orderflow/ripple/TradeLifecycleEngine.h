@@ -82,6 +82,9 @@ public:
     StrategyExecutionIntent consume_pending_intent();
 
     uint64_t completed_trades() const { return completed_trades_; }
+    double   cumulative_pnl()  const { return cumulative_pnl_; }
+    double   peak_equity()     const { return peak_equity_; }
+    double   max_drawdown_value() const { return max_drawdown_; }
 
     void reset();
 
@@ -164,6 +167,11 @@ private:
     ExitType last_exit_type_   = ExitType::INVALIDATION;
     uint64_t trade_counter_    = 0;
     uint64_t completed_trades_ = 0;
+
+    // PnL tracking (Phase 6)
+    double cumulative_pnl_ = 0.0;
+    double peak_equity_    = 0.0;
+    double max_drawdown_   = 0.0;
 };
 
 } // namespace orderflow::ripple

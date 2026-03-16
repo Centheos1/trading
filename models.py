@@ -1,5 +1,5 @@
 from typing import Dict, List, Union
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 
@@ -39,7 +39,7 @@ Order = {self.order}
         self.rank: int = 0
         self.crowding_distance: float = 0.0
         self.order: float = -float("inf")
-        self.written_at: str = datetime.utcnow().isoformat()
+        self.written_at: str = datetime.now(timezone.utc).isoformat()
 
     def reset_results(self):
         self.dominated_by = 0

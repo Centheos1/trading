@@ -25,15 +25,18 @@ from ui.volume_profile_widget import VolumeProfileWidget
 from ui.cvd_widget import CVDWidget
 from ui.trade_blotter import TradeBlotter
 from ui.account_panel import AccountPanel
+from ui.strategy_panel import StrategyDiagnosticsPanel
 from execution.models import (
-    ExecutionIntent, RippleMode, SignalCategory, SignalEntry,
-    SizingConfig, SizingMode, SuppressionReason,
+    RippleMode, SignalCategory, SignalEntry,
+    SizingConfig, SizingMode, StrategyMode, StrategyUIState,
+    SuppressionReason,
     ripple_decision_to_entry, ripple_decision_to_intent,
     _parse_intent_name,
 )
 from execution.binance_broker import BinanceBroker
 from execution.execution_manager import ExecutionManager
 from execution.paper_engine import PaperEngine
+from strategy_store import StrategyStore
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +331,7 @@ class MainWindow(QMainWindow):
         self._trades_received_ws = 0
         self._trades_dropped_in_drain = 0
         self._last_drained_trade_ts = 0
+        self._latest_ws_trade_ts = 0
         self._new_signal.connect(self._on_signal_received)
         self._new_order.connect(self._on_order_received)
         self._new_ripple.connect(self._on_ripple_received)
@@ -335,6 +339,11 @@ class MainWindow(QMainWindow):
         self._ripple_mode = RippleMode.LOG_ONLY
         self._ripple_cooldown = _RippleCooldown()
         self._ripple_metrics = _SuppressionMetrics()
+
+        self._strategy_mode = StrategyMode.OBSERVE
+        self._strategy_ui_state = StrategyUIState.DISARMED
+        self._prev_strategy_ui_state = StrategyUIState.DISARMED
+        self._strategy_store: Optional[StrategyStore] = None
         self._ripple_min_confidence = 0.0
         self._health = _HealthSnapshot()
 
@@ -358,7 +367,7 @@ class MainWindow(QMainWindow):
         self._recent_trade_keys: deque = deque(maxlen=200)
 
         self._settings = QSettings("OrderFlowTrading", "MainWindow")
-        self._load_ripple_settings()
+        self._load_strategy_settings()
 
         self._setup_ui()
         self._setup_toolbar()
@@ -369,17 +378,35 @@ class MainWindow(QMainWindow):
     # Settings persistence
     # ------------------------------------------------------------------
 
-    def _load_ripple_settings(self):
-        mode_str = self._settings.value("ripple/mode", "log_only")
-        try:
-            self._ripple_mode = RippleMode(mode_str)
-        except ValueError:
-            self._ripple_mode = RippleMode.LOG_ONLY
+    _RIPPLE_TO_STRATEGY = {
+        "log_only": StrategyMode.OBSERVE,
+        "paper": StrategyMode.PAPER,
+        "disabled": StrategyMode.OBSERVE,
+    }
+
+    def _load_strategy_settings(self):
+        mode_str = self._settings.value("strategy/mode", "")
+        if mode_str:
+            try:
+                self._strategy_mode = StrategyMode(mode_str)
+            except ValueError:
+                self._strategy_mode = StrategyMode.OBSERVE
+        else:
+            old = self._settings.value("ripple/mode", "log_only")
+            self._strategy_mode = self._RIPPLE_TO_STRATEGY.get(
+                old, StrategyMode.OBSERVE)
+
+        self._ripple_mode = {
+            StrategyMode.OBSERVE: RippleMode.LOG_ONLY,
+            StrategyMode.PAPER: RippleMode.PAPER,
+            StrategyMode.LIVE: RippleMode.LOG_ONLY,
+        }.get(self._strategy_mode, RippleMode.LOG_ONLY)
+
         self._ripple_min_confidence = float(
             self._settings.value("ripple/min_confidence", 0.0))
 
-    def _save_ripple_settings(self):
-        self._settings.setValue("ripple/mode", self._ripple_mode.value)
+    def _save_strategy_settings(self):
+        self._settings.setValue("strategy/mode", self._strategy_mode.value)
         self._settings.setValue("ripple/min_confidence",
                                 self._ripple_min_confidence)
 
@@ -398,10 +425,13 @@ class MainWindow(QMainWindow):
 
         top_splitter = QSplitter(Qt.Horizontal)
 
-        # --- Left column: VP aligned to heatmap + status panel below ----
+        # --- Left column: VP aligned to heatmap + status below ----------
+        # Must have exactly 2 widgets to match _chart_stack's 2 widgets
+        # so splitter height sync keeps VP and heatmap vertically aligned.
         self._left_col = QSplitter(Qt.Vertical)
         self._volume_profile = VolumeProfileWidget()
         self._status_panel = _StatusPanel()
+        self._strategy_panel = StrategyDiagnosticsPanel()
         self._left_col.addWidget(self._volume_profile)
         self._left_col.addWidget(self._status_panel)
         self._left_col.setStretchFactor(0, 3)
@@ -430,9 +460,17 @@ class MainWindow(QMainWindow):
         bottom_splitter = QSplitter(Qt.Horizontal)
         self._blotter = TradeBlotter()
         self._account_panel = AccountPanel()
+
+        bottom_right = QSplitter(Qt.Vertical)
+        bottom_right.addWidget(self._strategy_panel)
+        bottom_right.addWidget(self._account_panel)
+        bottom_right.setStretchFactor(0, 1)
+        bottom_right.setStretchFactor(1, 1)
+        bottom_right.setChildrenCollapsible(False)
+
         bottom_splitter.addWidget(self._blotter)
-        bottom_splitter.addWidget(self._account_panel)
-        bottom_splitter.setStretchFactor(0, 1)
+        bottom_splitter.addWidget(bottom_right)
+        bottom_splitter.setStretchFactor(0, 3)
         bottom_splitter.setStretchFactor(1, 1)
 
         main_splitter.addWidget(top_splitter)
@@ -477,8 +515,12 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(QLabel(" Mode: "))
         self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["Live", "Replay"])
+        self._mode_combo.addItem("Live")
+        self._mode_combo.addItem("Replay")
         self._mode_combo.setMaximumWidth(100)
+        replay_item = self._mode_combo.model().item(1)
+        replay_item.setEnabled(False)
+        replay_item.setToolTip("Coming soon")
         toolbar.addWidget(self._mode_combo)
 
         toolbar.addSeparator()
@@ -523,19 +565,26 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel(" Tick Size: "))
+        self._tick_size_label = QLabel(" Tick Size: ")
+        self._tick_size_label.setVisible(False)
+        toolbar.addWidget(self._tick_size_label)
         self._tick_size_input = QLineEdit("0.01")
         self._tick_size_input.setMaximumWidth(80)
+        self._tick_size_input.setVisible(False)
         toolbar.addWidget(self._tick_size_input)
 
-        toolbar.addWidget(QLabel(" Imbalance: "))
+        self._imbalance_label = QLabel(" Imbalance: ")
+        self._imbalance_label.setVisible(False)
+        toolbar.addWidget(self._imbalance_label)
         self._imbalance_input = QLineEdit("3.0")
         self._imbalance_input.setMaximumWidth(60)
+        self._imbalance_input.setVisible(False)
         toolbar.addWidget(self._imbalance_input)
 
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel(" Sizing: "))
+        self._sizing_label = QLabel(" Sizing: ")
+        toolbar.addWidget(self._sizing_label)
         self._sizing_mode_combo = QComboBox()
         self._sizing_mode_combo.addItem("Fixed Qty", SizingMode.FIXED_QTY.value)
         self._sizing_mode_combo.addItem("Fixed $", SizingMode.FIXED_NOTIONAL.value)
@@ -548,31 +597,30 @@ class MainWindow(QMainWindow):
         self._sizing_value_input.setMaximumWidth(70)
         toolbar.addWidget(self._sizing_value_input)
 
-        self._arm_btn = QPushButton("Arm Execution")
-        self._arm_btn.setEnabled(False)
-        self._arm_btn.clicked.connect(self._on_arm_toggle)
-        toolbar.addWidget(self._arm_btn)
+        self._update_sizing_enabled()
 
         toolbar.addSeparator()
 
-        # --- Ripple controls ---
-        toolbar.addWidget(QLabel(" Ripple: "))
-        self._ripple_mode_combo = QComboBox()
-        self._ripple_mode_combo.addItem("Disabled", RippleMode.DISABLED.value)
-        self._ripple_mode_combo.addItem("Log Only", RippleMode.LOG_ONLY.value)
-        self._ripple_mode_combo.addItem("Paper", RippleMode.PAPER.value)
-        self._ripple_mode_combo.setMaximumWidth(100)
-        idx = self._ripple_mode_combo.findData(self._ripple_mode.value)
+        # --- Unified strategy controls (Phase 2) ---
+        toolbar.addWidget(QLabel(" Strategy: "))
+        self._strategy_mode_combo = QComboBox()
+        self._strategy_mode_combo.addItem("Observe", StrategyMode.OBSERVE.value)
+        self._strategy_mode_combo.addItem("Paper", StrategyMode.PAPER.value)
+        self._strategy_mode_combo.addItem("Live", StrategyMode.LIVE.value)
+        self._strategy_mode_combo.setMaximumWidth(100)
+        idx = self._strategy_mode_combo.findData(self._strategy_mode.value)
         if idx >= 0:
-            self._ripple_mode_combo.setCurrentIndex(idx)
-        self._ripple_mode_combo.currentIndexChanged.connect(
-            self._on_ripple_mode_changed)
-        toolbar.addWidget(self._ripple_mode_combo)
+            self._strategy_mode_combo.setCurrentIndex(idx)
+        self._strategy_mode_combo.currentIndexChanged.connect(
+            self._on_strategy_mode_changed)
+        toolbar.addWidget(self._strategy_mode_combo)
 
-        self._ripple_status_label = QLabel("")
-        self._ripple_status_label.setStyleSheet(
-            "color: #6a6a8a; font-size: 10px; padding-left: 4px;")
-        toolbar.addWidget(self._ripple_status_label)
+        self._arm_btn = QPushButton("ARM")
+        self._arm_btn.setEnabled(False)
+        self._arm_btn.setMinimumWidth(80)
+        self._arm_btn.clicked.connect(self._on_strategy_arm_toggle)
+        self._update_arm_button_style()
+        toolbar.addWidget(self._arm_btn)
 
     def _setup_statusbar(self):
         self._status_bar = QStatusBar()
@@ -589,6 +637,10 @@ class MainWindow(QMainWindow):
         self._status_bar.addPermanentWidget(self._trades_label)
         self._signals_label = QLabel("Signals: 0")
         self._status_bar.addPermanentWidget(self._signals_label)
+        self._strategy_state_label = QLabel("Strategy: OFF")
+        self._strategy_state_label.setStyleSheet(
+            "font-family: Menlo; font-size: 10px; padding: 0 6px; color: #6a6a8a;")
+        self._status_bar.addPermanentWidget(self._strategy_state_label)
         self._ripple_label = QLabel("")
         self._status_bar.addPermanentWidget(self._ripple_label)
         self._exec_label = QLabel("")
@@ -716,15 +768,25 @@ class MainWindow(QMainWindow):
 
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
-        self._arm_btn.setEnabled(True)
+        self._update_arm_button_style()
         self._status_label.setText(f"Connected: {symbol}")
         self._update_timer.start(self._update_interval_ms)
+
+        try:
+            self._strategy_store = StrategyStore(symbol)
+            self._strategy_store.write_event(
+                int(time.time() * 1000), "CONNECT",
+                {"symbol": symbol, "mode": mode})
+        except Exception as e:
+            logger.error("Failed to open strategy store: %s", e)
+            self._strategy_store = None
 
     def _fetch_depth_snapshot(self, symbol: str):
         try:
             resp = requests.get(
                 "https://fapi.binance.com/fapi/v1/depth",
                 params={"symbol": symbol, "limit": 1000}, timeout=10)
+            
             resp.raise_for_status()
             j = resp.json()
 
@@ -820,6 +882,8 @@ class MainWindow(QMainWindow):
                             t.is_buyer_maker = is_buyer_maker
                             self._engine.process_trade(t)
                             self._trades_received_ws += 1
+                            if ts > self._latest_ws_trade_ts:
+                                self._latest_ws_trade_ts = ts
                             self._trade_buffer.append(
                                 (ts, price, qty, not is_buyer_maker))
                             h.on_message(ts)
@@ -1029,15 +1093,17 @@ class MainWindow(QMainWindow):
             self._depth_feed_health.on_disconnect("loop exited")
 
     def _on_disconnect(self):
+        if self._strategy_ui_state != StrategyUIState.DISARMED:
+            self._disarm_strategy()
+
         if self._exec_manager:
             self._exec_manager.stop()
             self._exec_manager = None
-            self._arm_btn.setText("Arm Execution")
-            self._arm_btn.setEnabled(False)
             self._exec_label.setText("")
             self._account_panel.clear()
 
         self._paper_engine = None
+        self._update_arm_button_style()
 
         if hasattr(self, '_ws_stop_event') and self._ws_stop_event is not None:
             self._ws_stop_event.set()
@@ -1052,10 +1118,20 @@ class MainWindow(QMainWindow):
         self._trades_received_ws = 0
         self._trades_dropped_in_drain = 0
         self._last_drained_trade_ts = 0
+        self._latest_ws_trade_ts = 0
         self._book_empty_ticks = 0
         self._book_crossed_ticks = 0
         self._book_resync_count = 0
         self._book_resync_pending = False
+
+        if self._strategy_store:
+            try:
+                self._strategy_store.write_event(
+                    int(time.time() * 1000), "DISCONNECT")
+                self._strategy_store.close()
+            except Exception as e:
+                logger.error("Strategy store close error: %s", e)
+            self._strategy_store = None
 
         self._engine = None
         self._update_timer.stop()
@@ -1075,6 +1151,7 @@ class MainWindow(QMainWindow):
     def _on_candle_changed(self, _index):
         duration_ms = self._candle_combo.currentData()
         self._candle_duration_ms = duration_ms
+        self._heatmap.set_bucket_duration_ms(duration_ms)
         if self._engine:
             self._engine.get_volume_profile().set_window(duration_ms)
         vp_idx = self._vp_window_combo.findData(duration_ms)
@@ -1083,49 +1160,231 @@ class MainWindow(QMainWindow):
             self._vp_window_combo.setCurrentIndex(vp_idx)
             self._vp_window_combo.blockSignals(False)
 
-    def _on_ripple_mode_changed(self, _index):
-        mode_str = self._ripple_mode_combo.currentData()
-        try:
-            self._ripple_mode = RippleMode(mode_str)
-        except ValueError:
-            self._ripple_mode = RippleMode.DISABLED
-        self._save_ripple_settings()
-        logger.info("Ripple mode changed to %s", self._ripple_mode.value)
+    # ------------------------------------------------------------------
+    # Strategy state machine (Phase 2)
+    # ------------------------------------------------------------------
 
-    def _on_arm_toggle(self):
+    def _on_strategy_mode_changed(self, _index):
+        mode_str = self._strategy_mode_combo.currentData()
+        try:
+            self._strategy_mode = StrategyMode(mode_str)
+        except ValueError:
+            self._strategy_mode = StrategyMode.OBSERVE
+
+        self._ripple_mode = {
+            StrategyMode.OBSERVE: RippleMode.LOG_ONLY,
+            StrategyMode.PAPER: RippleMode.PAPER,
+            StrategyMode.LIVE: RippleMode.LOG_ONLY,
+        }.get(self._strategy_mode, RippleMode.LOG_ONLY)
+
+        self._save_strategy_settings()
+        logger.info("Strategy mode changed to %s", self._strategy_mode.value)
+
+    def _on_strategy_arm_toggle(self):
+        if self._strategy_ui_state == StrategyUIState.DISARMED:
+            self._arm_strategy()
+        elif self._strategy_ui_state.value.startswith("armed"):
+            self._disarm_strategy()
+
+    def _arm_strategy(self):
+        if not self._engine:
+            self._arm_btn.setToolTip("Connect to a feed first")
+            return
+
+        self._set_strategy_state(StrategyUIState.ARMING)
+
+        if self._strategy_mode == StrategyMode.LIVE:
+            symbol = self._symbol_input.text().strip().upper()
+            if not symbol:
+                self._set_strategy_state(StrategyUIState.DISARMED)
+                return
+            sizing = self._build_sizing_config()
+            broker = BinanceBroker()
+            self._exec_manager = ExecutionManager(
+                broker=broker,
+                symbol=symbol,
+                sizing=sizing,
+                cooldown_s=5.0,
+                order_callback=lambda o: self._new_order.emit(o),
+            )
+            ok = self._exec_manager.start()
+            if not ok:
+                QMessageBox.warning(self, "Broker Error",
+                                    "Could not connect to Binance.\n"
+                                    "Check API keys in .env file.")
+                self._exec_manager = None
+                self._set_strategy_state(StrategyUIState.DISARMED)
+                return
+            self._exec_manager.arm()
+            acct = self._exec_manager.account
+            self._exec_label.setText(f"ARMED | Bal: {acct.balance:.2f} USDT")
+
+        self._set_strategy_state(StrategyUIState.ARMED_WAITING)
+        self._emit_strategy_signal(
+            SignalCategory.STRATEGY_ARM,
+            f"Strategy armed in {self._strategy_mode.value} mode",
+        )
+        if self._strategy_store:
+            try:
+                self._strategy_store.write_event(
+                    int(time.time() * 1000), "ARM",
+                    {"mode": self._strategy_mode.value})
+            except Exception as e:
+                logger.error("Strategy store ARM event error: %s", e)
+
+    def _disarm_strategy(self):
+        had_active = self._strategy_ui_state in (
+            StrategyUIState.ARMED_ACTIVE, StrategyUIState.ARMED_EXITING)
+
+        if had_active:
+            self._set_strategy_state(StrategyUIState.DISARMING)
+
         if self._exec_manager and self._exec_manager.armed:
             self._exec_manager.disarm(close_position=True)
-            self._arm_btn.setText("Arm Execution")
             self._exec_label.setText("Disarmed")
-            return
 
-        symbol = self._symbol_input.text().strip().upper()
-        if not symbol:
-            return
+        if self._paper_engine:
+            self._paper_engine.reset()
 
-        sizing = self._build_sizing_config()
-        broker = BinanceBroker()
-        self._exec_manager = ExecutionManager(
-            broker=broker,
-            symbol=symbol,
-            sizing=sizing,
-            cooldown_s=5.0,
-            order_callback=lambda o: self._new_order.emit(o),
+        self._heatmap.clear_strategy_overlay()
+        self._set_strategy_state(StrategyUIState.DISARMED)
+        self._emit_strategy_signal(
+            SignalCategory.STRATEGY_DISARM,
+            f"Strategy disarmed (was {'active' if had_active else 'waiting'})",
         )
-        ok = self._exec_manager.start()
-        if not ok:
-            QMessageBox.warning(self, "Broker Error",
-                                "Could not connect to Binance.\n"
-                                "Check API keys in .env file.")
-            self._exec_manager = None
+        if self._strategy_store:
+            try:
+                self._strategy_store.write_event(
+                    int(time.time() * 1000), "DISARM",
+                    {"was_active": had_active})
+            except Exception as e:
+                logger.error("Strategy store DISARM event error: %s", e)
+
+    def _set_strategy_state(self, new_state: StrategyUIState):
+        old = self._strategy_ui_state
+        if new_state == old:
+            return
+        self._prev_strategy_ui_state = old
+        self._strategy_ui_state = new_state
+        self._update_arm_button_style()
+        self._strategy_panel.set_strategy_state(new_state)
+        self._update_strategy_status_bar()
+
+        if (old.value.startswith("armed") and new_state.value.startswith("armed")
+                and old != new_state):
+            self._emit_strategy_signal(
+                SignalCategory.STRATEGY_STATE_CHANGE,
+                f"State: {old.value} \u2192 {new_state.value}",
+            )
+        logger.info("Strategy state: %s -> %s", old.value, new_state.value)
+
+    def _emit_strategy_signal(self, category: SignalCategory, description: str):
+        now_ms = int(time.time() * 1000)
+        entry = SignalEntry(
+            timestamp=now_ms,
+            signal_type=category.value,
+            source="strategy",
+            category=category,
+            description=description,
+            lifecycle_state=self._strategy_ui_state.value,
+        )
+        self._blotter.add_entry(entry)
+        if self._strategy_store:
+            try:
+                self._strategy_store.write_signal(entry)
+            except Exception as e:
+                logger.error("Strategy store signal write error: %s", e)
+
+    _ARM_STYLE_ARMED = (
+        "QPushButton { background-color: #5f1e1e; color: #ff8888; "
+        "border: 1px solid #992222; padding: 5px 15px; font-family: Menlo; font-weight: bold; } "
+        "QPushButton:hover { background-color: #7f2a2a; }")
+    _ARM_STYLE_DISARMED = (
+        "QPushButton { background-color: #1e3f1e; color: #88ff88; "
+        "border: 1px solid #229922; padding: 5px 15px; font-family: Menlo; font-weight: bold; } "
+        "QPushButton:hover { background-color: #2a5f2a; }")
+    _ARM_STYLE_TRANSITION = (
+        "QPushButton { background-color: #3f3f1e; color: #ffff88; "
+        "border: 1px solid #999922; padding: 5px 15px; font-family: Menlo; } "
+        "QPushButton:disabled { background-color: #2a2a1e; color: #888866; }")
+
+    def _update_arm_button_style(self):
+        s = self._strategy_ui_state
+        if s == StrategyUIState.DISARMED:
+            self._arm_btn.setText("ARM")
+            self._arm_btn.setStyleSheet(self._ARM_STYLE_DISARMED)
+            self._arm_btn.setEnabled(self._engine is not None)
+        elif s in (StrategyUIState.ARMING, StrategyUIState.DISARMING):
+            self._arm_btn.setText("\u2026")
+            self._arm_btn.setStyleSheet(self._ARM_STYLE_TRANSITION)
+            self._arm_btn.setEnabled(False)
+        else:
+            self._arm_btn.setText("DISARM")
+            self._arm_btn.setStyleSheet(self._ARM_STYLE_ARMED)
+            self._arm_btn.setEnabled(True)
+        self._update_sizing_enabled()
+
+    def _update_sizing_enabled(self):
+        armed = self._strategy_ui_state.value.startswith("armed")
+        self._sizing_mode_combo.setEnabled(armed)
+        self._sizing_value_input.setEnabled(armed)
+
+    def _update_strategy_status_bar(self):
+        s = self._strategy_ui_state
+        state_labels = {
+            StrategyUIState.DISARMED:       ("OFF",       "#6a6a8a"),
+            StrategyUIState.ARMING:         ("ARMING",    "#ffaa00"),
+            StrategyUIState.ARMED_WAITING:  ("WATCHING",  "#00cc66"),
+            StrategyUIState.ARMED_ACTIVE:   ("ACTIVE",    "#22ff44"),
+            StrategyUIState.ARMED_EXITING:  ("EXITING",   "#ffaa00"),
+            StrategyUIState.ARMED_COOLDOWN: ("COOLDOWN",  "#4488dd"),
+            StrategyUIState.DISARMING:      ("DISARMING", "#ffaa00"),
+        }
+        label, color = state_labels.get(s, ("?", "#6a6a8a"))
+        self._strategy_state_label.setText(f"Strategy: {label}")
+        self._strategy_state_label.setStyleSheet(
+            f"font-family: Menlo; font-size: 10px; padding: 0 6px; color: {color};")
+
+    def _update_strategy_state_from_snapshot(self, snap):
+        """Drive strategy UI state from the C++ strategy snapshot's trade lifecycle."""
+        if not self._strategy_ui_state.value.startswith("armed"):
+            return
+        trade_state = ""
+        try:
+            trade_state = str(getattr(
+                getattr(snap, "trade", None), "state", "")).split(".")[-1]
+        except Exception:
             return
 
-        self._exec_manager.arm()
-        self._arm_btn.setText("Disarm")
-        acct = self._exec_manager.account
-        self._exec_label.setText(
-            f"ARMED | Bal: {acct.balance:.2f} USDT"
-        )
+        _LIFECYCLE_MAP = {
+            "IDLE": StrategyUIState.ARMED_WAITING,
+            "SETUP": StrategyUIState.ARMED_ACTIVE,
+            "ENTRY": StrategyUIState.ARMED_ACTIVE,
+            "CONFIRMATION": StrategyUIState.ARMED_ACTIVE,
+            "EXPANSION": StrategyUIState.ARMED_ACTIVE,
+            "MATURATION": StrategyUIState.ARMED_ACTIVE,
+            "EXIT": StrategyUIState.ARMED_EXITING,
+            "COOLDOWN": StrategyUIState.ARMED_COOLDOWN,
+        }
+        new = _LIFECYCLE_MAP.get(trade_state)
+        if new and new != self._strategy_ui_state:
+            self._set_strategy_state(new)
+
+    def _update_heatmap_overlay_from_snapshot(self, snap):
+        """Push stop/target/entry lines to heatmap when active."""
+        if self._strategy_ui_state not in (
+                StrategyUIState.ARMED_ACTIVE,
+                StrategyUIState.ARMED_EXITING):
+            self._heatmap.clear_strategy_overlay()
+            return
+        try:
+            trade = getattr(snap, "trade", None)
+            entry_p = float(getattr(trade, "entry_price", 0) or 0)
+            stop_p = float(getattr(trade, "stop_price", 0) or 0)
+            target_p = float(getattr(trade, "target_price", 0) or 0)
+            self._heatmap.set_strategy_overlay(entry_p, stop_p, target_p)
+        except Exception:
+            pass
 
     def _build_sizing_config(self) -> SizingConfig:
         mode_val = self._sizing_mode_combo.currentData()
@@ -1153,7 +1412,7 @@ class MainWindow(QMainWindow):
 
     def _on_ripple_received(self, decision):
         """Process a Ripple decision on the main thread."""
-        if self._ripple_mode == RippleMode.DISABLED:
+        if self._strategy_ui_state == StrategyUIState.DISARMED:
             self._ripple_metrics.mode_suppressed += 1
             return
 
@@ -1196,8 +1455,8 @@ class MainWindow(QMainWindow):
         self._health.last_emitted_decision_ts = decision.timestamp
         self._health.last_candidate_decision_ts = decision.timestamp
 
-        # Paper execution if armed
-        if (self._ripple_mode == RippleMode.PAPER and
+        # Paper execution if armed in paper mode
+        if (self._strategy_mode == StrategyMode.PAPER and
                 self._paper_engine is not None):
             intent = ripple_decision_to_intent(decision, state_name,
                                                intent_name=intent_name)
@@ -1259,6 +1518,13 @@ class MainWindow(QMainWindow):
         t0 = time.monotonic()
         drained = 0
 
+        # --- Phase 0: sync heatmap trade-time to real-time WS feed --------
+        # Prevents chart_now from freezing when the drain buffer has a
+        # backlog — keeps the heatmap scrolling at real-time pace.
+        ws_ts = self._latest_ws_trade_ts
+        if ws_ts > 0:
+            self._heatmap.sync_trade_time(ws_ts)
+
         # --- Phase 1: drain trade buffer (independent of C++ engine) ------
         try:
             buf_depth = len(self._trade_buffer)
@@ -1311,8 +1577,8 @@ class MainWindow(QMainWindow):
             ob = self._engine.get_order_book()
             snap = ob.get_snapshot()
 
-            bids = snap.get_bids()[:200]
-            asks = snap.get_asks()[:200]
+            bids = snap.get_bids()[:1000]
+            asks = snap.get_asks()[:1000]
             best_bid = snap.best_bid
             best_ask = snap.best_ask
             snap_ts = snap.timestamp
@@ -1367,8 +1633,7 @@ class MainWindow(QMainWindow):
             # Only feed to heatmap if book has data
             if not book_empty:
                 chart_now_ts = self._heatmap.chart_now
-                sample_ts = (max(snap_ts, chart_now_ts)
-                             if chart_now_ts > 0 else snap_ts)
+                sample_ts = chart_now_ts if chart_now_ts > 0 else snap_ts
                 self._heatmap.add_depth_column(
                     snap_ts, bids, asks, best_bid, best_ask,
                     sample_ts=sample_ts,
@@ -1442,7 +1707,24 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("Diagnostics error: %s", e)
 
-        # --- Phase 6: execution manager (isolated) ------------------------
+        # --- Phase 6: strategy diagnostics + state machine (throttled) -------
+        try:
+            self._strat_tick_counter = getattr(self, '_strat_tick_counter', 0) + 1
+            if self._strat_tick_counter >= 5:
+                self._strat_tick_counter = 0
+                if self._engine and hasattr(self._engine, 'get_strategy_snapshot'):
+                    snap = self._engine.get_strategy_snapshot()
+                    self._strategy_panel.update_snapshot(snap)
+                    self._update_strategy_state_from_snapshot(snap)
+                    self._update_heatmap_overlay_from_snapshot(snap)
+                    if (self._strategy_store
+                            and self._strategy_ui_state.value.startswith("armed")):
+                        self._strategy_store.buffer_snapshot(
+                            int(time.time() * 1000), snap)
+        except Exception as e:
+            logger.error("Strategy panel error: %s", e)
+
+        # --- Phase 6b: execution manager (isolated) -----------------------
         try:
             if self._exec_manager:
                 acct = self._exec_manager.account
@@ -1476,11 +1758,14 @@ class MainWindow(QMainWindow):
             buf_len = len(self._trade_buffer)
             overflow = max(0, self._trades_received_ws
                           - self._health.trades_drained_total - buf_len)
+            bd = hm.get_bubble_diagnostics() if hasattr(hm, 'get_bubble_diagnostics') else {}
+            dt_skew = hm._last_depth_ts - hm._last_trade_ts
             logger.info(
                 "PERF tick=%d avg=%.1fms max=%.1fms | "
                 "drain=%.1fms book=%.1fms vp=%.1fms | "
                 "q=%d bub=%d slc=%d trd=%d paint=%.1fms | "
-                "lag=%dms ovfl=%d drErr=%d",
+                "lag=%dms ovfl=%d drErr=%d skew=%dms | "
+                "fT=%d fX=%d fY=%d p95=%.4g prn=%d stage=%s",
                 self._health.tick_count,
                 self._health.tick_duration_ms_avg,
                 self._health.tick_duration_ms_max,
@@ -1495,6 +1780,13 @@ class MainWindow(QMainWindow):
                 trade_lag,
                 overflow,
                 self._trades_dropped_in_drain,
+                dt_skew,
+                bd.get('filtered_by_time', -1),
+                bd.get('filtered_by_x', -1),
+                bd.get('filtered_by_y', -1),
+                bd.get('p95_size', -1),
+                bd.get('trades_pruned_this_frame', -1),
+                bd.get('failure_stage', '?'),
             )
 
     # ------------------------------------------------------------------
@@ -1582,13 +1874,16 @@ class MainWindow(QMainWindow):
         hm_ok = hm._heatmap_samples > 0 and hm._last_log_max > 0
         hm_val = "Live" if hm_ok else ("Stalled" if hm._heatmap_samples > 0 else "?")
 
-        ripple_val = self._ripple_mode.value.replace("_", " ").title()
+        ripple_val = (f"{self._strategy_mode.value.title()}"
+                      f"/{self._strategy_ui_state.value.split('_')[-1].title()}")
 
-        # Bubble pipeline health
+        # Bubble pipeline health — granular failure-stage detection
         bubble_ct = getattr(hm, '_last_visible_bubble_count', 0)
         trade_ct = len(hm._trades)
         buf_depth = self._health.last_trade_buffer_depth
         trades_arriving = (th.state == FeedState.LIVE or trade_ct > 0)
+        bd = hm.get_bubble_diagnostics() if hasattr(hm, 'get_bubble_diagnostics') else {}
+        failure_stage = bd.get('failure_stage', 'NONE')
 
         if bubble_ct > 0:
             bub_val = "Live"
@@ -1597,32 +1892,17 @@ class MainWindow(QMainWindow):
             self._bubble_dead_ticks = getattr(
                 self, '_bubble_dead_ticks', 0) + self._STATUS_PANEL_EVERY
             if self._bubble_dead_ticks >= self._BUBBLE_DEAD_THRESHOLD_TICKS:
-                bub_val = "Stalled"
+                bub_val = f"DEAD:{failure_stage}"
                 if self._bubble_dead_ticks == self._BUBBLE_DEAD_THRESHOLD_TICKS:
-                    sample_price = (hm._trades[-1][1]
-                                    if hm._trades else 0)
-                    trade_lag = 0
-                    if hm.chart_now > 0 and self._last_drained_trade_ts > 0:
-                        trade_lag = hm.chart_now - self._last_drained_trade_ts
-                    buf_overflow = max(
-                        0,
-                        self._trades_received_ws
-                        - self._health.trades_drained_total
-                        - len(self._trade_buffer))
-                    logger.warning(
-                        "BUBBLE_PIPELINE_STALLED: trade feed alive "
-                        "(trades=%d, buf=%d) but visibleBubbles=0 for "
-                        "%d ticks — priceRange=[%.2f,%.2f] "
-                        "sampleTradePrice=%.2f chartNow=%d "
-                        "tradeLag=%dms bufOverflow=%d drainErrors=%d",
-                        trade_ct, buf_depth,
-                        self._bubble_dead_ticks,
-                        hm._price_min, hm._price_max,
-                        sample_price, hm.chart_now,
-                        trade_lag, buf_overflow,
-                        self._trades_dropped_in_drain)
+                    self._emit_bubbles_dead_warning(hm, trade_ct, buf_depth)
             else:
                 bub_val = "Live"
+        elif trades_arriving and trade_ct == 0:
+            bub_val = f"DEAD:{failure_stage}"
+            self._bubble_dead_ticks = getattr(
+                self, '_bubble_dead_ticks', 0) + self._STATUS_PANEL_EVERY
+            if self._bubble_dead_ticks == self._STATUS_PANEL_EVERY:
+                self._emit_bubbles_dead_warning(hm, trade_ct, buf_depth)
         else:
             bub_val = "?" if not self._engine else "Off"
             self._bubble_dead_ticks = 0
@@ -1644,7 +1924,7 @@ class MainWindow(QMainWindow):
             ("Heatmap", hm_val),
             ("Bubbles", bub_val),
             ("TrdBuf", buf_val),
-            ("Ripple", ripple_val),
+            ("Strategy", ripple_val),
         ]
 
         self._status_panel.set_health(rows, title="Pipeline")
@@ -1672,6 +1952,63 @@ class MainWindow(QMainWindow):
             f" slc:{hm._heatmap_samples}")
 
         self._ripple_label.setText(ripple_txt)
+
+    def _emit_bubbles_dead_warning(self, hm, trade_ct, buf_depth):
+        """Log BUBBLES_DEAD_WHILE_TRADES_LIVE with full pipeline diagnostics."""
+        diag = hm.get_bubble_diagnostics() if hasattr(hm, 'get_bubble_diagnostics') else {}
+        stage = diag.get('failure_stage', 'UNKNOWN')
+
+        sample_price = hm._trades[-1][1] if hm._trades else 0
+        sample_ts = hm._trades[-1][0] if hm._trades else 0
+        trade_lag = 0
+        if hm.chart_now > 0 and self._last_drained_trade_ts > 0:
+            trade_lag = hm.chart_now - self._last_drained_trade_ts
+        buf_overflow = max(
+            0,
+            self._trades_received_ws
+            - self._health.trades_drained_total
+            - len(self._trade_buffer))
+
+        depth_trade_skew = hm._last_depth_ts - hm._last_trade_ts
+
+        logger.warning(
+            "BUBBLES_DEAD_WHILE_TRADES_LIVE stage=%s | "
+            "trades=%d buf=%d deadTicks=%d | "
+            "priceRange=[%.2f,%.2f] samplePrice=%.2f sampleTs=%d | "
+            "chartNow=%d depthTs=%d tradeTs=%d depthTradeSkew=%dms | "
+            "tradeLag=%dms bufOverflow=%d drainErrors=%d | "
+            "filtTime=%d filtX=%d filtY=%d vis=%d | "
+            "rMin=%.1f rMax=%.1f rAvg=%.1f | "
+            "newestX=%.0f oldestX=%.0f pw=%d | "
+            "p95=%.6g prunedFrame=%d prunedTotal=%d zeroFrames=%d | "
+            "addedTotal=%d rejectedPrice=%d maxDeque=%d "
+            "activeMinTs=%d activeMaxTs=%d",
+            stage,
+            trade_ct, buf_depth, self._bubble_dead_ticks,
+            hm._price_min, hm._price_max, sample_price, sample_ts,
+            hm.chart_now, hm._last_depth_ts, hm._last_trade_ts,
+            depth_trade_skew,
+            trade_lag, buf_overflow, self._trades_dropped_in_drain,
+            diag.get('filtered_by_time', -1),
+            diag.get('filtered_by_x', -1),
+            diag.get('filtered_by_y', -1),
+            diag.get('visible', -1),
+            diag.get('min_radius', -1),
+            diag.get('max_radius', -1),
+            diag.get('avg_radius', -1),
+            diag.get('newest_x', -1),
+            diag.get('oldest_x', -1),
+            diag.get('pw', -1),
+            diag.get('p95_size', -1),
+            diag.get('trades_pruned_this_frame', -1),
+            diag.get('trades_pruned_total', -1),
+            diag.get('consecutive_zero_frames', -1),
+            diag.get('trades_added_total', -1),
+            diag.get('trades_rejected_price', -1),
+            diag.get('max_deque_depth', -1),
+            diag.get('active_min_ts', -1),
+            diag.get('active_max_ts', -1),
+        )
 
     def _resync_depth_snapshot(self, symbol: str):
         """Re-fetch a depth snapshot from Binance REST and apply it.
@@ -1782,6 +2119,6 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event):
-        self._save_ripple_settings()
+        self._save_strategy_settings()
         self._on_disconnect()
         super().closeEvent(event)

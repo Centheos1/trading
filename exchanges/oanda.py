@@ -118,7 +118,7 @@ class OandaClient:
 
     @staticmethod
     def _check_date(s):
-        dateFmt = "[\d]{4}-[\d]{2}-[\d]{2}T[\d]{2}:[\d]{2}:[\d]{2}Z"
+        dateFmt = r"[\d]{4}-[\d]{2}-[\d]{2}T[\d]{2}:[\d]{2}:[\d]{2}Z"
         if not re.match(dateFmt, s):
             raise ValueError("Incorrect date format: ", s)
         return True

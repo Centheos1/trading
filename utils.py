@@ -48,6 +48,26 @@ STRAT_PARAMS = {
         "exhaustion_lookback_bars": {"name": "Exhaustion Lookback Bars", "type": int, "min": 3, "max": 20},
         "signal_strength_min": {"name": "Min Signal Strength", "type": float, "min": 0.1, "max": 0.9, "decimals": 2},
         "tick_size": {"name": "Tick Size", "type": float, "min": 0.001, "max": 100.0, "decimals": 3},
+
+        # Ripple parameters (Phase 6)
+        "wall_min_relative_size": {"name": "Wall Min Relative Size", "type": float, "min": 1.5, "max": 10.0, "decimals": 1},
+        "absorption_entry": {"name": "Absorption Entry", "type": float, "min": 0.2, "max": 0.9, "decimals": 2},
+        "exhaustion_entry": {"name": "Exhaustion Entry", "type": float, "min": 0.2, "max": 0.9, "decimals": 2},
+        "breakout_entry": {"name": "Breakout Entry", "type": float, "min": 0.3, "max": 0.95, "decimals": 2},
+        "idle_exit_threshold": {"name": "Idle Exit Threshold", "type": float, "min": 0.1, "max": 0.6, "decimals": 2},
+        "bounce_max_break_risk": {"name": "Bounce Max Break Risk", "type": float, "min": 0.2, "max": 0.7, "decimals": 2},
+        "feature_window_ms": {"name": "Feature Window (ms)", "type": int, "min": 2000, "max": 15000},
+        "confirmation_window_ms": {"name": "Confirmation Window (ms)", "type": int, "min": 2000, "max": 15000},
+        "max_hold_time_ms": {"name": "Max Hold Time (ms)", "type": int, "min": 60000, "max": 600000},
+        "trailing_stop_sigma": {"name": "Trailing Stop Sigma", "type": float, "min": 0.5, "max": 5.0, "decimals": 1},
+        "target_distance_sigma": {"name": "Target Distance Sigma", "type": float, "min": 1.0, "max": 8.0, "decimals": 1},
+
+        # Wave parameters (Phase 6) — mapped to WaveConfig in Python;
+        # only effective when WaveEngine is integrated into the backtest loop.
+        "eta_mr_threshold": {"name": "η MR Threshold", "type": float, "min": 0.1, "max": 0.5, "decimals": 2},
+        "eta_bo_threshold": {"name": "η Breakout Threshold", "type": float, "min": 0.5, "max": 0.9, "decimals": 2},
+        "eta_neutral_threshold": {"name": "η Neutral Threshold", "type": float, "min": 0.3, "max": 0.7, "decimals": 2},
+        "reduced_size_fraction": {"name": "Reduced Size Fraction", "type": float, "min": 0.2, "max": 0.8, "decimals": 2},
     }
 }
 

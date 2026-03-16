@@ -43,6 +43,7 @@ set(ORDERFLOW_SOURCES
     ripple/HMMBasedInference.cpp
     ripple/TradeLifecycleEngine.cpp
     ripple/LiquidityMapEngine.cpp
+    ripple/RiskEngine.cpp
 )
 
 set(ORDERFLOW_HEADERS
@@ -74,6 +75,7 @@ set(ORDERFLOW_HEADERS
     ripple/HMMBasedInference.h
     ripple/TradeLifecycleEngine.h
     ripple/LiquidityMapEngine.h
+    ripple/RiskEngine.h
     ripple/IWallDetector.h
     ripple/IRippleFeatureEngine.h
     ripple/IRippleEvidenceEngine.h
@@ -109,6 +111,22 @@ target_link_libraries(test_trade_lifecycle PRIVATE orderflow_core)
 # Liquidity map test suite (Phase 3)
 add_executable(test_liquidity_map ripple/tests/test_liquidity_map.cpp)
 target_link_libraries(test_liquidity_map PRIVATE orderflow_core)
+
+# Risk engine test suite (Phase 4)
+add_executable(test_risk_engine ripple/tests/test_risk_engine.cpp)
+target_link_libraries(test_risk_engine PRIVATE orderflow_core)
+
+# Wave integration test suite (Phase 5)
+add_executable(test_wave_integration ripple/tests/test_wave_integration.cpp)
+target_link_libraries(test_wave_integration PRIVATE orderflow_core)
+
+# HMM inference test suite (Phase 7)
+add_executable(test_hmm_inference ripple/tests/test_hmm_inference.cpp)
+target_link_libraries(test_hmm_inference PRIVATE orderflow_core)
+
+# Performance benchmark (Phase 6)
+add_executable(benchmark_pipeline ripple/tests/benchmark_pipeline.cpp)
+target_link_libraries(benchmark_pipeline PRIVATE orderflow_core)
 
 # Ripple stage-1 demo
 add_executable(ripple_demo ripple/demo/ripple_demo.cpp)

@@ -2,11 +2,22 @@
 #include "RippleFeatureEngine.h"
 #include "RippleEvidenceEngine.h"
 #include "ScoreBasedInference.h"
+#include "HMMBasedInference.h"
 #include "TriggerDecisionEngine.h"
 #include "RippleDiagnostics.h"
 #include <cmath>
 
 namespace orderflow::ripple {
+
+static std::unique_ptr<IRippleStateInference> make_inference(const RippleConfig& cfg) {
+    if (cfg.hmm_enabled) {
+        auto hmm = std::make_unique<HMMBasedInference>(cfg);
+        if (!cfg.hmm_model_path.empty())
+            hmm->load_model(cfg.hmm_model_path);
+        return hmm;
+    }
+    return std::make_unique<ScoreBasedInference>(cfg);
+}
 
 RippleEngine::RippleEngine(const RippleConfig& cfg)
     : cfg_(cfg),
@@ -14,10 +25,11 @@ RippleEngine::RippleEngine(const RippleConfig& cfg)
       wall_det_(cfg),
       feat_engine_(std::make_unique<RippleFeatureEngine>(cfg)),
       ev_engine_(std::make_unique<RippleEvidenceEngine>(cfg)),
-      state_tracker_(cfg, std::make_unique<ScoreBasedInference>(cfg)),
+      state_tracker_(cfg, make_inference(cfg)),
       trigger_engine_(std::make_unique<TriggerDecisionEngine>(cfg)),
       lifecycle_(cfg.lifecycle),
-      liq_map_(cfg.liquidity_map) {
+      liq_map_(cfg.liquidity_map),
+      risk_(RiskConfig{}) {
     ensure_diagnostics();
 }
 
@@ -30,6 +42,14 @@ void RippleEngine::ensure_diagnostics() {
     }
 }
 
+void RippleEngine::set_risk_budget(double es_budget, double max_position_usd, double risk_multiplier) {
+    risk_.set_budget(es_budget, max_position_usd, risk_multiplier);
+}
+
+void RippleEngine::set_realized_vol(double vol) {
+    risk_.set_volatility(vol);
+}
+
 void RippleEngine::reset() {
     ctx_.reset();
     wall_det_.reset();
@@ -37,6 +57,9 @@ void RippleEngine::reset() {
     if (trigger_engine_) trigger_engine_->reset();
     lifecycle_.reset();
     liq_map_.reset();
+    risk_.reset();
+    wave_snap_     = DefaultWaveSnapshot::make();
+    wave_snap_set_ = false;
     last_features_    = {};
     last_evidence_    = {};
     last_inference_   = {};
@@ -60,6 +83,7 @@ void RippleEngine::reset() {
 
 void RippleEngine::on_fill(const FillEvent& fill) {
     lifecycle_.on_fill(fill);
+    risk_.on_fill(fill);
 }
 
 void RippleEngine::on_trade(const Trade& trade, const OrderBook& /*book*/) {
@@ -254,39 +278,67 @@ void RippleEngine::run_pipeline(Timestamp ts) {
             TradeSide side =
                 (intent == RippleIntent::ENTER_BOUNCE_LONG || intent == RippleIntent::ENTER_BREAKOUT_LONG)
                 ? TradeSide::LONG : TradeSide::SHORT;
-            double ss = (side == TradeSide::LONG) ? 1.0 : -1.0;
-            double sigma = std::max(last_features_.short_horizon_volatility, cfg_.tick_size);
-            double stop  = last_decision_.invalidation_price;
-            double micro = ctx_.microprice();
 
-            // Phase 3: use liquidity map destinations for target, fall back to sigma-based
-            double target = micro + ss * cfg_.lifecycle.target_distance_sigma * sigma;
-            auto dests = liq_map_.get_destinations_in_direction(side, micro);
-            if (!dests.empty())
-                target = dests.front().price;
+            // Phase 5: gate entry on Wave permissions (§18)
+            const auto& perms = wave_snap_.permissions;
+            double perm_fraction = perms.size_fraction(arch, side);
 
-            double qty = cfg_.max_position;
+            if (perm_fraction > 0.0) {
+                double ss = (side == TradeSide::LONG) ? 1.0 : -1.0;
+                double sigma = std::max(last_features_.short_horizon_volatility, cfg_.tick_size);
+                double stop  = last_decision_.invalidation_price;
+                double micro = ctx_.microprice();
 
-            if (lifecycle_.try_setup(arch, side, wall->price, stop, target, qty, ts)) {
-                // Phase 3: compute scale-out plan from map destinations (§14.2.1)
-                if (!dests.empty()) {
-                    const auto& lc = cfg_.lifecycle;
-                    int n = std::min(static_cast<int>(dests.size()), lc.scale_out_count);
-                    ScaleOutTarget sot[LifecycleConfig::MAX_SCALE_OUT];
-                    double remaining = qty;
-                    for (int i = 0; i < n; ++i) {
-                        sot[i].price    = dests[i].price;
-                        double frac     = lc.scale_out_fractions[i];
-                        sot[i].quantity = std::max(qty * frac, cfg_.tick_size);
-                        remaining -= sot[i].quantity;
-                        sot[i].new_stop = (i == 0) ? micro : dests[i - 1].price;
-                    }
-                    // §14.2.1: if fewer destinations than fractions, last level gets remainder
-                    if (remaining > cfg_.tick_size && n > 0)
-                        sot[n - 1].quantity += remaining;
-                    lifecycle_.set_scale_out_targets(sot, n);
+                // Phase 3: use liquidity map destinations for target, fall back to sigma-based
+                double target = micro + ss * cfg_.lifecycle.target_distance_sigma * sigma;
+                auto dests = liq_map_.get_destinations_in_direction(side, micro);
+                if (!dests.empty())
+                    target = dests.front().price;
+
+                // Phase 4: risk-based position sizing (§14.4)
+                double qty = risk_.compute_position_size(micro, stop);
+                bool risk_configured = risk_.get_snapshot().es_budget > 0.0;
+                if (qty < cfg_.tick_size)
+                    qty = cfg_.max_position;
+
+                // Phase 4: gate entry on risk budget (skip when using pre-phase defaults)
+                if (risk_configured && !risk_.check_new_order(qty, micro)) {
+                    qty = risk_.get_allowed_size(qty, micro);
                 }
-                lifecycle_.confirm_entry(ts);
+
+                // Phase 5: apply permission size fraction (REDUCED → 50%, FULL → 100%)
+                qty *= perm_fraction;
+
+                if (qty >= cfg_.tick_size && lifecycle_.try_setup(arch, side, wall->price, stop, target, qty, ts)) {
+                    // Phase 3: compute scale-out plan from map destinations (§14.2.1)
+                    if (!dests.empty()) {
+                        const auto& lc = cfg_.lifecycle;
+                        int n = std::min(static_cast<int>(dests.size()), lc.scale_out_count);
+                        ScaleOutTarget sot[LifecycleConfig::MAX_SCALE_OUT];
+                        double remaining = qty;
+                        for (int i = 0; i < n; ++i) {
+                            sot[i].price    = dests[i].price;
+                            double frac     = lc.scale_out_fractions[i];
+                            sot[i].quantity = std::max(qty * frac, cfg_.tick_size);
+                            remaining -= sot[i].quantity;
+                            sot[i].new_stop = (i == 0) ? micro : dests[i - 1].price;
+                        }
+                        if (remaining > cfg_.tick_size && n > 0)
+                            sot[n - 1].quantity += remaining;
+                        lifecycle_.set_scale_out_targets(sot, n);
+                    }
+                    lifecycle_.confirm_entry(ts);
+
+                    if (cfg_.paper_fills) {
+                        FillEvent pfill;
+                        pfill.timestamp = ts;
+                        pfill.price     = micro;
+                        pfill.quantity  = qty;
+                        pfill.side      = (side == TradeSide::LONG) ? OrderSide::BUY : OrderSide::SELL;
+                        lifecycle_.on_fill(pfill);
+                        risk_.on_fill(pfill);
+                    }
+                }
             }
         }
     }
@@ -314,12 +366,29 @@ void RippleEngine::run_pipeline(Timestamp ts) {
             tc.trade_rate = static_cast<double>(total_trades) / (static_cast<double>(span) / 1000.0);
     }
 
-    auto default_risk = RiskBudgetSnapshot{};
-    default_risk.es_budget       = DefaultTideSnapshot::ES_BUDGET;
-    default_risk.risk_multiplier = DefaultTideSnapshot::RISK_MULTIPLIER;
-    auto default_perms = DefaultWaveSnapshot::make().permissions;
+    // Phase 4: use real risk engine snapshot instead of defaults
+    risk_.on_price_update(tc.microprice, ts);
+    auto risk_snap = risk_.get_snapshot();
+    // Fall back to defaults only if risk engine has no budget configured
+    if (risk_snap.es_budget <= 0.0) {
+        risk_snap.es_budget       = DefaultTideSnapshot::ES_BUDGET;
+        risk_snap.risk_multiplier = DefaultTideSnapshot::RISK_MULTIPLIER;
+    }
+    // Phase 5: use real Wave permissions (fall back to defaults if not set)
+    const auto& perms = wave_snap_.permissions;
 
-    lifecycle_.on_tick(tc, default_risk, default_perms);
+    lifecycle_.on_tick(tc, risk_snap, perms);
+
+    if (cfg_.paper_fills && lifecycle_.get_lifecycle_state() == LifecycleState::EXIT) {
+        auto tsnap = lifecycle_.get_snapshot();
+        FillEvent pfill;
+        pfill.timestamp = ts;
+        pfill.price     = tc.microprice;
+        pfill.quantity  = tsnap.quantity;
+        pfill.side      = (tsnap.side == TradeSide::LONG) ? OrderSide::SELL : OrderSide::BUY;
+        lifecycle_.on_fill(pfill);
+        risk_.on_fill(pfill);
+    }
 }
 
 } // namespace orderflow::ripple

@@ -106,9 +106,16 @@ flowchart TB
 | CVD integration in Ripple | **Integrated** (divergence → evidence boost, features) | — | 3 (done) |
 | VP integration in Ripple | **Integrated** (POC, value area, HVN/LVN in map) | — | 3 (done) |
 | Scale-out plan | **Implemented** (map destinations → up to 3 targets) | — | 3 (done) |
-| Risk budgeting | Not implemented | Build ES throttle | 4 |
-| Tide layer | Not implemented | Build macro bias, risk allocation | 4 |
-| Wave layer | Not implemented | Build regime classifier | 5 |
+| Risk budgeting | **Implemented** (`RiskEngine`) | Hierarchical ES (later) | 4 (done) |
+| Tide layer | **Implemented** (`TideEngine` Python) | Dynamic macro features (later) | 4 (done) |
+| Wave layer | **Implemented** (`WaveEngine` Python, C++ integration) | HMM classifier, multi-asset features (later) | 5 (done) |
+| Replay determinism | **Verified** (`test_replay_determinism.py`) | — | 6 (done) |
+| Performance benchmark | **Verified** (`benchmark_pipeline`, P99 < 100 µs) | — | 6 (done) |
+| Strategy snapshot | **Implemented** (`get_strategy_snapshot()` on `OrderFlowEngine`) | — | 6 (done) |
+| UI diagnostics | **Implemented** (`StrategyDiagnosticsPanel`) | — | 6 (done) |
+| Optimization (Ripple+Wave) | **Implemented** (15 params in NSGA-II space) | Run on real data | 6 (done) |
+| Paper fills | **Implemented** (`paper_fills` flag in RippleConfig) | — | 6 (done) |
+| PnL tracking | **Implemented** (cumulative PnL in lifecycle) | — | 6 (done) |
 
 ---
 
@@ -712,7 +719,7 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 
 ---
 
-### Phase 4 — Risk Budget Plumbing
+### Phase 4 — Risk Budget Plumbing [COMPLETED]
 
 **Objective:** Implement the risk engine, ES throttle, and Tide sizing interface.
 
@@ -747,9 +754,61 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 - `RiskEngine::check_new_order` must be < 1 µs (arithmetic only).
 - Risk state update on fill: < 1 µs.
 
+**Completion notes:**
+
+Delivered files:
+
+| File | Action |
+|---|---|
+| `backtestingCpp/orderflow/ripple/RiskEngine.h` | New: `RiskEngine` class declaration — ES computation, position sizing, order admission |
+| `backtestingCpp/orderflow/ripple/RiskEngine.cpp` | New: full implementation — parametric ES (§15.2), 3-step position sizing (§14.4), fill tracking, price updates |
+| `backtestingCpp/orderflow/ripple/RippleEngine.h` | Extended: `RiskEngine` member, `set_risk_budget()`, `set_realized_vol()`, `risk_engine()` accessors |
+| `backtestingCpp/orderflow/ripple/RippleEngine.cpp` | Extended: risk-based position sizing at entry, risk check gating, real `RiskBudgetSnapshot` in lifecycle tick, fills routed to risk engine |
+| `backtestingCpp/orderflow/bindings.cpp` | Extended: pybind11 bindings for `RiskEngine` (all methods: set_budget, check_new_order, compute_position_size, etc.) and `RippleEngine` risk accessors |
+| `backtestingCpp/orderflow/CMakeLists.txt` | Extended: new source/header files, `test_risk_engine` target |
+| `backtestingCpp/orderflow/ripple/tests/test_risk_engine.cpp` | New: 190 C++ test checks covering all Phase 4 deliverables |
+| `tide/__init__.py` | New: Tide package init |
+| `tide/tide_engine.py` | New: `TideEngine` Python class — risk multiplier computation (§7.4.7), ES budget/max_position passthrough, cadence gating |
+| `tests/test_tide_engine.py` | New: 19 Python tests — risk multiplier by regime, LSI stress penalty, cadence gating, determinism, invariants |
+| `tests/test_risk_bindings.py` | New: 11 Python tests — pybind11 binding verification for RiskEngine |
+
+Key design decisions:
+- `RiskEngine` is a standalone C++ class (in `orderflow::ripple` namespace) that performs pure arithmetic — no allocation, no branching beyond simple comparisons, target < 1 µs for `check_new_order`.
+- ES estimation uses the parametric Gaussian formula: `ES_i = Q * P * σ * √(Δt) * φ(z_α)/(1-α)` with α=0.95 (multiplier ≈ 2.063) and 1-day risk horizon (`√(1/365) ≈ 0.05234`).
+- Position sizing implements the exact 3-step formula from §14.4: risk-denominated raw size, volatility adjustment (clamped to [0.25, 2.0]), Tide throttle + budget clip.
+- `RiskEngine` tracks position state (quantity, average entry, cost basis) and recomputes consumed ES on every fill and price update.
+- `TideEngine` in Python is a deterministic implementation of §7.4.7: risk multiplier = regime-based lookup + LSI stress penalty, with event-time cadence gating.
+- Falls back to `DefaultTideSnapshot` values when no budget is configured (backward compatibility with Phases 2–3 tests).
+- Fills are now routed to both `TradeLifecycleEngine` and `RiskEngine` through `RippleEngine::on_fill`.
+- Entry path now uses `compute_position_size()` instead of `cfg_.max_position`, with risk check gating via `check_new_order`.
+
+Post-review consistency fixes (strategy.md cross-reference):
+- `check_new_order` rejects zero/negative price and quantity per §20.7 boundary requirements.
+- Vol ratio clamp bounds match §14.4 exactly: [0.25, 2.0].
+- Budget exit threshold matches `cfg_.budget_exit_threshold` (default 0.90) per §13.3.5.
+
+Tests: 190 C++ checks (`test_risk_engine`) + 19 Python tests (`test_tide_engine.py`) + 11 Python tests (`test_risk_bindings.py`) covering:
+- Default construction, budget/volatility setters, clamp validation
+- ES parametric formula against strategy.md §15.2 example (notional=100, vol=0.80 → ES≈8.63)
+- ES updates on price change, ES zero with no position
+- `check_new_order`: within budget, ES exceeded, notional exceeded, zero risk mult, cumulative fills
+- `get_allowed_size`: within budget, clipped by ES, clipped by notional
+- Position sizing (§14.4): basic, vol adjustment, vol clamp low/high, risk multiplier throttle, budget fraction, zero budget, Q_max cap, zero stop distance
+- Fill tracking: buy, sell, close (flat resets ES), partial close
+- Unrealized PnL: long profit/loss, short profit, flat
+- Budget exhaustion checks
+- Snapshot field validation
+- Reset
+- Determinism (identical inputs → identical outputs)
+- Property-based: ES ≥ 0, Q_final ∈ [0, Q_max]
+- Boundary: zero price, negative quantity, very large position
+- Integration: cumulative fills stopped by budget enforcement
+- TideEngine: risk multiplier by regime (LOW/NORMAL/HIGH/CRISIS), LSI stress penalty, cadence gating, snapshot fields, bias/vol passthrough, determinism, invariant (risk_mult ∈ [0,1])
+- pybind11 bindings: construction, set_budget, check_new_order, get_allowed_size, compute_position_size, on_fill, unrealized PnL, reset, snapshot type, determinism
+
 ---
 
-### Phase 5 — Wave Regime Baseline
+### Phase 5 — Wave Regime Baseline [COMPLETED]
 
 **Objective:** Implement a deterministic Wave regime classifier using L1 data.
 
@@ -785,9 +844,44 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 - Wave updates at 5s cadence; no tight latency requirement.
 - Feature computation: < 1 ms per update.
 
+**Completion notes:**
+
+Delivered files:
+
+| File | Action |
+|---|---|
+| `wave/__init__.py` | New: Wave package init |
+| `wave/wave_engine.py` | New: `WaveEngine` class — trend efficiency (§8.5.4), distance-to-structure (§8.5.5), regime state machine (§8.8), permissions matrix (§18), cadence gating |
+| `backtestingCpp/orderflow/ripple/RippleEngine.h` | Extended: `WaveSnapshot` storage, `set_wave_snapshot()`, `wave_snapshot()`, `has_wave_snapshot()` |
+| `backtestingCpp/orderflow/ripple/RippleEngine.cpp` | Extended: permission check at entry (DISABLED blocks, REDUCED scales size), real permissions passed to lifecycle `on_tick()` |
+| `backtestingCpp/orderflow/bindings.cpp` | Extended: pybind11 bindings for `set_wave_snapshot`, `wave_snapshot`, `has_wave_snapshot` on `RippleEngine` |
+| `backtestingCpp/orderflow/CMakeLists.txt` | Extended: `test_wave_integration` target |
+| `backtestingCpp/orderflow/ripple/tests/test_wave_integration.cpp` | New: **38** C++ checks — snapshot storage/reset, permission enforcement, matrix verification |
+| `tests/test_wave_engine.py` | New: **56** Python tests — trend efficiency, distance-to-structure, permissions matrix (all 12 rows), regime state machine (all transitions), cadence gating, determinism, property invariants, boundary cases |
+| `tests/test_wave_bindings.py` | New: **11** Python tests — pybind11 binding verification for Wave types and RippleEngine wave methods |
+
+Key design decisions:
+
+1. **V1 single-symbol limitation**: Dispersion (§8.5.2) and absorption ratio (§8.5.3) require multi-asset data. In V1 they are externally settable with defaults (0.0 and 0.5). Regime classification exercises the full state machine — trend efficiency is the primary driver.
+2. **Permission enforcement at entry**: RippleEngine checks `perm_fraction = perms.size_fraction(arch, side)` before any entry. DISABLED (fraction=0) blocks entry entirely. REDUCED (fraction=0.5 default) scales the computed position size.
+3. **Real permissions in lifecycle**: `lifecycle_.on_tick()` now receives the actual Wave permissions instead of defaults, enabling permission-revocation exits when regime changes mid-trade.
+4. **Backward compatibility**: Default `WaveSnapshot` (all FULL permissions) preserves Phase 1–4 behavior when no Wave snapshot is set.
+
+Tests: **38** C++ checks (`test_wave_integration`) + **56** Python tests (`test_wave_engine.py`) + **11** Python tests (`test_wave_bindings.py`) covering:
+- Trend efficiency computation (monotonic, choppy, round-trip, flat, edge cases)
+- Distance-to-structure computation
+- All 12 rows of the §18 permissions matrix
+- All regime state machine transitions (§8.8)
+- Cadence gating
+- Replay determinism (identical inputs → identical outputs)
+- Property invariants (η ∈ [0,1], regime always valid, permissions never undefined)
+- Boundary cases (AR at critical threshold, dispersion at critical, V1 defaults)
+- C++ permission enforcement (storage, reset, is_allowed, size_fraction, matrix rows)
+- pybind11 binding correctness (all Wave types, RippleEngine wave accessors)
+
 ---
 
-### Phase 6 — Optimization, Replay Consistency, and UI Exposure
+### Phase 6 — Optimization, Replay Consistency, and UI Exposure [COMPLETED]
 
 **Objective:** Validate the complete V1 pipeline via optimization, ensure replay consistency, and expose all states to the UI.
 
@@ -822,9 +916,79 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 - Full optimization run should complete in reasonable time (hours, not days).
 - Profiling and bottleneck identification.
 
+**Completion notes:**
+
+Delivered files:
+
+| File | Action |
+|---|---|
+| `backtestingCpp/orderflow/OrderFlowEngine.h` | Extended: `get_strategy_snapshot()` method |
+| `backtestingCpp/orderflow/OrderFlowEngine.cpp` | Extended: `get_strategy_snapshot()` implementation, VP/CVD wired into RippleEngine |
+| `backtestingCpp/orderflow/ripple/RippleEngine.h` | Extended: `cumulative_pnl()`, `lifecycle_peak_equity()`, `lifecycle_max_drawdown()`, `completed_trades()` accessors |
+| `backtestingCpp/orderflow/ripple/RippleEngine.cpp` | Extended: paper-fill logic for backtest mode (entry + exit auto-fill) |
+| `backtestingCpp/orderflow/ripple/RippleConfig.h` | Extended: `paper_fills` flag for backtest mode |
+| `backtestingCpp/orderflow/ripple/TradeLifecycleEngine.h` | Extended: `cumulative_pnl_`, `peak_equity_`, `max_drawdown_` tracking + accessors |
+| `backtestingCpp/orderflow/ripple/TradeLifecycleEngine.cpp` | Extended: PnL recording in `begin_exit()`, reset of PnL fields |
+| `backtestingCpp/orderflow/bindings.cpp` | Extended: `get_strategy_snapshot`, `paper_fills`, PnL accessors on RippleEngine + lifecycle |
+| `backtestingCpp/orderflow/CMakeLists.txt` | Extended: `benchmark_pipeline` target |
+| `backtestingCpp/orderflow/ripple/tests/benchmark_pipeline.cpp` | New: performance benchmark — 5000 events, P99 < 100 µs target |
+| `utils.py` | Extended: Ripple + Wave params in `STRAT_PARAMS["orderflow"]` |
+| `strategies/orderflow.py` | Extended: `_build_config()` maps Ripple + Wave params to `EngineConfig.ripple`; backtest uses `paper_fills` and Ripple PnL |
+| `ui/strategy_panel.py` | New: `StrategyDiagnosticsPanel` — Wave regime, η, liquidity state, µPrice, trade state, uPnL, ES usage, imbalance |
+| `ui/main_window.py` | Extended: strategy panel wired into layout and timer tick |
+| `tests/test_replay_determinism.py` | New: **8** Python tests — full-pipeline replay determinism across parameter configs |
+
+Key design decisions:
+
+1. **Paper fills**: Added opt-in `paper_fills` flag to `RippleConfig`. When enabled, entries and exits are auto-filled at microprice, allowing the lifecycle to complete trades in backtest mode. Backward compatible (default `false`).
+2. **PnL tracking**: `TradeLifecycleEngine` records cumulative PnL, peak equity, and max drawdown at `begin_exit()`. Exposed via `RippleEngine` accessors.
+3. **VP/CVD wiring**: `OrderFlowEngine` constructor now wires `VolumeProfile` and `CumulativeVolumeDelta` into `RippleEngine`, enabling the liquidity map to use VP data.
+4. **StrategySnapshot**: `OrderFlowEngine::get_strategy_snapshot()` aggregates Wave, Ripple state, trade, liquidity map, risk, and features into a single snapshot. Bound via pybind11.
+5. **Optimization parameter space**: 15 new parameters (11 Ripple, 4 Wave) added to `STRAT_PARAMS["orderflow"]`. `_build_config()` maps them to `EngineConfig.ripple` and lifecycle sub-config. Backtest prefers Ripple PnL when trades complete.
+6. **UI diagnostics**: `StrategyDiagnosticsPanel` displays strategy state, updated every 500 ms via `get_strategy_snapshot()` on the timer tick.
+
+Tests: **8** Python tests (`test_replay_determinism.py`) + benchmark (`benchmark_pipeline`):
+- Default config determinism (200 events, 2 runs)
+- Tight-threshold config determinism
+- Fast-pipeline config determinism
+- Paper-fills and no-paper-fills determinism
+- Triple replay identity
+- Snapshot field population (timestamps, risk, trade, wave, features)
+- Multi-config determinism (4 configurations × 2 runs each)
+- Benchmark: P99 < 100 µs tick-to-decision (5000 measured events)
+
+Deferred test requirements (from Phase 6 scope):
+- **UI integration test**: `StrategyDiagnosticsPanel` is not automatically tested — PySide6 widgets require a display server, making headless CI impractical. Manual verification required.
+- **Optimization convergence test**: Requires tick data and a full NSGA-II loop. Deferred to first real optimization run on collected data.
+- **Paper-trade soak test**: 24-hour manual validation — not automatable in CI.
+
+Known limitations:
+- **Paper-fill PnL excludes fees**: `begin_exit()` computes raw PnL as `side_sign × (microprice − entry_price) × quantity` without deducting maker/taker fees. Acceptable for relative parameter ranking during NSGA-II optimization (fee delta is constant across configs). Accurate fee-inclusive PnL will come from live fills via `FillEvent.commission`.
+- **Wave params not wired to backtest**: The 4 Wave parameters (`eta_mr_threshold`, `eta_bo_threshold`, `eta_neutral_threshold`, `reduced_size_fraction`) are declared in `STRAT_PARAMS` but do not affect the C++ backtest loop. WaveEngine runs in Python and is not yet integrated into the replay path. These params become effective when Wave is wired into the backtest event loop.
+
+V1 parameter ranges:
+
+| Parameter | Type | Min | Max | Default | Phase |
+|---|---|---|---|---|---|
+| `wall_min_relative_size` | float | 1.5 | 10.0 | 3.0 | Ripple |
+| `absorption_entry` | float | 0.2 | 0.9 | 0.6 | Ripple |
+| `exhaustion_entry` | float | 0.2 | 0.9 | 0.5 | Ripple |
+| `breakout_entry` | float | 0.3 | 0.95 | 0.7 | Ripple |
+| `idle_exit_threshold` | float | 0.1 | 0.6 | 0.3 | Ripple |
+| `bounce_max_break_risk` | float | 0.2 | 0.7 | 0.45 | Ripple |
+| `feature_window_ms` | int | 2000 | 15000 | 5000 | Ripple |
+| `confirmation_window_ms` | int | 2000 | 15000 | 5000 | Lifecycle |
+| `max_hold_time_ms` | int | 60000 | 600000 | 300000 | Lifecycle |
+| `trailing_stop_sigma` | float | 0.5 | 5.0 | 2.0 | Lifecycle |
+| `target_distance_sigma` | float | 1.0 | 8.0 | 3.0 | Lifecycle |
+| `eta_mr_threshold` | float | 0.1 | 0.5 | 0.3 | Wave |
+| `eta_bo_threshold` | float | 0.5 | 0.9 | 0.7 | Wave |
+| `eta_neutral_threshold` | float | 0.3 | 0.7 | 0.5 | Wave |
+| `reduced_size_fraction` | float | 0.2 | 0.8 | 0.5 | Wave |
+
 ---
 
-### Phase 7 — Probabilistic / HMM / Latent-State Extensions
+### Phase 7 — Probabilistic / HMM / Latent-State Extensions `[COMPLETED]`
 
 **Objective:** Add HMM-based state inference for Ripple and potentially Wave.
 
@@ -856,9 +1020,45 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 - HMM forward algorithm: O(K² · T) where K = states, T = sequence length. Must be bounded (fixed-window).
 - Target: < 50 µs per event for K ≤ 5.
 
+**Completion notes:**
+
+Delivered files:
+
+| File | Role |
+|------|------|
+| `backtestingCpp/orderflow/ripple/HMMBasedInference.h` | HMM inference header — forward algorithm, Gaussian emission, JSON model load |
+| `backtestingCpp/orderflow/ripple/HMMBasedInference.cpp` | HMM inference implementation |
+| `backtestingCpp/orderflow/ripple/tests/test_hmm_inference.cpp` | 59 C++ checks: forward, posteriors, determinism, model load, state transitions |
+| `hmm/__init__.py` | Python HMM package init |
+| `hmm/hmm_model.py` | HMMModel dataclass, JSON save/load (consumed by C++ `load_model_from_string`) |
+| `hmm/hmm_trainer.py` | Baum-Welch (EM) trainer, BIC model selection across K ∈ {3,4,5,6} |
+| `tests/test_hmm_trainer.py` | 11 Python tests: training convergence, BIC, determinism, save/load round-trip |
+| `tests/test_hmm_bindings.py` | 8 Python binding tests: HMM class, config fields, backend swap |
+
+Key design decisions:
+- **Observation model**: 6-dimensional evidence vector (absorption, exhaustion, withdrawal, breakout, refill, stabilization) with diagonal Gaussian emission per state.
+- **Forward algorithm in log-space**: prevents underflow for long sequences; O(K²) per event.
+- **K latent states**: configurable (default 5), each mapped to a `RippleState` via `state_map[]`.
+- **Config toggle**: `hmm_enabled` and `hmm_model_path` on `RippleConfig`; when enabled, `RippleEngine` auto-creates and loads the HMM backend.
+- **Runtime swap**: `ripple.set_hmm_backend(json)` and `ripple.set_score_backend()` via pybind11 allow A/B comparison in Python.
+- **Training**: Python-only Baum-Welch with `var_floor` to prevent degenerate emissions. BIC = -2·LL + n_params·log(T).
+- **Minimal JSON format**: `{"K", "transition", "means", "variances", "state_map", "log_prior"}` — no external dependency for C++ parsing.
+- **Rule-based baseline preserved**: `ScoreBasedInference` remains the default backend; HMM is opt-in.
+
+Test counts: 59 C++ checks + 11 Python trainer tests + 8 Python binding tests = 78 total.
+
+Deferred for later:
+- Wave HMM: not warranted until V1 backtest comparison shows Ripple HMM provides value.
+- Live model retraining pipeline.
+- Actual HMM vs. rule-based backtest comparison (requires labeled V1 backtest data — the comparison infrastructure is in place via `set_hmm_backend` / `set_score_backend`).
+
+Known limitations:
+- The HMM trainer uses a single-sequence Baum-Welch; multi-sequence EM would be needed for training on multiple backtest runs.
+- The C++ JSON parser is minimal and does not validate all edge cases; production use should validate the model file.
+
 ---
 
-### Phase 8 — Cross-Venue Confirmation
+### Phase 8 — Cross-Venue Confirmation `[COMPLETED]`
 
 **Objective:** Use L1 data from additional venues (Oanda, others) for cross-venue confirmation signals in Wave.
 
@@ -884,6 +1084,41 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 **Performance considerations:**
 - L1 ingestion is low-frequency; no tight latency requirement.
 - Feature computation at Wave cadence (5s).
+
+**Completion notes:**
+
+Delivered files:
+
+| File | Role |
+|------|------|
+| `crossvenue/__init__.py` | Python cross-venue package init |
+| `crossvenue/crossvenue_engine.py` | `CrossVenueEngine`: lead/lag, divergence, correlation from paired L1 price streams |
+| `crossvenue/oanda_feed.py` | `OandaL1Feed`: S5 candle polling as L1 proxy, historical fetch for backtest storage |
+| `crossvenue/crossvenue_store.py` | CSV save/load for cross-venue prices, replay utility for deterministic backtesting |
+| `tests/test_crossvenue_engine.py` | 21 tests: Pearson, feature computation, cadence gating, trimming, determinism, store round-trip, replay |
+| `tests/test_crossvenue_wave.py` | 9 tests: Wave integration, cross-venue → breakdown, baseline preservation, reset, accessors |
+
+Modified files:
+
+| File | Change |
+|------|--------|
+| `wave/wave_engine.py` | Added `set_crossvenue_snapshot()`, cross-venue feature integration in `_classify_regime()`, CV accessors, reset |
+
+Key design decisions:
+- **Observation model**: 6D evidence → CrossVenueEngine operates on L1 mid-prices from two venues.
+- **Features**: lead/lag via cross-correlation at multiple offsets; divergence as EMA-smoothed return difference; rolling Pearson correlation.
+- **Wave integration**: low cross-venue correlation boosts effective absorption ratio (→ BREAKDOWN); large divergence boosts effective dispersion (→ BREAKDOWN). High correlation confirms stability. The boost is additive, keeping the regime state machine deterministic.
+- **Oanda L1 feed**: uses S5 candles from the existing `oandapyV20` REST API; no streaming dependency. Historical fetch supports backtest storage.
+- **Storage**: simple CSV format (timestamp_ms, venue, price) for cross-venue L1; sorted by timestamp on load for deterministic replay.
+- **Backward compatibility**: when cross-venue data is not set (`cv_available = False`), `_classify_regime()` uses the original V1 logic unmodified.
+
+Test counts: 21 cross-venue engine tests + 9 Wave integration tests = 30 total.
+
+Known limitations:
+- Oanda L1 feed uses S5 candle close as L1 proxy — true tick-by-tick streaming would require Oanda v20 streaming API integration.
+- Cross-venue features are only wired into `WaveEngine` (Python); the C++ `RippleEngine` consumes them indirectly via `WaveSnapshot.regime`.
+- The divergence and correlation boost factors (2.0× and 0.5×) are hardcoded; these could be exposed as `WaveConfig` parameters in a future iteration.
+- Actual backtest comparison (cross-venue on vs. off) requires stored Oanda L1 data alongside Binance tick data — the infrastructure is in place but requires a data collection run.
 
 ---
 

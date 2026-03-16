@@ -23,16 +23,36 @@ _COL_COUNT = len(_COLUMNS)
 _MAX_ROWS = 2000
 
 _CAT_COLORS = {
-    SignalCategory.RIPPLE_ENTRY:   QColor(30, 200, 100),
-    SignalCategory.RIPPLE_EXIT:    QColor(255, 180, 60),
-    SignalCategory.RIPPLE_PREPARE: QColor(100, 160, 220),
-    SignalCategory.RIPPLE_CANCEL:  QColor(255, 80, 80),
-    SignalCategory.RIPPLE_REARM:   QColor(160, 140, 220),
-    SignalCategory.EXECUTION:      QColor(255, 215, 0),
-    SignalCategory.LEGACY_RAW:     QColor(180, 180, 200),
-    SignalCategory.CONTEXT:        QColor(120, 120, 150),
-    SignalCategory.DIAGNOSTIC:     QColor(100, 100, 130),
+    SignalCategory.RIPPLE_ENTRY:          QColor(30, 200, 100),
+    SignalCategory.RIPPLE_EXIT:           QColor(255, 180, 60),
+    SignalCategory.RIPPLE_PREPARE:        QColor(100, 160, 220),
+    SignalCategory.RIPPLE_CANCEL:         QColor(255, 80, 80),
+    SignalCategory.RIPPLE_REARM:          QColor(160, 140, 220),
+    SignalCategory.EXECUTION:             QColor(255, 215, 0),
+    SignalCategory.LEGACY_RAW:            QColor(180, 180, 200),
+    SignalCategory.CONTEXT:               QColor(120, 120, 150),
+    SignalCategory.DIAGNOSTIC:            QColor(100, 100, 130),
+    SignalCategory.STRATEGY_ARM:          QColor(80, 200, 120),
+    SignalCategory.STRATEGY_DISARM:       QColor(200, 100, 80),
+    SignalCategory.STRATEGY_STATE_CHANGE: QColor(140, 160, 220),
 }
+
+_STRATEGY_CATEGORIES = {
+    SignalCategory.STRATEGY_ARM,
+    SignalCategory.STRATEGY_DISARM,
+    SignalCategory.STRATEGY_STATE_CHANGE,
+    SignalCategory.RIPPLE_PREPARE,
+    SignalCategory.RIPPLE_ENTRY,
+    SignalCategory.RIPPLE_EXIT,
+    SignalCategory.RIPPLE_CANCEL,
+    SignalCategory.RIPPLE_REARM,
+    SignalCategory.CONTEXT,
+    SignalCategory.EXECUTION,
+}
+
+_CONTEXT_SIGNAL_PREFIXES = (
+    "EXHAUSTION_", "ABSORPTION_", "SWEEP_", "FLIP_",
+)
 
 
 class _SignalTableModel(QAbstractTableModel):
@@ -176,6 +196,7 @@ class TradeBlotter(QWidget):
         header_row.addWidget(self._make_label("Source:"))
         self._source_combo = QComboBox()
         self._source_combo.addItem("All", None)
+        self._source_combo.addItem("Strategy", "strategy")
         self._source_combo.addItem("Ripple", "ripple")
         self._source_combo.addItem("Legacy", "legacy")
         self._source_combo.addItem("Execution", "execution")
@@ -184,6 +205,11 @@ class TradeBlotter(QWidget):
         header_row.addWidget(self._source_combo)
 
         header_row.addWidget(self._make_label("  Show:"))
+        self._strategy_btn = QCheckBox("Strategy")
+        self._strategy_btn.setStyleSheet("color: #b4b4c8; font-size: 10px;")
+        self._strategy_btn.toggled.connect(self._on_strategy_toggled)
+        header_row.addWidget(self._strategy_btn)
+
         self._ripple_only_btn = QCheckBox("Ripple only")
         self._ripple_only_btn.setStyleSheet("color: #b4b4c8; font-size: 10px;")
         self._ripple_only_btn.toggled.connect(self._on_ripple_only_toggled)
@@ -209,6 +235,8 @@ class TradeBlotter(QWidget):
         self._model = _SignalTableModel(self)
         self._proxy = _CategoryFilterProxy(self)
         self._proxy.setSourceModel(self._model)
+
+        self._strategy_btn.setChecked(True)
 
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -260,6 +288,9 @@ class TradeBlotter(QWidget):
         if signal_type.startswith("EXEC_"):
             cat = SignalCategory.EXECUTION
             source = "execution"
+        elif any(signal_type.startswith(p) for p in _CONTEXT_SIGNAL_PREFIXES):
+            cat = SignalCategory.CONTEXT
+            source = "legacy"
         entry = SignalEntry(
             timestamp=int(timestamp),
             signal_type=signal_type,
@@ -286,20 +317,30 @@ class TradeBlotter(QWidget):
         src = self._source_combo.currentData()
         if src is None:
             self._proxy.set_source_filter(None)
+            self._proxy.set_category_filter(None)
+        elif src == "strategy":
+            self._proxy.set_source_filter(None)
+            self._proxy.set_category_filter(_STRATEGY_CATEGORIES)
         else:
             self._proxy.set_source_filter({src})
-        self._ripple_only_btn.blockSignals(True)
-        self._exec_only_btn.blockSignals(True)
-        self._ripple_only_btn.setChecked(False)
-        self._exec_only_btn.setChecked(False)
-        self._ripple_only_btn.blockSignals(False)
-        self._exec_only_btn.blockSignals(False)
+            self._proxy.set_category_filter(None)
+        self._clear_checkboxes()
+
+    def _on_strategy_toggled(self, checked):
+        if checked:
+            self._clear_checkboxes(skip="strategy")
+            self._source_combo.blockSignals(True)
+            self._source_combo.setCurrentIndex(0)
+            self._source_combo.blockSignals(False)
+            self._proxy.set_source_filter(None)
+            self._proxy.set_category_filter(_STRATEGY_CATEGORIES)
+        else:
+            self._proxy.set_source_filter(None)
+            self._proxy.set_category_filter(None)
 
     def _on_ripple_only_toggled(self, checked):
         if checked:
-            self._exec_only_btn.blockSignals(True)
-            self._exec_only_btn.setChecked(False)
-            self._exec_only_btn.blockSignals(False)
+            self._clear_checkboxes(skip="ripple")
             self._source_combo.blockSignals(True)
             self._source_combo.setCurrentIndex(0)
             self._source_combo.blockSignals(False)
@@ -310,9 +351,7 @@ class TradeBlotter(QWidget):
 
     def _on_exec_only_toggled(self, checked):
         if checked:
-            self._ripple_only_btn.blockSignals(True)
-            self._ripple_only_btn.setChecked(False)
-            self._ripple_only_btn.blockSignals(False)
+            self._clear_checkboxes(skip="exec")
             self._source_combo.blockSignals(True)
             self._source_combo.setCurrentIndex(0)
             self._source_combo.blockSignals(False)
@@ -320,6 +359,15 @@ class TradeBlotter(QWidget):
             self._proxy.set_category_filter(None)
         else:
             self._proxy.set_source_filter(None)
+
+    def _clear_checkboxes(self, skip=""):
+        for name, btn in [("strategy", self._strategy_btn),
+                          ("ripple", self._ripple_only_btn),
+                          ("exec", self._exec_only_btn)]:
+            if name != skip:
+                btn.blockSignals(True)
+                btn.setChecked(False)
+                btn.blockSignals(False)
 
     @staticmethod
     def _make_label(text: str) -> QLabel:

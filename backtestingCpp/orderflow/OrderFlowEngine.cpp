@@ -10,6 +10,8 @@ OrderFlowEngine::OrderFlowEngine(const EngineConfig& config)
       signal_engine_(order_book_, trade_flow_, volume_profile_, cvd_, footprint_),
       ripple_(config.ripple) {
     signal_engine_.set_params(config.signal_params);
+    ripple_.set_volume_profile(&volume_profile_);
+    ripple_.set_cvd(&cvd_);
 }
 
 OrderFlowEngine::~OrderFlowEngine() {
@@ -52,6 +54,30 @@ void OrderFlowEngine::set_signal_callback(SignalCallback cb) {
 
 void OrderFlowEngine::set_ripple_callback(ripple::RippleDecisionCallback cb) {
     ripple_.set_decision_callback(std::move(cb));
+}
+
+StrategySnapshot OrderFlowEngine::get_strategy_snapshot() const {
+    StrategySnapshot ss;
+
+    auto ctx_ts = ripple_.context().now();
+    ss.timestamp = ctx_ts;
+
+    ss.wave = ripple_.wave_snapshot();
+    ss.trade = ripple_.get_trade_state();
+    ss.liquidity_map = ripple_.liquidity_map();
+    ss.risk = ripple_.risk_engine().get_snapshot();
+
+    ss.ripple.timestamp       = ctx_ts;
+    ss.ripple.liquidity_state = ripple_.current_state();
+    ss.ripple.microprice = ripple_.context().microprice();
+    ss.ripple.imbalance  = ripple_.last_features()->top1_imbalance;
+    ss.ripple.ofi        = ripple_.last_features()->aggressive_flow_imbalance;
+    ss.ripple.lsi        = 0.0;
+
+    ss.features.timestamp       = ctx_ts;
+    ss.features.ripple_features = *ripple_.last_features();
+
+    return ss;
 }
 
 void OrderFlowEngine::reset_ripple() {

@@ -30,8 +30,38 @@ def _build_config(params: Dict) -> "ofe.EngineConfig":
     sp.cvd_divergence_lookback = params.get("cvd_divergence_lookback", 100)
     sp.exhaustion_lookback_bars = params.get("exhaustion_lookback_bars", 5)
     sp.signal_strength_min = params.get("signal_strength_min", 0.3)
-
     config.signal_params = sp
+
+    # Ripple parameters (Phase 6)
+    rcfg = config.ripple
+    rcfg.tick_size = config.tick_size
+    rcfg.paper_fills = params.get("paper_fills", False)
+    _RIPPLE_MAP = {
+        "wall_min_relative_size": "wall_min_relative_size",
+        "absorption_entry": "absorption_entry",
+        "exhaustion_entry": "exhaustion_entry",
+        "breakout_entry": "breakout_entry",
+        "idle_exit_threshold": "idle_exit_threshold",
+        "bounce_max_break_risk": "bounce_max_break_risk",
+        "feature_window_ms": "feature_window_ms",
+    }
+    for param_key, attr_name in _RIPPLE_MAP.items():
+        if param_key in params:
+            setattr(rcfg, attr_name, params[param_key])
+
+    # Lifecycle sub-parameters
+    lc = rcfg.lifecycle
+    if "confirmation_window_ms" in params:
+        lc.confirmation_window_ms = params["confirmation_window_ms"]
+    if "max_hold_time_ms" in params:
+        lc.max_hold_time_ms = params["max_hold_time_ms"]
+    if "trailing_stop_sigma" in params:
+        lc.trailing_stop_sigma = params["trailing_stop_sigma"]
+    if "target_distance_sigma" in params:
+        lc.target_distance_sigma = params["target_distance_sigma"]
+    rcfg.lifecycle = lc
+
+    config.ripple = rcfg
     return config
 
 
@@ -45,6 +75,12 @@ def backtest(exchange: str, symbol: str, from_time: int, to_time: int,
         )
 
     config = _build_config(params)
+
+    # Enable paper fills for Ripple-based metrics
+    rcfg = config.ripple
+    rcfg.paper_fills = True
+    config.ripple = rcfg
+
     engine = ofe.OrderFlowEngine(config)
 
     tick_store_path = os.path.join("data", f"{exchange}_ticks.h5")
@@ -63,10 +99,25 @@ def backtest(exchange: str, symbol: str, from_time: int, to_time: int,
 
     replay.run_sync()
 
+    ripple = engine.get_ripple()
+    ripple_trades = ripple.completed_trades()
+    ripple_pnl = ripple.cumulative_pnl()
+    ripple_dd = ripple.lifecycle_max_drawdown()
+
     sig_engine = engine.get_signal_engine()
-    pnl = sig_engine.get_pnl()
-    max_drawdown = sig_engine.get_max_drawdown()
-    num_trades = sig_engine.get_num_trades()
+    sig_pnl = sig_engine.get_pnl()
+    sig_dd = sig_engine.get_max_drawdown()
+    sig_trades = sig_engine.get_num_trades()
+
+    # Use Ripple metrics when trades completed, else fall back to SignalEngine
+    if ripple_trades > 0:
+        pnl = ripple_pnl
+        max_drawdown = ripple_dd
+        num_trades = int(ripple_trades)
+    else:
+        pnl = sig_pnl
+        max_drawdown = sig_dd
+        num_trades = sig_trades
 
     returns = sig_engine.get_returns()
     sharpe_ratio = _compute_sharpe(returns)

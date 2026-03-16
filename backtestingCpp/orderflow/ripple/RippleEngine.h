@@ -12,6 +12,7 @@
 #include "RippleStateTracker.h"
 #include "TradeLifecycleEngine.h"
 #include "LiquidityMapEngine.h"
+#include "RiskEngine.h"
 #include "../OrderBook.h"
 #include "../TradeFlow.h"
 #include "../VolumeProfile.h"
@@ -73,9 +74,14 @@ public:
     void set_inventory(const InventorySnapshot& inv);
     void set_diagnostics(std::shared_ptr<RippleDiagnostics> diag);
 
-    // --- higher-layer context (stubs for Tide / Wave) ---
+    // --- higher-layer context ---
     void set_tide_context(const TideContext& tide) { tide_ = tide; }
     void set_wave_context(const WaveContext& wave) { wave_ = wave; }
+
+    // --- Phase 5: Wave regime and permissions ---
+    void set_wave_snapshot(const WaveSnapshot& snap) { wave_snap_ = snap; wave_snap_set_ = true; }
+    const WaveSnapshot& wave_snapshot() const { return wave_snap_; }
+    bool has_wave_snapshot() const { return wave_snap_set_; }
 
     // --- Phase 2: trade lifecycle ---
     void on_fill(const FillEvent& fill);
@@ -89,6 +95,12 @@ public:
     void set_cvd(orderflow::CumulativeVolumeDelta* cvd)   { cvd_ = cvd; }
     const LiquidityMapEngine& liquidity_map_engine() const { return liq_map_; }
     const LiquidityMapSnapshot& liquidity_map() const { return liq_map_.snapshot(); }
+
+    // --- Phase 4: risk engine ---
+    RiskEngine&       risk_engine()       { return risk_; }
+    const RiskEngine& risk_engine() const { return risk_; }
+    void set_risk_budget(double es_budget, double max_position_usd, double risk_multiplier);
+    void set_realized_vol(double vol);
 
     // --- backend swapping ---
     void set_feature_engine(std::unique_ptr<IRippleFeatureEngine> engine);
@@ -113,6 +125,12 @@ public:
     uint64_t trade_count()   const { return trade_count_; }
     uint64_t depth_count()   const { return depth_count_; }
 
+    // --- Phase 6: aggregate PnL from lifecycle ---
+    double   cumulative_pnl()      const { return lifecycle_.cumulative_pnl(); }
+    double   lifecycle_peak_equity()   const { return lifecycle_.peak_equity(); }
+    double   lifecycle_max_drawdown()  const { return lifecycle_.max_drawdown_value(); }
+    uint64_t completed_trades()    const { return lifecycle_.completed_trades(); }
+
 private:
     void run_pipeline(Timestamp ts);
     void ensure_diagnostics();
@@ -127,6 +145,7 @@ private:
     std::unique_ptr<ITriggerDecisionEngine>  trigger_engine_;
     TradeLifecycleEngine                     lifecycle_;
     LiquidityMapEngine                       liq_map_;
+    RiskEngine                               risk_;
 
     InventorySnapshot      inventory_;
     RippleDecisionCallback callback_;
@@ -147,6 +166,8 @@ private:
 
     TideContext tide_;
     WaveContext wave_;
+    WaveSnapshot wave_snap_ = DefaultWaveSnapshot::make();
+    bool         wave_snap_set_ = false;
 
     // Phase 3: optional external engine references (non-owning)
     orderflow::VolumeProfile*          vp_  = nullptr;

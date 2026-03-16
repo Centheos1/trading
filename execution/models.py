@@ -38,6 +38,22 @@ class RippleMode(Enum):
     PAPER = "paper"
 
 
+class StrategyMode(Enum):
+    OBSERVE = "observe"
+    PAPER = "paper"
+    LIVE = "live"
+
+
+class StrategyUIState(Enum):
+    DISARMED = "disarmed"
+    ARMING = "arming"
+    ARMED_WAITING = "armed_waiting"
+    ARMED_ACTIVE = "armed_active"
+    ARMED_EXITING = "armed_exiting"
+    ARMED_COOLDOWN = "armed_cooldown"
+    DISARMING = "disarming"
+
+
 class SignalCategory(Enum):
     CONTEXT = "CONTEXT"
     RIPPLE_PREPARE = "RIPPLE_PREPARE"
@@ -48,6 +64,9 @@ class SignalCategory(Enum):
     LEGACY_RAW = "LEGACY_RAW"
     EXECUTION = "EXECUTION"
     DIAGNOSTIC = "DIAGNOSTIC"
+    STRATEGY_ARM = "STRATEGY_ARM"
+    STRATEGY_DISARM = "STRATEGY_DISARM"
+    STRATEGY_STATE_CHANGE = "STRATEGY_STATE_CHANGE"
 
 
 class SuppressionReason(Enum):
@@ -86,7 +105,7 @@ class SignalEntry:
     """Unified signal log row consumed by the trade blotter."""
     timestamp: int = 0          # epoch ms
     signal_type: str = ""       # display name (e.g. RIPPLE_ENTER_BOUNCE_LONG)
-    source: str = "legacy"      # "ripple", "legacy", "execution", "diagnostic"
+    source: str = "legacy"      # "ripple", "legacy", "execution", "diagnostic", "strategy"
     category: SignalCategory = SignalCategory.LEGACY_RAW
     side: str = ""              # "BUY", "SELL", ""
     price: float = 0.0
@@ -94,6 +113,11 @@ class SignalEntry:
     description: str = ""
     state_summary: str = ""
     suppressed: SuppressionReason = SuppressionReason.NONE
+    wave_regime: str = ""
+    tide_bias: str = ""
+    risk_budget_pct: float = 0.0
+    lifecycle_state: str = ""
+    archetype: str = ""
 
 
 @dataclass

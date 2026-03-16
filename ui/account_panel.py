@@ -12,6 +12,7 @@ class AccountPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(400, 150)
+        self._connected = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -21,6 +22,18 @@ class AccountPanel(QWidget):
         header.setFont(QFont("Menlo", 9, QFont.Bold))
         header.setStyleSheet("color: #b4b4c8; background: #0f0f19; padding: 4px;")
         layout.addWidget(header)
+
+        self._placeholder = QLabel("Not connected")
+        self._placeholder.setFont(QFont("Menlo", 11))
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self._placeholder.setStyleSheet(
+            "color: #555570; padding: 20px; background: transparent;")
+        layout.addWidget(self._placeholder)
+
+        self._content = QWidget()
+        content_layout = QVBoxLayout(self._content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(2)
 
         balance_row = QHBoxLayout()
         balance_row.setContentsMargins(4, 2, 4, 2)
@@ -33,12 +46,12 @@ class AccountPanel(QWidget):
         balance_row.addWidget(self._pnl_label)
         balance_row.addWidget(self._rpnl_label)
         balance_row.addStretch()
-        layout.addLayout(balance_row)
+        content_layout.addLayout(balance_row)
 
         pos_label = QLabel(" Open Positions")
         pos_label.setFont(QFont("Menlo", 8, QFont.Bold))
         pos_label.setStyleSheet("color: #8888aa; background: #121220; padding: 2px;")
-        layout.addWidget(pos_label)
+        content_layout.addWidget(pos_label)
 
         self._pos_table = QTableWidget()
         self._pos_table.setColumnCount(5)
@@ -51,12 +64,12 @@ class AccountPanel(QWidget):
         self._pos_table.verticalHeader().setVisible(False)
         self._pos_table.setMaximumHeight(120)
         self._apply_table_style(self._pos_table)
-        layout.addWidget(self._pos_table)
+        content_layout.addWidget(self._pos_table)
 
         order_label = QLabel(" Recent Orders")
         order_label.setFont(QFont("Menlo", 8, QFont.Bold))
         order_label.setStyleSheet("color: #8888aa; background: #121220; padding: 2px;")
-        layout.addWidget(order_label)
+        content_layout.addWidget(order_label)
 
         self._last_entry_price = 0.0
         self._last_entry_side = None
@@ -72,11 +85,23 @@ class AccountPanel(QWidget):
         self._order_table.setSelectionBehavior(QTableWidget.SelectRows)
         self._order_table.verticalHeader().setVisible(False)
         self._apply_table_style(self._order_table)
-        layout.addWidget(self._order_table)
+        content_layout.addWidget(self._order_table)
+
+        self._content.setVisible(False)
+        layout.addWidget(self._content)
 
         self._max_order_rows = 200
 
+    def set_connected(self, connected: bool):
+        if connected == self._connected:
+            return
+        self._connected = connected
+        self._placeholder.setVisible(not connected)
+        self._content.setVisible(connected)
+
     def update_account(self, balance, available, positions):
+        if not self._connected:
+            self.set_connected(True)
         self._bal_label.setText(f"Balance: {balance:.2f}")
         self._avail_label.setText(f"Available: {available:.2f}")
 
@@ -200,6 +225,7 @@ class AccountPanel(QWidget):
         self._rpnl_label.setStyleSheet(
             "color: #b4b4c8; font-family: Menlo; font-size: 11px; padding: 2px 6px;"
         )
+        self.set_connected(False)
 
     @staticmethod
     def _make_label(text):

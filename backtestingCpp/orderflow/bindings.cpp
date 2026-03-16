@@ -20,6 +20,9 @@
 #include "ripple/RippleDiagnostics.h"
 #include "ripple/TradeLifecycleEngine.h"
 #include "ripple/LiquidityMapEngine.h"
+#include "ripple/RiskEngine.h"
+#include "ripple/HMMBasedInference.h"
+#include "ripple/ScoreBasedInference.h"
 #include "Schemas.h"
 
 namespace py = pybind11;
@@ -281,6 +284,7 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def("reset_ripple", &OrderFlowEngine::reset_ripple)
         .def("get_ripple", py::overload_cast<>(&OrderFlowEngine::get_ripple),
              py::return_value_policy::reference_internal)
+        .def("get_strategy_snapshot", &OrderFlowEngine::get_strategy_snapshot)
         .def("set_ripple_callback", [](OrderFlowEngine& engine, py::function cb) {
             engine.set_ripple_callback([cb](const ripple::RippleDecision& d) {
                 py::gil_scoped_acquire acquire;
@@ -498,7 +502,10 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def_readwrite("console_diagnostics", &RippleConfig::console_diagnostics)
         .def_readwrite("diagnostics_path", &RippleConfig::diagnostics_path)
         .def_readwrite("replay_mode", &RippleConfig::replay_mode)
+        .def_readwrite("paper_fills", &RippleConfig::paper_fills)
         .def_readwrite("pipeline_min_interval_ms", &RippleConfig::pipeline_min_interval_ms)
+        .def_readwrite("hmm_enabled", &RippleConfig::hmm_enabled)
+        .def_readwrite("hmm_model_path", &RippleConfig::hmm_model_path)
         .def_readwrite("lifecycle", &RippleConfig::lifecycle);
 
     py::class_<InventorySnapshot>(m, "InventorySnapshot")
@@ -592,6 +599,9 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def("has_pending_intent", &TradeLifecycleEngine::has_pending_intent)
         .def("consume_pending_intent", &TradeLifecycleEngine::consume_pending_intent)
         .def("completed_trades", &TradeLifecycleEngine::completed_trades)
+        .def("cumulative_pnl", &TradeLifecycleEngine::cumulative_pnl)
+        .def("peak_equity", &TradeLifecycleEngine::peak_equity)
+        .def("max_drawdown_value", &TradeLifecycleEngine::max_drawdown_value)
         .def("reset", &TradeLifecycleEngine::reset);
 
     py::class_<RippleEngine>(m, "RippleEngine")
@@ -614,7 +624,37 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def("get_lifecycle_state", &RippleEngine::get_lifecycle_state)
         .def("has_active_trade", &RippleEngine::has_active_trade)
         .def("liquidity_map", &RippleEngine::liquidity_map,
-             py::return_value_policy::reference_internal);
+             py::return_value_policy::reference_internal)
+        .def("set_risk_budget", &RippleEngine::set_risk_budget)
+        .def("set_realized_vol", &RippleEngine::set_realized_vol)
+        .def("set_wave_snapshot", &RippleEngine::set_wave_snapshot)
+        .def("wave_snapshot", &RippleEngine::wave_snapshot,
+             py::return_value_policy::reference_internal)
+        .def("has_wave_snapshot", &RippleEngine::has_wave_snapshot)
+        .def("cumulative_pnl", &RippleEngine::cumulative_pnl)
+        .def("lifecycle_peak_equity", &RippleEngine::lifecycle_peak_equity)
+        .def("lifecycle_max_drawdown", &RippleEngine::lifecycle_max_drawdown)
+        .def("completed_trades", &RippleEngine::completed_trades)
+        .def("set_hmm_backend", [](RippleEngine& self, const std::string& model_json) {
+            auto hmm = std::make_unique<ripple::HMMBasedInference>(self.config());
+            if (!model_json.empty()) {
+                if (!hmm->load_model_from_string(model_json))
+                    throw std::runtime_error("Failed to load HMM model from JSON");
+            }
+            self.set_inference_backend(std::move(hmm));
+        }, py::arg("model_json") = "")
+        .def("set_score_backend", [](RippleEngine& self) {
+            self.set_inference_backend(
+                std::make_unique<ripple::ScoreBasedInference>(self.config()));
+        });
+
+    py::class_<ripple::HMMBasedInference>(m, "HMMBasedInference")
+        .def(py::init<const RippleConfig&>())
+        .def("load_model", &ripple::HMMBasedInference::load_model)
+        .def("load_model_from_string", &ripple::HMMBasedInference::load_model_from_string)
+        .def("model_loaded", &ripple::HMMBasedInference::model_loaded)
+        .def("num_states", &ripple::HMMBasedInference::num_states)
+        .def("reset_forward", &ripple::HMMBasedInference::reset_forward);
 
     py::class_<DiagnosticRecord>(m, "DiagnosticRecord")
         .def_readonly("ts", &DiagnosticRecord::ts)
@@ -958,5 +998,25 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def_readwrite("risk", &orderflow::StrategySnapshot::risk)
         .def_readwrite("features", &orderflow::StrategySnapshot::features)
         .def_static("make_default", &orderflow::StrategySnapshot::make_default);
+
+    // --- Phase 4: RiskEngine ---
+
+    py::class_<RiskEngine>(m, "RiskEngine")
+        .def(py::init<const orderflow::RiskConfig&>(), py::arg("config") = orderflow::RiskConfig{})
+        .def("set_budget", &RiskEngine::set_budget)
+        .def("set_volatility", &RiskEngine::set_volatility)
+        .def("on_fill", &RiskEngine::on_fill)
+        .def("on_price_update", &RiskEngine::on_price_update)
+        .def("check_new_order", &RiskEngine::check_new_order)
+        .def("get_allowed_size", &RiskEngine::get_allowed_size)
+        .def("compute_position_size", &RiskEngine::compute_position_size)
+        .def("get_consumed_es", &RiskEngine::get_consumed_es)
+        .def("get_remaining_budget", &RiskEngine::get_remaining_budget)
+        .def("is_budget_exhausted", &RiskEngine::is_budget_exhausted)
+        .def("get_position_qty", &RiskEngine::get_position_qty)
+        .def("get_position_usd", &RiskEngine::get_position_usd)
+        .def("get_unrealized_pnl", &RiskEngine::get_unrealized_pnl)
+        .def("get_snapshot", &RiskEngine::get_snapshot)
+        .def("reset", &RiskEngine::reset);
 
 }

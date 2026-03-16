@@ -323,6 +323,9 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 | Phase skipping | Implementing Phase 7 before Phase 2 complete | Follow phase order in `implementation_plan.md` |
 | Test gap | Behavior changes without test updates | Mandatory test with every behavioral change |
 | Doc rot | Code changes, docs don't | Update docs with every interface/behavior change |
+| Depth-trade timestamp skew | `chart_now` shifts visible window away from trade data | Cap depth lead in `chart_now` (see §11.4) |
+| Trade-derived data disappearing | Bubbles/CVD vanish while heatmap is still live | Regression guard + pipeline diagnostics (see §11.4) |
+| Pruning with wrong time reference | Using `chart_now` instead of trade-derived time for trade pruning | Prune on `_last_trade_ts` only, never depth-influenced time (see §11.4) |
 
 ### 11.3 Strategy Failures
 
@@ -335,6 +338,26 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 | Using `float` instead of `double` | Precision loss, non-deterministic replay | All hot-path numerics must be `double` (§9.1) |
 | Feature leakage | Using future information in backtest | Strict causal features, lookback windows |
 | Overfitting | Over-optimized on historical data | Out-of-sample validation, parameter stability checks |
+
+### 11.4 UI Visualization Pipeline Failures
+
+These failures cause trade-derived visualizations (bubbles, CVD) to silently disappear while other layers (heatmap, volume profile) continue rendering. They have caused multiple regressions and must be explicitly guarded against.
+
+| Failure Mode | Root Cause | Symptom | Prevention |
+|---|---|---|---|
+| Depth-trade skew shifts visible window | `chart_now = max(depth_ts, trade_ts)` lets depth WS event time advance far ahead of trade WS trade time. Caused by network jitter, asyncio scheduling differences, and sparse trade periods. | Bubbles and CVD vanish after a few minutes. Heatmap unaffected. `fT` (filtered-by-time) counter climbs. PERF log shows growing `skew`. | `chart_now` must cap depth lead: `max(t, min(d, t + MAX_DEPTH_LEAD_MS))`. Currently capped at 2 seconds. |
+| Pruning uses depth-influenced time | Trade deque pruning cutoff derived from `chart_now` (which includes depth timestamps). When depth is ahead, cutoff becomes too aggressive and wipes trades that should be visible. | `_trades` deque empties or shrinks drastically. `prn` (pruned) counter spikes. Bubbles disappear even though trades are arriving. | Prune only on `_last_trade_ts`, never `chart_now` or `_last_depth_ts`. Keep 2× visible window buffer. Mirrors CVD's pruning approach. |
+| Render-time filtering too aggressive | `t_start = chart_now - visible_window_ms` with uncapped `chart_now` filters out all trades whose timestamps are behind depth time. | `fT` counter grows while `trd` (total in deque) stays healthy. `bub` declines proportionally to skew growth. | Capping `chart_now` (first row) prevents this. Any change to `t_start` calculation must consider depth-trade skew. |
+| Silent pipeline collapse | No diagnostic, no warning — trade-derived layers simply stop rendering. | User sees heatmap but no bubbles or CVD. Hard to diagnose without instrumentation. | `_bubble_diag` counters + `failure_stage` inference + `BUBBLES_DEAD_WHILE_TRADES_LIVE` regression guard in `main_window.py`. Always-on, cheap. |
+
+**Critical invariants** (must be preserved by any future change to the heatmap/bubble/CVD path):
+
+1. **`chart_now` must be capped.** `chart_now = max(trade_ts, min(depth_ts, trade_ts + MAX_DEPTH_LEAD_MS))` when both streams are live. Do not revert to `max(depth_ts, trade_ts)`.
+2. **Trade pruning must use trade-derived time only.** The cutoff in `add_depth_column` must be based on `_last_trade_ts`, not `chart_now` or `_last_depth_ts`.
+3. **Render-time `t_start` inherits the cap from `chart_now`.** Do not compute `t_start` from uncapped values.
+4. **`_bubble_diag` instrumentation must remain active.** It is cheap (counter increments only) and is the only way to diagnose pipeline failures without a live debugger.
+5. **The `failure_stage` diagnostic must be exposed** in the PERF log and status panel. Any future pipeline change must update the failure-stage inference if new failure modes are introduced.
+6. **`test_chart_now_caps_depth_lead` and `test_pruning_uses_trade_time_not_depth_time`** in `tests/test_bubble_pipeline.py` are mandatory regression tests. They must pass before any change to the bubble/CVD rendering path is merged.
 
 ---
 
@@ -516,3 +539,102 @@ Agents should organize configuration parameters into these groups:
 | `testing.*` | `replay_tolerance`, `benchmark_latency_target_us` |
 
 **Rule:** Do not scatter magic constants. All tunable parameters belong in configuration with documented defaults and valid ranges.
+
+---
+
+## 21. UI Visualization Pipeline Rules
+
+These rules govern the real-time UI rendering pipeline (`heatmap_widget.py`, `cvd_widget.py`, `main_window.py`). They exist because **two separate regressions** silently killed the bubble layer and CVD, both caused by timestamp handling errors in the trade-derived rendering path.
+
+### 21.1 Timestamp Discipline
+
+The UI receives data from two independent WebSocket streams with independent timestamps:
+
+| Stream | Field | Meaning | Update Rate |
+|---|---|---|---|
+| Depth WS (`@depth@100ms`) | `E` (event time) | When Binance generated the depth batch | Every 100ms, continuous |
+| Trade WS (`@trade`) | `T` (trade time) | When the trade was executed | Per-trade, sparse in quiet markets |
+
+**Key fact:** These timestamps can and do drift apart. Depth `E` advances continuously; trade `T` advances only when trades execute. Network batching, asyncio scheduling, and sparse trade periods cause depth to lead trade by seconds to tens of seconds. This is normal and must be handled.
+
+### 21.2 `chart_now` Rules
+
+`chart_now` is the unified "now" timestamp used for:
+- Computing the visible window: `t_start = chart_now - visible_window_ms`
+- CVD time reference: `set_time_ref(chart_now, ...)`
+- PERF log reporting
+
+**Invariant:** `chart_now` must be capped to prevent depth-trade skew from shifting the visible window:
+
+```
+chart_now = max(trade_ts, min(depth_ts, trade_ts + MAX_DEPTH_LEAD_MS))
+```
+
+Where `MAX_DEPTH_LEAD_MS = 2000` (configurable via `_MAX_DEPTH_LEAD_MS`).
+
+**Prohibited:** `chart_now = max(depth_ts, trade_ts)` — this is the exact pattern that caused both regressions.
+
+### 21.3 Trade Pruning Rules
+
+Trade deques (`_trades`) must be pruned using **trade-derived time only**:
+
+```
+trade_now = _last_trade_ts
+trade_cutoff = trade_now - visible_window_ms * 2
+```
+
+**Prohibited:** Pruning based on `chart_now`, `_last_depth_ts`, or any depth-influenced timestamp. This is what CVD does correctly (using `trade_time_only`) and what the bubble path previously got wrong.
+
+### 21.4 Render-Time Filtering
+
+When drawing bubbles, the visible window is:
+```
+t_start = chart_now - visible_window_ms   (chart_now is capped)
+t_end   = chart_now
+```
+
+Because `chart_now` is capped, trade-derived data (bubbles, CVD bins) always falls within this window as long as trade data is flowing.
+
+### 21.5 Pipeline Diagnostics (Always-On)
+
+The `_bubble_diag` dictionary in `heatmap_widget.py` tracks stage-by-stage counters:
+
+| Stage | Key Counters | What They Detect |
+|---|---|---|
+| A. Trade Input | `trades_added_total`, `trades_rejected_price`, `last_trade_add_ts` | Trade feed alive? Ingestion working? |
+| B. Storage | `total_in_deque`, `max_deque_depth`, `trades_pruned_total` | Over-pruning? Deque growing unbounded? |
+| C. Render Filter | `filtered_by_time`, `filtered_by_x`, `filtered_by_y`, `visible` | Where are trades being lost? |
+| D. Render Output | `min_radius`, `max_radius`, `min_alpha`, `max_alpha` | Visible but invisible (zero radius/alpha)? |
+| E. Failure Stage | `failure_stage` | Single string: `NONE`, `NO_TRADES_IN`, `PRUNED_TO_ZERO`, `OFFSCREEN_PRICE`, etc. |
+
+These counters are cheap (integer increments) and must remain active in production. Do not gate them behind a debug flag.
+
+### 21.6 Regression Guard
+
+`main_window.py` must emit a throttled `BUBBLES_DEAD_WHILE_TRADES_LIVE` warning when:
+- Trade feed is live (`trades_added_total > 0`)
+- But visible bubble count is zero for N consecutive frames
+- While heatmap is still rendering
+
+The warning must include: `failure_stage`, `depth-trade skew`, `trades_pruned_total`, `filtered_by_time`, `deque depth`, and `p95_size`.
+
+### 21.7 Mandatory Regression Tests
+
+Any change to the bubble/CVD rendering path must pass these tests in `tests/test_bubble_pipeline.py`:
+
+| Test | What It Validates |
+|---|---|
+| `test_pruning_uses_trade_time_not_depth_time` | Pruning survives 120-second depth-ahead skew |
+| `test_chart_now_caps_depth_lead` | `chart_now` capped at `MAX_DEPTH_LEAD_MS` when depth leads |
+| `test_stress_harness` | Visible bubbles never collapse to zero under 30-second growing skew |
+| `test_bubble_visibility_in_time_window` | Trades within visible window are rendered |
+| `test_trade_burst_does_not_wipe_visible` | Bursty high-volume trades don't wipe the visible set |
+
+### 21.8 Common Mistakes to Avoid
+
+1. **Do not use `max(depth_ts, trade_ts)` for any rendering-time calculation.** Always use `chart_now` (which is capped).
+2. **Do not prune trade deques based on depth timestamps.** Use `_last_trade_ts` only.
+3. **Do not remove `_bubble_diag` instrumentation.** It is the only way to diagnose pipeline failures without a live debugger.
+4. **Do not assume depth and trade timestamps are synchronized.** They drift by seconds in normal operation.
+5. **Do not add new time-dependent rendering logic without checking `test_bubble_pipeline.py`.** If you touch `t_start`, `chart_now`, pruning cutoffs, or visible window calculations, add a test that injects a 14-second depth-trade skew and verifies the data survives.
+6. **Do not use local system time (`datetime.now()`, `time.time()`) for any rendering timestamp.** The initial REST depth snapshot already does this (a known wart); it must not be introduced elsewhere.
