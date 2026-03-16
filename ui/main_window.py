@@ -15,7 +15,7 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QToolBar, QComboBox, QPushButton, QLabel, QLineEdit,
-    QStatusBar, QMessageBox, QTabWidget,
+    QStatusBar, QMessageBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal as QtSignal, QSettings
 from PySide6.QtGui import QFont, QAction, QPainter, QColor, QPen
@@ -305,6 +305,38 @@ class _StatusPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Detached View Window
+# ---------------------------------------------------------------------------
+
+class _DetachedViewWindow(QMainWindow):
+    """Top-level window wrapper for a detached view widget.
+
+    Each view (Candle Chart, Strategy Dashboard) lives in its own
+    OS-level window so the user can drag them to different monitors.
+    Closing a detached window hides it rather than destroying it;
+    it can be re-shown from the View toolbar buttons.
+    """
+
+    visibility_changed = QtSignal(bool)
+
+    _STYLESHEET = """
+        QMainWindow { background-color: #0f0f19; }
+    """
+
+    def __init__(self, view_widget: QWidget, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setCentralWidget(view_widget)
+        self.setStyleSheet(self._STYLESHEET)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+
+    def closeEvent(self, event):
+        self.hide()
+        self.visibility_changed.emit(False)
+        event.ignore()
+
+
+# ---------------------------------------------------------------------------
 # Main Window
 # ---------------------------------------------------------------------------
 
@@ -423,11 +455,6 @@ class MainWindow(QMainWindow):
     # UI layout
     # ------------------------------------------------------------------
 
-    # Tab indices (class-level constants)
-    _TAB_ORDER_FLOW = 0
-    _TAB_CANDLE = 1
-    _TAB_STRATEGY = 2
-
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -435,30 +462,7 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(2, 2, 2, 2)
         main_layout.setSpacing(2)
 
-        # --- Multi-view tab container ------------------------------------
-        self._tab_widget = QTabWidget()
-        self._tab_widget.setDocumentMode(True)
-        self._tab_widget.setStyleSheet("""
-            QTabBar::tab {
-                background: #14162a; color: #8888aa;
-                padding: 6px 18px; border: 1px solid #22243a;
-                border-bottom: none; min-width: 100px;
-                font-family: Menlo; font-size: 10px;
-            }
-            QTabBar::tab:selected {
-                background: #1c1e38; color: #d0d0e8;
-                border-bottom: 2px solid #5588cc;
-            }
-            QTabWidget::pane { border: none; }
-        """)
-        self._tab_widget.currentChanged.connect(self._on_tab_changed)
-
-        # ============ Tab 1: Order Flow (existing layout) ================
-        of_widget = QWidget()
-        of_layout = QVBoxLayout(of_widget)
-        of_layout.setContentsMargins(0, 0, 0, 0)
-        of_layout.setSpacing(2)
-
+        # ============ Order Flow (primary / main window) ================
         main_splitter = QSplitter(Qt.Vertical)
 
         top_splitter = QSplitter(Qt.Horizontal)
@@ -514,28 +518,22 @@ class MainWindow(QMainWindow):
         main_splitter.setStretchFactor(0, 3)
         main_splitter.setStretchFactor(1, 1)
 
-        of_layout.addWidget(main_splitter)
+        main_layout.addWidget(main_splitter)
 
-        # ============ Tab 2: Candle Chart ================================
+        # ============ Detached windows ===================================
         self._candle_view = CandleChartView(self._market_state)
+        self._candle_window = _DetachedViewWindow(
+            self._candle_view, "Chart", self)
+        self._candle_window.resize(900, 600)
+        self._candle_window.visibility_changed.connect(
+            lambda vis: self._show_chart_btn.setChecked(vis))
 
-        # ============ Tab 3: Strategy Dashboard ==========================
         self._strategy_dashboard = StrategyDashboardView(self._market_state)
-
-        # ============ Add tabs ===========================================
-        self._tab_widget.addTab(of_widget, "Order Flow")
-        self._tab_widget.addTab(self._candle_view, "Chart")
-        self._tab_widget.addTab(self._strategy_dashboard, "Strategy")
-
-        main_layout.addWidget(self._tab_widget)
-
-    def _on_tab_changed(self, index: int):
-        """Refresh the newly-visible tab immediately."""
-        if index == self._TAB_CANDLE:
-            self._candle_view.update()
-        elif index == self._TAB_STRATEGY:
-            self._strategy_dashboard.update_from_state()
-            self._strategy_dashboard.update()
+        self._strategy_window = _DetachedViewWindow(
+            self._strategy_dashboard, "Strategy", self)
+        self._strategy_window.resize(900, 600)
+        self._strategy_window.visibility_changed.connect(
+            lambda vis: self._show_strategy_btn.setChecked(vis))
 
     def _sync_left_to_chart(self, pos, idx):
         """Mirror the chart_stack split position to the left column."""
@@ -679,6 +677,22 @@ class MainWindow(QMainWindow):
         self._update_arm_button_style()
         toolbar.addWidget(self._arm_btn)
 
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Views: "))
+        self._show_chart_btn = QPushButton("Chart")
+        self._show_chart_btn.setCheckable(True)
+        self._show_chart_btn.setChecked(True)
+        self._show_chart_btn.setMaximumWidth(70)
+        self._show_chart_btn.clicked.connect(self._toggle_chart_window)
+        toolbar.addWidget(self._show_chart_btn)
+
+        self._show_strategy_btn = QPushButton("Strategy")
+        self._show_strategy_btn.setCheckable(True)
+        self._show_strategy_btn.setChecked(True)
+        self._show_strategy_btn.setMaximumWidth(80)
+        self._show_strategy_btn.clicked.connect(self._toggle_strategy_window)
+        toolbar.addWidget(self._show_strategy_btn)
+
     def _setup_statusbar(self):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
@@ -702,6 +716,20 @@ class MainWindow(QMainWindow):
         self._status_bar.addPermanentWidget(self._ripple_label)
         self._exec_label = QLabel("")
         self._status_bar.addPermanentWidget(self._exec_label)
+
+    def _toggle_chart_window(self, checked: bool):
+        if checked:
+            self._candle_window.show()
+            self._candle_window.raise_()
+        else:
+            self._candle_window.hide()
+
+    def _toggle_strategy_window(self, checked: bool):
+        if checked:
+            self._strategy_window.show()
+            self._strategy_window.raise_()
+        else:
+            self._strategy_window.hide()
 
     def _apply_stylesheet(self):
         self.setStyleSheet("""
@@ -1841,7 +1869,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("Exec manager update error: %s", e)
 
-        # --- Phase 7: sync MarketState + repaint active tab ----------------
+        # --- Phase 7: sync MarketState + repaint all visible views ----------
         ms = self._market_state
         ms.chart_now = self._heatmap.chart_now
         ms.visible_window_ms = self._heatmap._visible_window_ms
@@ -1851,12 +1879,10 @@ class MainWindow(QMainWindow):
         ms.strategy_snapshot = self._last_strategy_snap
         ms.strategy_ui_state = self._strategy_ui_state
 
-        active_tab = self._tab_widget.currentIndex()
-        if active_tab == self._TAB_ORDER_FLOW:
-            self._heatmap.update()
-        elif active_tab == self._TAB_CANDLE:
+        self._heatmap.update()
+        if self._candle_window.isVisible():
             self._candle_view.update()
-        elif active_tab == self._TAB_STRATEGY:
+        if self._strategy_window.isVisible():
             self._strategy_dashboard.update_from_state()
             self._strategy_dashboard.update()
 
@@ -2235,7 +2261,14 @@ class MainWindow(QMainWindow):
             profile_data, poc_price, hm_min, hm_max
         )
 
+    def show(self):
+        super().show()
+        self._candle_window.show()
+        self._strategy_window.show()
+
     def closeEvent(self, event):
         self._save_strategy_settings()
         self._on_disconnect()
+        self._candle_window.close()
+        self._strategy_window.close()
         super().closeEvent(event)
