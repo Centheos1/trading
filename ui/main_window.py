@@ -21,13 +21,11 @@ from PySide6.QtCore import Qt, QTimer, Signal as QtSignal, QSettings
 from PySide6.QtGui import QFont, QAction, QPainter, QColor, QPen
 
 from ui.heatmap_widget import HeatmapWidget
+from ui.orderflow_viewmodel import OrderFlowViewModel
 from ui.volume_profile_widget import VolumeProfileWidget
 from ui.cvd_widget import CVDWidget
-from ui.trade_blotter import TradeBlotter
-from ui.account_panel import AccountPanel
-from ui.strategy_panel import StrategyDiagnosticsPanel
 from ui.market_state import MarketState
-from ui.candle_chart_view import CandleChartView
+from ui.candle_chart_view import CandleChartView, TIMEFRAMES as CHART_TIMEFRAMES
 from ui.strategy_dashboard_view import StrategyDashboardView
 from execution.models import (
     RippleMode, SignalCategory, SignalEntry,
@@ -463,14 +461,11 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(2)
 
         # ============ Order Flow (primary / main window) ================
-        main_splitter = QSplitter(Qt.Vertical)
-
         top_splitter = QSplitter(Qt.Horizontal)
 
         self._left_col = QSplitter(Qt.Vertical)
         self._volume_profile = VolumeProfileWidget()
         self._status_panel = _StatusPanel()
-        self._strategy_panel = StrategyDiagnosticsPanel()
         self._left_col.addWidget(self._volume_profile)
         self._left_col.addWidget(self._status_panel)
         self._left_col.setStretchFactor(0, 3)
@@ -478,9 +473,10 @@ class MainWindow(QMainWindow):
         self._left_col.setChildrenCollapsible(False)
 
         self._chart_stack = QSplitter(Qt.Vertical)
-        self._heatmap = HeatmapWidget(
+        self._orderflow_vm = OrderFlowViewModel(
             candle_store=self._market_state.candles,
         )
+        self._heatmap = HeatmapWidget(viewmodel=self._orderflow_vm)
         self._cvd = CVDWidget()
         self._chart_stack.addWidget(self._heatmap)
         self._chart_stack.addWidget(self._cvd)
@@ -496,37 +492,34 @@ class MainWindow(QMainWindow):
         top_splitter.setStretchFactor(0, 1)
         top_splitter.setStretchFactor(1, 4)
 
-        bottom_splitter = QSplitter(Qt.Horizontal)
-        self._blotter = TradeBlotter()
-        self._account_panel = AccountPanel()
-
-        bottom_right = QSplitter(Qt.Vertical)
-        bottom_right.addWidget(self._strategy_panel)
-        bottom_right.addWidget(self._account_panel)
-        bottom_right.setStretchFactor(0, 1)
-        bottom_right.setStretchFactor(1, 1)
-        bottom_right.setChildrenCollapsible(False)
-        bottom_right.setMaximumHeight(400)
-
-        bottom_splitter.addWidget(self._blotter)
-        bottom_splitter.addWidget(bottom_right)
-        bottom_splitter.setStretchFactor(0, 3)
-        bottom_splitter.setStretchFactor(1, 1)
-
-        main_splitter.addWidget(top_splitter)
-        main_splitter.addWidget(bottom_splitter)
-        main_splitter.setStretchFactor(0, 3)
-        main_splitter.setStretchFactor(1, 1)
-
-        main_layout.addWidget(main_splitter)
+        main_layout.addWidget(top_splitter)
 
         # ============ Detached windows ===================================
         self._candle_view = CandleChartView(self._market_state)
         self._candle_window = _DetachedViewWindow(
             self._candle_view, "Chart", self)
-        self._candle_window.resize(900, 600)
+        self._candle_window.resize(1000, 620)
         self._candle_window.visibility_changed.connect(
             lambda vis: self._show_chart_btn.setChecked(vis))
+
+        chart_tb = QToolBar("Chart Controls")
+        chart_tb.setMovable(False)
+        chart_tb.setStyleSheet(
+            "QToolBar { background: #14162a; border-bottom: 1px solid #22243a; "
+            "spacing: 4px; padding: 2px 4px; }"
+            "QLabel { color: #8888aa; font-family: Menlo; font-size: 10px; }"
+            "QComboBox { background: #0f0f19; color: #b4b4c8; "
+            "border: 1px solid #282838; padding: 2px 6px; "
+            "font-family: Menlo; font-size: 10px; }")
+        chart_tb.addWidget(QLabel(" Timeframe: "))
+        self._chart_tf_combo = QComboBox()
+        for label, ms in CHART_TIMEFRAMES:
+            self._chart_tf_combo.addItem(label, ms)
+        self._chart_tf_combo.setCurrentIndex(0)
+        self._chart_tf_combo.setMaximumWidth(80)
+        self._chart_tf_combo.currentIndexChanged.connect(self._on_chart_tf_changed)
+        chart_tb.addWidget(self._chart_tf_combo)
+        self._candle_window.addToolBar(chart_tb)
 
         self._strategy_dashboard = StrategyDashboardView(self._market_state)
         self._strategy_window = _DetachedViewWindow(
@@ -730,6 +723,11 @@ class MainWindow(QMainWindow):
             self._strategy_window.raise_()
         else:
             self._strategy_window.hide()
+
+    def _on_chart_tf_changed(self, _index):
+        ms = self._chart_tf_combo.currentData()
+        if ms:
+            self._candle_view.set_bucket_duration(ms)
 
     def _apply_stylesheet(self):
         self.setStyleSheet("""
@@ -955,10 +953,10 @@ class MainWindow(QMainWindow):
                             qty = float(j["q"])
                             is_buyer_maker = j["m"]
 
-                            key = (ts, price, qty)
-                            if key in self._recent_trade_keys:
+                            trade_id = j["t"]
+                            if trade_id in self._recent_trade_keys:
                                 continue
-                            self._recent_trade_keys.append(key)
+                            self._recent_trade_keys.append(trade_id)
 
                             t = ofe.Trade()
                             t.timestamp = ts
@@ -1185,7 +1183,6 @@ class MainWindow(QMainWindow):
             self._exec_manager.stop()
             self._exec_manager = None
             self._exec_label.setText("")
-            self._account_panel.clear()
 
         self._paper_engine = None
         self._update_arm_button_style()
@@ -1353,7 +1350,6 @@ class MainWindow(QMainWindow):
         self._prev_strategy_ui_state = old
         self._strategy_ui_state = new_state
         self._update_arm_button_style()
-        self._strategy_panel.set_strategy_state(new_state)
         self._update_strategy_status_bar()
 
         if (old.value.startswith("armed") and new_state.value.startswith("armed")
@@ -1382,9 +1378,7 @@ class MainWindow(QMainWindow):
         return tide_bias, wave_regime
 
     def _broadcast_entry(self, entry: SignalEntry):
-        """Send a signal entry to both the Order Flow blotter and Strategy
-        Dashboard blotter, plus persist to the strategy store."""
-        self._blotter.add_entry(entry)
+        """Send a signal entry to the Strategy Dashboard blotter and persist."""
         self._strategy_dashboard.blotter.add_entry(entry)
         if self._strategy_store:
             try:
@@ -1588,19 +1582,13 @@ class MainWindow(QMainWindow):
         logger.info("Order %s: %s %s %.6f @ %.2f [%s]",
                      order.id, side, order.symbol, order.fill_quantity,
                      order.fill_price, status)
-        self._blotter.add_signal(
-            int(order.timestamp * 1000), f"EXEC_{side}",
-            order.fill_price, 1.0,
-            f"{status} qty={order.fill_quantity:.6f}"
-            + (f" | {order.ripple_reason}" if order.ripple_reason else "")
-        )
         self._strategy_dashboard.blotter.add_signal(
             int(order.timestamp * 1000), f"EXEC_{side}",
             order.fill_price, 1.0,
             f"{status} qty={order.fill_quantity:.6f}"
             + (f" | {order.ripple_reason}" if order.ripple_reason else "")
         )
-        self._account_panel.add_order(order)
+        self._strategy_dashboard.account_panel.add_order(order)
 
     def _on_signal_received(self, signal):
         self._signal_count += 1
@@ -1612,10 +1600,6 @@ class MainWindow(QMainWindow):
             if p > 0:
                 fill_price = p
 
-        self._blotter.add_signal(
-            signal.timestamp, signal.type_name(),
-            fill_price, signal.strength, signal.description
-        )
         self._strategy_dashboard.blotter.add_signal(
             signal.timestamp, signal.type_name(),
             fill_price, signal.strength, signal.description
@@ -1677,6 +1661,10 @@ class MainWindow(QMainWindow):
                     drain_errors += 1
                     if drain_errors <= 3:
                         logger.warning("cvd.add_trade error: %s", exc)
+                try:
+                    self._candle_view.process_trade(ts, price, qty, is_buy)
+                except Exception:
+                    pass
                 self._last_drained_trade_ts = ts
                 drained += 1
             if drain_errors > 0:
@@ -1702,8 +1690,8 @@ class MainWindow(QMainWindow):
             ob = self._engine.get_order_book()
             snap = ob.get_snapshot()
 
-            bids = snap.get_bids()[:200]
-            asks = snap.get_asks()[:200]
+            bids = snap.get_bids()
+            asks = snap.get_asks()
             best_bid = snap.best_bid
             best_ask = snap.best_ask
             snap_ts = snap.timestamp
@@ -1840,7 +1828,6 @@ class MainWindow(QMainWindow):
                 if self._engine and hasattr(self._engine, 'get_strategy_snapshot'):
                     snap = self._engine.get_strategy_snapshot()
                     self._last_strategy_snap = snap
-                    self._strategy_panel.update_snapshot(snap)
                     self._update_strategy_state_from_snapshot(snap)
                     self._update_heatmap_overlay_from_snapshot(snap)
                     if (self._strategy_store
@@ -1854,9 +1841,6 @@ class MainWindow(QMainWindow):
         try:
             if self._exec_manager:
                 acct = self._exec_manager.account
-                self._account_panel.update_account(
-                    acct.balance, acct.available_balance, acct.positions
-                )
                 self._strategy_dashboard.account_panel.update_account(
                     acct.balance, acct.available_balance, acct.positions
                 )
@@ -1869,11 +1853,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("Exec manager update error: %s", e)
 
-        # --- Phase 7: sync MarketState + repaint all visible views ----------
+        # --- Phase 7: compute ViewModel frame + sync MarketState + repaint ---
+        vm = self._orderflow_vm
+        pw, ph, ml, mt, cri = self._heatmap.get_viewport_params()
+        frame = vm.compute_frame(pw, ph, ml, mt, cri)
+        self._heatmap.set_frame(frame)
+
         ms = self._market_state
-        ms.chart_now = self._heatmap.chart_now
-        ms.visible_window_ms = self._heatmap._visible_window_ms
-        ms.bucket_duration_ms = self._heatmap._bucket_duration_ms
+        ms.chart_now = vm.chart_now
+        ms.visible_window_ms = vm.visible_window_ms
+        ms.bucket_duration_ms = vm.bucket_duration_ms
         ms.best_bid = self._last_valid_bid
         ms.best_ask = self._last_valid_ask
         ms.strategy_snapshot = self._last_strategy_snap
