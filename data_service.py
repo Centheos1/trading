@@ -9,6 +9,7 @@ from database import Hdf5Client
 from utils import ms_to_dt, dt_to_ms
 from exchanges.binance import BinanceClient
 from exchanges.oanda import OandaClient
+from data_feed import fetch_and_build_depth_snapshot
 
 logger = logging.getLogger()
 
@@ -334,39 +335,24 @@ class TickDataCollector:
             )
 
     def _fetch_depth_snapshot(self, symbol: str):
-        import requests as req
-        import json as pyjson
-
+        """REST bootstrap; HTTP parsing in ``data_feed``."""
         try:
-            resp = req.get(self.rest_base, params={"symbol": symbol, "limit": 1000})
-            resp.raise_for_status()
-            j = resp.json()
-
-            snapshot = ofe.DepthUpdate()
-            snapshot.timestamp = int(time.time() * 1000)
-            snapshot.first_update_id = j.get("lastUpdateId", 0)
-            snapshot.final_update_id = snapshot.first_update_id
-            snapshot.is_snapshot = True
-
-            bids = []
-            for b in j.get("bids", []):
-                lv = ofe.DepthLevel()
-                lv.price = float(b[0])
-                lv.quantity = float(b[1])
-                bids.append(lv)
-            asks = []
-            for a in j.get("asks", []):
-                lv = ofe.DepthLevel()
-                lv.price = float(a[0])
-                lv.quantity = float(a[1])
-                asks.append(lv)
-            snapshot.bids = bids
-            snapshot.asks = asks
-
+            snapshot = fetch_and_build_depth_snapshot(
+                ofe,
+                self.rest_base,
+                symbol,
+                limit=1000,
+                timeout=10.0,
+                timestamp_ms=int(time.time() * 1000),
+            )
             self.engine.process_depth(snapshot)
-            logger.info(f"Loaded depth snapshot: {len(bids)} bids, {len(asks)} asks")
+            logger.info(
+                "Loaded depth snapshot: %d bids, %d asks",
+                len(snapshot.bids),
+                len(snapshot.asks),
+            )
         except Exception as e:
-            logger.error(f"Failed to fetch depth snapshot: {e}")
+            logger.error("Failed to fetch depth snapshot: %s", e)
 
 
     # WIP - test this, if it works turn the filter back on in database

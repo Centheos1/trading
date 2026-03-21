@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QPainter, QColor, QFont, QPen, QImage, QPainterPath
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QImage, QPainterPath, QNativeGestureEvent
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ AUTO_SCALE_MIN_SPAN_FRAC = 0.002  # min visible price range as fraction of mid
 AUTO_SCALE_MARGIN_FRAC = 0.05     # margin on each side as fraction of span
 AUTO_SCALE_PCTILE_LO = 2          # percentile for lower bound of depth range
 AUTO_SCALE_PCTILE_HI = 98         # percentile for upper bound of depth range
+DEFAULT_ZOOM_FRACTION = 0.002     # default half-span as fraction of mid-price (+/- ~$134 @ 67k)
 DEPTH_NORM_PCTILE = 95            # normalize intensity to this percentile (orders above saturate to red)
 DEPTH_GAMMA = 0.55                # gamma < 1 expands contrast in the moderate-liquidity zone
 
@@ -579,7 +580,26 @@ class HeatmapWidget(QWidget):
     def event(self, event):
         if event.type() == event.Type.Gesture:
             return self._gesture_event(event)
+        if event.type() == event.Type.NativeGesture:
+            return self._native_gesture_event(event)
         return super().event(event)
+
+    def _native_gesture_event(self, event):
+        """Handle macOS trackpad pinch (ZoomNativeGesture)."""
+        if not self._vm:
+            return False
+        if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+            # value() is the incremental scale factor delta (e.g. +0.05 or -0.05)
+            delta = event.value()
+            scale = 1.0 + delta
+            if scale <= 0:
+                return True
+            new_frac = self._vm.zoom_fraction / scale
+            self._vm.set_zoom_fraction(new_frac)
+            self._vm._auto_scale = False
+            self.update()
+            return True
+        return False
 
     def _gesture_event(self, event):
         pinch = event.gesture(Qt.PinchGesture)
@@ -590,33 +610,51 @@ class HeatmapWidget(QWidget):
         scale = pinch.scaleFactor()
         if scale == 0 or scale == 1.0:
             return True
+        self._apply_zoom(scale, anchor_price=self._y_to_price(
+            pinch.centerPoint().y()))
+        return True
+
+    def _native_gesture_event(self, event):
+        """Handle macOS trackpad pinch (ZoomNativeGesture)."""
+        if not self._vm:
+            return False
+        if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+            # value() is the incremental magnification delta (+0.05 = 5% bigger)
+            scale = 1.0 + event.value()
+            if scale <= 0:
+                return True
+            self._apply_zoom(scale,
+                             anchor_price=self._y_to_price(event.position().y()))
+            return True
+        return False
+
+    def _apply_zoom(self, scale: float, anchor_price: float):
+        """Zoom around anchor_price by scale factor.  scale > 1 = zoom out."""
+        vm = self._vm
+        if vm.price_max <= vm.price_min or scale == 0:
+            return
         zoom_factor = 1.0 / scale
-        center = pinch.centerPoint()
-        anchor_price = self._y_to_price(center.y())
-        new_min = anchor_price - (anchor_price - self._vm.price_min) * zoom_factor
-        new_max = anchor_price + (self._vm.price_max - anchor_price) * zoom_factor
+        new_min = anchor_price - (anchor_price - vm.price_min) * zoom_factor
+        new_max = anchor_price + (vm.price_max - anchor_price) * zoom_factor
         mid = (new_min + new_max) / 2
         if mid > 0 and (new_max - new_min) < mid * 0.00002:
-            return True
-        self._vm.set_price_range(new_min, new_max)
+            return
+        # Keep zoom_fraction in sync so double-click reset is proportional
+        if mid > 0:
+            vm.set_zoom_fraction((new_max - new_min) / 2.0 / mid)
+        vm.set_price_range(new_min, new_max)
         self.update()
-        return True
 
     def wheelEvent(self, event):
         if not self._vm or self._vm.price_max <= self._vm.price_min:
             return
         delta = event.angleDelta().y()
         if delta == 0:
+            delta = event.pixelDelta().y()
+        if delta == 0:
             return
-        zoom_factor = 0.85 if delta > 0 else 1.0 / 0.85
-        anchor_price = self._y_to_price(event.position().y())
-        new_min = anchor_price - (anchor_price - self._vm.price_min) * zoom_factor
-        new_max = anchor_price + (self._vm.price_max - anchor_price) * zoom_factor
-        mid = (new_min + new_max) / 2
-        if mid > 0 and (new_max - new_min) < mid * 0.00002:
-            return
-        self._vm.set_price_range(new_min, new_max)
-        self.update()
+        scale = 1.0 / 0.85 if delta > 0 else 0.85
+        self._apply_zoom(scale, anchor_price=self._y_to_price(event.position().y()))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self._vm:
@@ -646,6 +684,6 @@ class HeatmapWidget(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         if self._vm:
-            self._vm.set_auto_scale(True)
+            self._vm.set_auto_scale(True, reset_zoom=True)
         self.setCursor(Qt.ArrowCursor)
         self.update()

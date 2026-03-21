@@ -1150,6 +1150,14 @@ flowchart TD
 
 UI tests validate the heatmap rendering pipeline, time-bucketed axis, and visual components. They run headless using `QApplication` without requiring a visible display.
 
+### 20.1a Data feed layer (Binance REST depth)
+
+Initial / resync depth snapshots use `data_feed/binance_depth_rest.py` (HTTP + parsing only; `ui/live_trading_session.py` → `LiveTradingSession` applies `process_depth` on the C++ engine). Binance USD-M trade + `depth@100ms` WebSockets live in `data_feed/binance_futures_ws.py` with `data_feed/stream_health.py` (`FeedState`, `FeedStreamHealth`). `MainWindow` wires the UI and delegates live ingestion to `LiveTradingSession`. Mocked REST tests:
+
+```bash
+python -m pytest tests/test_binance_depth_rest.py -q
+```
+
 ### 20.2 Running UI Tests
 
 ```bash
