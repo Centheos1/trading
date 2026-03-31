@@ -54,7 +54,11 @@ from ui.heatmap_widget import (
     DEFAULT_ZOOM_FRACTION,
     DEPTH_NORM_PCTILE,
     DEPTH_GAMMA,
+    DEPTH_PRICE_BUCKETS,
+    DEPTH_MIN_INTENSITY,
     _HEAT_LUT,
+    _HEAT_LUT_BID,
+    _HEAT_LUT_ASK,
 )
 
 
@@ -637,15 +641,31 @@ class OrderFlowViewModel:
             norm_ref = log_max
         norm_ref = max(norm_ref, 1e-10)
 
+        n_buckets = DEPTH_PRICE_BUCKETS
+        bucket_size = pr / n_buckets
+        rpb = n_rows / n_buckets  # float rows-per-bucket for gap-free mapping
+
         shape = (n_rows, n_img_cols)
         if self._cached_intensity_shape != shape:
             self._cached_intensity = np.zeros(shape, dtype=np.float32)
             self._cached_intensity_shape = shape
         intensity = self._cached_intensity
         intensity[:] = 0
-        inv_pr = 1.0 / pr if pr > 0 else 0.0
-        nrm1 = n_rows - 1
         inv_lm = 1.0 / norm_ref
+        inv_bs = 1.0 / bucket_size if bucket_size > 0 else 0.0
+        nrm1 = n_rows - 1
+
+        mid_row_latest = n_rows // 2
+
+        bucket_row_tops = np.clip(
+            nrm1 - ((np.arange(n_buckets) + 1) * rpb).astype(np.int32),
+            0, nrm1)
+        bucket_row_bots = np.clip(
+            nrm1 - (np.arange(n_buckets) * rpb).astype(np.int32),
+            0, nrm1)
+
+        _bucket_sums = np.empty(n_buckets, dtype=np.float64)
+        _bucket_counts = np.empty(n_buckets, dtype=np.int32)
 
         sm = self._slice_ms
         t_start_q = (t_start // sm) * sm
@@ -672,54 +692,50 @@ class OrderFlowViewModel:
                 prev_col = col
                 continue
 
-            rows = ((1.0 - (prices - pmin) * inv_pr) * nrm1 + 0.5).astype(np.int32)
+            best_bid = s[3]
+            best_ask = s[4]
+            if best_bid > 0 and best_ask > 0:
+                mid = (best_bid + best_ask) * 0.5
+                mid_row_latest = int((1.0 - (mid - pmin) / pr) * nrm1 + 0.5)
+                mid_row_latest = max(0, min(nrm1, mid_row_latest))
+
+            bucket_idx = np.clip(
+                ((prices - pmin) * inv_bs).astype(np.int32),
+                0, n_buckets - 1)
             raw = np.clip(log_qtys * inv_lm, 0.0, 1.0)
-            vals = np.maximum(0.08, np.power(raw, DEPTH_GAMMA))
+            gamma_vals = np.power(raw, DEPTH_GAMMA)
+
+            _bucket_sums[:] = 0.0
+            np.add.at(_bucket_sums, bucket_idx, gamma_vals)
+            _bucket_counts[:] = 0
+            np.add.at(_bucket_counts, bucket_idx, 1)
+
+            active = _bucket_counts > 0
+            _bucket_sums[active] /= _bucket_counts[active]
+            _bucket_sums[_bucket_sums < DEPTH_MIN_INTENSITY] = 0.0
+
+            active_bi = np.nonzero(_bucket_sums > 0)[0]
             col_slice = intensity[:, col]
-
-            order = np.argsort(rows)
-            s_rows = rows[order]
-            s_vals = vals[order]
-            n_lvl = len(s_rows)
-
-            valid = (s_rows >= 0) & (s_rows < n_rows)
-            if not valid.any():
-                prev_data_id = data_id
-                prev_col = col
-                continue
-
-            vr = s_rows[valid]
-            vv = s_vals[valid]
-
-            if len(vr) >= 2:
-                # Vectorized nearest-neighbor fill between depth levels.
-                # For every pixel row in the range covered by depth data,
-                # assign the intensity of the closest depth level.
-                r_lo = int(vr[0])
-                r_hi = int(vr[-1])
-                r_lo = max(r_lo, 0)
-                r_hi = min(r_hi, n_rows - 1)
-                if r_hi > r_lo:
-                    all_r = np.arange(r_lo, r_hi + 1)
-                    idx_right = np.searchsorted(vr, all_r, side='right')
-                    idx_right = np.clip(idx_right, 1, len(vr)) - 1
-                    idx_left = np.clip(idx_right + 1, 0, len(vr) - 1)
-                    dist_r = np.abs(all_r - vr[idx_right])
-                    dist_l = np.abs(all_r - vr[idx_left])
-                    best = np.where(dist_l < dist_r, idx_left, idx_right)
-                    fill = vv[best]
-                    col_slice[r_lo:r_hi + 1] = np.maximum(
-                        col_slice[r_lo:r_hi + 1], fill)
-            else:
-                np.maximum.at(col_slice, vr, vv)
+            for bi in active_bi:
+                rt = bucket_row_tops[bi]
+                rb = bucket_row_bots[bi]
+                if rt <= rb:
+                    col_slice[rt:rb + 1] = np.maximum(
+                        col_slice[rt:rb + 1], _bucket_sums[bi])
 
             prev_data_id = data_id
             prev_col = col
 
         self._forward_fill_intensity(intensity)
 
+        mid_row = max(0, min(nrm1, mid_row_latest))
         idx = np.clip((intensity * 255).astype(np.int32), 0, 255)
-        rgba = _HEAT_LUT[idx]
+        rgba = np.empty((n_rows, n_img_cols, 4), dtype=np.uint8)
+        if mid_row > 0:
+            rgba[:mid_row, :] = _HEAT_LUT_ASK[idx[:mid_row, :]]
+        if mid_row < n_rows:
+            rgba[mid_row:, :] = _HEAT_LUT_BID[idx[mid_row:, :]]
+
         buf = np.ascontiguousarray(rgba)
         self._depth_img_data = buf.tobytes()
 

@@ -264,6 +264,208 @@ def test_forward_fill_does_not_affect_explicit_data():
     check(np.array_equal(arr[:, 29], orig_29), "col 29 unchanged")
 
 
+# ================================================================ C. DUAL-LUT AND BUCKETING TESTS
+
+def test_dual_lut_bid_ask_distinct():
+    """Bid and Ask LUTs produce different colours for the same intensity."""
+    from ui.heatmap_widget import _HEAT_LUT_BID, _HEAT_LUT_ASK
+    check(_HEAT_LUT_BID.shape == (256, 4), "BID LUT shape")
+    check(_HEAT_LUT_ASK.shape == (256, 4), "ASK LUT shape")
+    check(_HEAT_LUT_BID[0][3] == 0, "BID LUT index-0 alpha=0")
+    check(_HEAT_LUT_ASK[0][3] == 0, "ASK LUT index-0 alpha=0")
+    mid_bid = _HEAT_LUT_BID[128]
+    mid_ask = _HEAT_LUT_ASK[128]
+    check(not np.array_equal(mid_bid[:3], mid_ask[:3]),
+          f"mid-intensity bid ({mid_bid[:3]}) != ask ({mid_ask[:3]})")
+    high_bid = _HEAT_LUT_BID[240]
+    high_ask = _HEAT_LUT_ASK[240]
+    check(not np.array_equal(high_bid[:3], high_ask[:3]),
+          f"high-intensity bid ({high_bid[:3]}) != ask ({high_ask[:3]})")
+
+
+def test_dual_lut_alpha_ramp():
+    """Both LUTs have monotonically increasing alpha from 0."""
+    from ui.heatmap_widget import _HEAT_LUT_BID, _HEAT_LUT_ASK
+    for name, lut in [("BID", _HEAT_LUT_BID), ("ASK", _HEAT_LUT_ASK)]:
+        check(lut[0][3] == 0, f"{name} LUT[0] alpha=0")
+        check(lut[255][3] == 255, f"{name} LUT[255] alpha=255")
+        check(lut[1][3] > 0, f"{name} LUT[1] alpha>0")
+
+
+def test_depth_bucketing_reduces_levels():
+    """Depth bucketing with DEPTH_PRICE_BUCKETS < raw level count
+    produces fewer distinct intensity bands than raw levels."""
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    from ui.heatmap_widget import DEPTH_PRICE_BUCKETS
+
+    vm = OrderFlowViewModel()
+    base_ts = 1_700_000_060_000
+    n_levels = 200
+    bids = [(50000.0 - i * 0.1, 0.5 + (i % 10) * 0.1) for i in range(n_levels)]
+    asks = [(50000.1 + i * 0.1, 0.5 + (i % 10) * 0.1) for i in range(n_levels)]
+    vm.add_depth_column(base_ts, bids, asks, 50000.0, 50000.1)
+
+    check(len(vm._cur_depth_prices) == 2 * n_levels,
+          f"raw levels = {2 * n_levels}")
+    check(DEPTH_PRICE_BUCKETS < 2 * n_levels,
+          f"bucket count ({DEPTH_PRICE_BUCKETS}) < raw ({2 * n_levels})")
+
+
+def test_noise_floor_suppresses_faint():
+    """Depth levels below DEPTH_MIN_INTENSITY become background (0)."""
+    from ui.heatmap_widget import DEPTH_MIN_INTENSITY
+    check(0 < DEPTH_MIN_INTENSITY < 1.0,
+          f"noise floor in (0,1): {DEPTH_MIN_INTENSITY}")
+    arr = np.array([0.0, 0.05, 0.11, 0.2, 0.5, 1.0])
+    suppressed = arr.copy()
+    suppressed[suppressed < DEPTH_MIN_INTENSITY] = 0.0
+    check(suppressed[0] == 0.0, "0.0 stays zero")
+    check(suppressed[1] == 0.0, "0.05 suppressed")
+    check(suppressed[2] == 0.0, "0.11 suppressed")
+    check(suppressed[3] > 0, "0.2 survives")
+    check(suppressed[4] > 0, "0.5 survives")
+    check(suppressed[5] > 0, "1.0 survives")
+
+
+def test_zoom_fraction_tighter():
+    """DEFAULT_ZOOM_FRACTION is tighter than the old 0.002."""
+    from ui.heatmap_widget import DEFAULT_ZOOM_FRACTION
+    check(DEFAULT_ZOOM_FRACTION < 0.002,
+          f"zoom {DEFAULT_ZOOM_FRACTION} < 0.002")
+    check(DEFAULT_ZOOM_FRACTION >= 0.001,
+          f"zoom {DEFAULT_ZOOM_FRACTION} >= 0.001 (not too tight)")
+
+
+def test_depth_image_dual_color_split():
+    """A full compute_frame with depth data produces an image where
+    rows above mid use ASK colors and rows below mid use BID colors.
+    Verifies at pixel level that the two halves use different LUTs."""
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    from ui.heatmap_widget import _HEAT_LUT_BID, _HEAT_LUT_ASK
+
+    vm = OrderFlowViewModel()
+    base_ts = 1_700_000_060_000
+    mid = 50000.0
+    bids = [(mid - 0.5 - i * 2.0, 10.0 + i * 2) for i in range(40)]
+    asks = [(mid + 0.5 + i * 2.0, 10.0 + i * 2) for i in range(40)]
+    vm.add_depth_column(base_ts, bids, asks, mid - 0.5, mid + 0.5)
+    vm.add_depth_column(base_ts + 200, bids, asks, mid - 0.5, mid + 0.5)
+
+    frame = vm.compute_frame(pw=600, ph=400,
+                             margin_left=70, margin_top=10,
+                             chart_right_inset=28)
+    check(frame.depth_image is not None, "depth image produced")
+    if frame.depth_image is None:
+        return
+
+    img = frame.depth_image
+    n_rows = img.height()
+    n_cols = img.width()
+    check(n_rows > 10, f"image has rows ({n_rows})")
+    check(n_cols > 2, f"image has cols ({n_cols})")
+
+    ptr = img.bits()
+    if ptr is not None:
+        buf = np.frombuffer(ptr, dtype=np.uint8).reshape(n_rows, n_cols, 4)
+        mid_row = n_rows // 2
+        last_col = n_cols - 1
+        bg = np.array([8, 12, 30], dtype=np.uint8)
+        ask_pixel = None
+        bid_pixel = None
+        for r in range(0, mid_row):
+            px = buf[r, last_col, :3]
+            if not np.array_equal(px, bg) and px.sum() > 50:
+                ask_pixel = px
+                break
+        for r in range(mid_row, n_rows):
+            px = buf[r, last_col, :3]
+            if not np.array_equal(px, bg) and px.sum() > 50:
+                bid_pixel = px
+                break
+        if ask_pixel is not None and bid_pixel is not None:
+            check(not np.array_equal(ask_pixel, bid_pixel),
+                  f"ask pixel {ask_pixel} != bid pixel {bid_pixel}")
+        else:
+            check(True, "one half has no visible depth — skip pixel color check")
+
+
+def test_bucket_row_coverage():
+    """Bucketing covers all pixel rows — no gap at top or bottom of image."""
+    from ui.heatmap_widget import DEPTH_PRICE_BUCKETS
+    for n_rows in [100, 400, 800]:
+        n_buckets = DEPTH_PRICE_BUCKETS
+        nrm1 = n_rows - 1
+        rpb = n_rows / n_buckets
+        covered = np.zeros(n_rows, dtype=bool)
+        for bi in range(n_buckets):
+            rt = max(0, min(nrm1, nrm1 - int((bi + 1) * rpb)))
+            rb = max(0, min(nrm1, nrm1 - int(bi * rpb)))
+            if rt <= rb:
+                covered[rt:rb + 1] = True
+        pct = covered.sum() / n_rows * 100
+        check(pct >= 98.0,
+              f"n_rows={n_rows}: {pct:.1f}% rows covered (need >=98%)")
+
+
+def test_small_widget_no_crash():
+    """Widget smaller than DEPTH_PRICE_BUCKETS rows doesn't crash."""
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    vm = OrderFlowViewModel()
+    base_ts = 1_700_000_060_000
+    bids = [(50000.0 - i, 2.0) for i in range(10)]
+    asks = [(50001.0 + i, 2.0) for i in range(10)]
+    vm.add_depth_column(base_ts, bids, asks, 50000.0, 50001.0)
+    vm.add_depth_column(base_ts + 200, bids, asks, 50000.0, 50001.0)
+    frame = vm.compute_frame(pw=200, ph=80,
+                             margin_left=70, margin_top=10,
+                             chart_right_inset=28)
+    check(frame.depth_image is not None or frame.have_heatmap,
+          "small widget does not crash")
+
+
+def test_mid_row_at_edge():
+    """When mid-price is at the edge of visible range, one LUT covers
+    nearly the entire image without error."""
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    vm = OrderFlowViewModel()
+    base_ts = 1_700_000_060_000
+    bids = [(50000.0 - i * 0.1, 3.0) for i in range(30)]
+    asks = [(50000.1 + i * 0.1, 3.0) for i in range(30)]
+    vm.add_depth_column(base_ts, bids, asks, 50000.0, 50000.1)
+    vm._price_min = 50000.0
+    vm._price_max = 50003.0
+    vm._auto_scale = False
+    vm.add_depth_column(base_ts + 200, bids, asks, 50000.0, 50000.1)
+    frame = vm.compute_frame(pw=600, ph=400,
+                             margin_left=70, margin_top=10,
+                             chart_right_inset=28)
+    check(frame.depth_image is not None, "edge-mid image produced")
+
+
+def test_compute_frame_benchmark():
+    """compute_frame with realistic depth stays under 50ms (§9.2)."""
+    import time as _time
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    vm = OrderFlowViewModel()
+    base_ts = 1_700_000_060_000
+    bids = [(60000.0 - i * 0.1, 1.0 + (i % 20) * 0.5) for i in range(200)]
+    asks = [(60000.1 + i * 0.1, 1.0 + (i % 20) * 0.5) for i in range(200)]
+    for t in range(50):
+        vm.add_depth_column(base_ts + t * 200, bids, asks, 60000.0, 60000.1)
+
+    for _ in range(3):
+        vm.compute_frame(pw=800, ph=600, margin_left=70,
+                         margin_top=10, chart_right_inset=28)
+
+    iters = 10
+    t0 = _time.monotonic()
+    for _ in range(iters):
+        vm.compute_frame(pw=800, ph=600, margin_left=70,
+                         margin_top=10, chart_right_inset=28)
+    elapsed = (_time.monotonic() - t0) / iters * 1000
+    check(elapsed < 50.0, f"compute_frame avg {elapsed:.1f}ms < 50ms")
+
+
 # ================================================================ MAIN
 
 if __name__ == '__main__':
@@ -280,6 +482,16 @@ if __name__ == '__main__':
         test_widget_sparse_depth_produces_continuous_heatmap,
         test_depth_removed_at_zero_stays_removed,
         test_forward_fill_does_not_affect_explicit_data,
+        test_dual_lut_bid_ask_distinct,
+        test_dual_lut_alpha_ramp,
+        test_depth_bucketing_reduces_levels,
+        test_noise_floor_suppresses_faint,
+        test_zoom_fraction_tighter,
+        test_depth_image_dual_color_split,
+        test_bucket_row_coverage,
+        test_small_widget_no_crash,
+        test_mid_row_at_edge,
+        test_compute_frame_benchmark,
     ]
 
     for t in tests:

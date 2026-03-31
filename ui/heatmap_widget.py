@@ -41,33 +41,50 @@ AUTO_SCALE_MIN_SPAN_FRAC = 0.002  # min visible price range as fraction of mid
 AUTO_SCALE_MARGIN_FRAC = 0.05     # margin on each side as fraction of span
 AUTO_SCALE_PCTILE_LO = 2          # percentile for lower bound of depth range
 AUTO_SCALE_PCTILE_HI = 98         # percentile for upper bound of depth range
-DEFAULT_ZOOM_FRACTION = 0.002     # default half-span as fraction of mid-price (+/- ~$134 @ 67k)
+DEFAULT_ZOOM_FRACTION = 0.0017    # default half-span as fraction of mid-price (~15% tighter than 0.002)
 DEPTH_NORM_PCTILE = 95            # normalize intensity to this percentile (orders above saturate to red)
 DEPTH_GAMMA = 0.55                # gamma < 1 expands contrast in the moderate-liquidity zone
+DEPTH_PRICE_BUCKETS = 150         # coarsen depth into this many price bands across the visible range
+DEPTH_MIN_INTENSITY = 0.12        # buckets below this threshold render as background (noise floor)
 
-HEAT_GRADIENT = [
+HEAT_GRADIENT_BID = [
     (0.00, (8, 12, 30)),
-    (0.02, (12, 30, 90)),
-    (0.08, (15, 55, 140)),
-    (0.18, (20, 100, 175)),
-    (0.30, (25, 150, 195)),
-    (0.45, (60, 195, 200)),
-    (0.60, (150, 210, 100)),
-    (0.75, (220, 200, 50)),
-    (0.87, (245, 140, 30)),
-    (0.95, (250, 70, 20)),
-    (1.00, (255, 40, 15)),
+    (0.05, (10, 25, 70)),
+    (0.15, (12, 50, 120)),
+    (0.28, (15, 85, 160)),
+    (0.42, (20, 130, 185)),
+    (0.56, (40, 175, 195)),
+    (0.70, (80, 210, 200)),
+    (0.82, (140, 230, 210)),
+    (0.92, (200, 245, 225)),
+    (1.00, (240, 255, 245)),
 ]
 
+HEAT_GRADIENT_ASK = [
+    (0.00, (8, 12, 30)),
+    (0.05, (30, 12, 50)),
+    (0.15, (70, 18, 80)),
+    (0.28, (120, 30, 90)),
+    (0.42, (165, 50, 75)),
+    (0.56, (200, 80, 55)),
+    (0.70, (225, 120, 40)),
+    (0.82, (240, 165, 30)),
+    (0.92, (250, 210, 50)),
+    (1.00, (255, 245, 120)),
+]
 
-def _build_heat_lut():
+HEAT_GRADIENT = HEAT_GRADIENT_BID
+
+
+def _build_heat_lut_from_gradient(gradient):
     lut = np.zeros((256, 4), dtype=np.uint8)
+    bg = gradient[0][1]
     for i in range(256):
         frac = i / 255.0
-        r, g, b = 8, 12, 30
-        for j in range(1, len(HEAT_GRADIENT)):
-            t1, c1 = HEAT_GRADIENT[j - 1]
-            t2, c2 = HEAT_GRADIENT[j]
+        r, g, b = bg
+        for j in range(1, len(gradient)):
+            t1, c1 = gradient[j - 1]
+            t2, c2 = gradient[j]
             if frac <= t2:
                 blend = (frac - t1) / (t2 - t1) if t2 > t1 else 0
                 r = int(c1[0] + (c2[0] - c1[0]) * blend)
@@ -79,7 +96,13 @@ def _build_heat_lut():
     return lut
 
 
+def _build_heat_lut():
+    return _build_heat_lut_from_gradient(HEAT_GRADIENT)
+
+
 _HEAT_LUT = _build_heat_lut()
+_HEAT_LUT_BID = _build_heat_lut_from_gradient(HEAT_GRADIENT_BID)
+_HEAT_LUT_ASK = _build_heat_lut_from_gradient(HEAT_GRADIENT_ASK)
 
 
 @dataclass
