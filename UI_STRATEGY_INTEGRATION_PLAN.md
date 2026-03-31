@@ -1,0 +1,1435 @@
+# UI & Strategy Integration Plan
+
+## 1. Overview
+
+This document is a detailed, implementation-oriented plan for four concurrent workstreams:
+
+1. **Order Flow View Update** — convert the heatmap time axis from continuous milliseconds to bucketed candlestick-style time periods (default 1m).
+2. **Strategy UI Integration** — connect the Tide / Wave / Ripple strategy with UI arm/disarm controls, strategy state visibility, and signal log integration.
+3. **Inactive UI Cleanup** — audit and plan the removal, hiding, or deferral of disconnected, placeholder, or misleading UI elements.
+4. **HDF5 / .h5 Data Model Update** — extend the data persistence layer to support strategy integration, signal logging, and time-bucketed UI compatibility.
+
+**This is a planning document only. No code changes should be made from this document without explicit approval.**
+
+**Source-of-truth hierarchy (unchanged):**
+
+| Priority | Document |
+|---|---|
+| 1 | `strategy.md` |
+| 2 | `implementation_plan.md` |
+| 3 | Tests |
+| 4 | `AGENT_STRATEGY_RULES.md` |
+| 5 | This document |
+
+---
+
+## 2. Current State Assessment
+
+### 2.1 Order Flow View (HeatmapWidget)
+
+**File:** `ui/heatmap_widget.py`
+
+The heatmap currently operates on a **continuous millisecond timeline**:
+
+- `VISIBLE_WINDOW_MS = 60_000` (60 seconds visible at a time).
+- `HEATMAP_SLICE_MS = 100` (one depth slice every 100ms).
+- Slices are stored in a `deque(maxlen=10_000)` of tuples: `(slice_ts, bids_snap, asks_snap, best_bid, best_ask, prices, log_qtys)`.
+- `chart_now` is a capped unified timestamp: `max(trade_ts, min(depth_ts, trade_ts + MAX_DEPTH_LEAD_MS))`.
+- `t_start = chart_now - visible_window_ms`.
+- The time axis (`_draw_time_axis`) selects tick intervals from `_TIME_TICK_CANDIDATES` (1s to 10min) aiming for 6-12 ticks across the width.
+- Bubbles (trades) are positioned at continuous x-coordinates: `px + (ts - t_start) * inv_ts * pw`.
+- Sub-pixel scrolling: `t_start_q = (t_start // slice_ms) * slice_ms`, `shift = frac * col_px`.
+- Price is vertical (y-axis), time is horizontal (x-axis), depth is rendered as a heatmap intensity image.
+
+**Key observations:**
+- There is **no concept of time buckets or candlestick periods** in the current heatmap.
+- The x-axis is a pure millisecond-linear mapping.
+- The `_candle_combo` in the toolbar exists but is not wired to the heatmap — it sets `self._candle_duration_ms` on `MainWindow` but this only affects VP recomputation cadence.
+- The visible window is always 60 seconds.
+- Depth slices are quantized to 100ms but this is a rendering optimization, not a semantic bucketing.
+
+### 2.2 Strategy UI Integration
+
+**Current state of strategy controls:**
+
+| Control | Location | Current Behavior |
+|---|---|---|
+| Ripple mode combo | Toolbar | Disabled / Log Only / Paper — controls whether Ripple decisions are logged, paper-traded, or ignored |
+| Arm Execution button | Toolbar | Enables execution manager for live Binance fills. Disabled until connected. |
+| `StrategyDiagnosticsPanel` | Left column | Displays Wave regime, η, liquidity state, µPrice, trade state, uPnL, ES used, imbalance from `get_strategy_snapshot()` |
+| `TradeBlotter` (Signal Log) | Bottom panel | Shows signals with categories: RIPPLE_ENTRY, RIPPLE_EXIT, RIPPLE_PREPARE, RIPPLE_CANCEL, RIPPLE_REARM, EXECUTION, LEGACY_RAW, CONTEXT, DIAGNOSTIC |
+| `_StatusPanel` | Left column | Shows connection/feed health status rows |
+
+**Strategy pipeline flow in UI mode:**
+1. `MainWindow._on_connect()` creates `OrderFlowEngine`, starts WebSocket feed.
+2. `_on_timer_tick()` (100ms) drains trade buffer, feeds depth updates, runs VP recomputation.
+3. Ripple decisions come via `_new_ripple` signal → `_on_ripple_received()` → signal log + optional execution.
+4. `get_strategy_snapshot()` called on timer tick → `StrategyDiagnosticsPanel.update_snapshot()`.
+
+**What's missing:**
+- No unified "strategy armed/disarmed" concept — Ripple mode and Arm Execution are separate controls with no coordinated state.
+- No clear mapping of strategy lifecycle states (armed, disarmed, waiting, active, invalidated, exited) to the UI.
+- Signal log shows raw Ripple decisions but lacks structured strategy-level context (Tide bias, Wave regime at time of signal, risk budget state).
+- No way to arm/disarm the full Tide/Wave/Ripple strategy stack from the UI — only Ripple mode and execution can be toggled independently.
+
+### 2.3 Inactive / Disconnected UI Elements
+
+Likely inactive or misleading UI elements (from code inspection):
+
+| Element | Location | Status |
+|---|---|---|
+| Candle combo | Toolbar | Sets `_candle_duration_ms` but only affects VP recomputation timing, not heatmap bucketing. Misleading label suggests candlestick periods. |
+| Tick Size input | Toolbar | Sets `tick_size` on engine config but unclear if actively used in the Tide/Wave/Ripple pipeline. Legacy signal engine parameter. |
+| Imbalance input | Toolbar | Sets `imbalance_threshold` on engine config. Legacy signal engine parameter — the Ripple pipeline has its own thresholds. |
+| Sizing controls | Toolbar | `sizing_mode_combo` + `sizing_value_input` — used by execution manager but only meaningful when armed. Visible even when disconnected. |
+| Account Panel | Bottom right | `AccountPanel` shows account balance and orders. Only meaningful in execute mode or when broker is connected. May show stale/empty data in pure UI mode. |
+| Legacy strategies | `strategies/` | `ichimoku.py`, `obv.py`, `support_resistance.py` — backtest-only strategies not connected to the Tide/Wave/Ripple architecture. Not exposed in UI but referenced in `main.py` mode selection. |
+| Mode combo (Live/Replay) | Toolbar | "Replay" mode is present but the replay functionality in the UI is not fully wired (no file picker, no replay controls). |
+
+### 2.4 HDF5 / .h5 Data Model
+
+**Current storage:**
+
+| File | Format | Content | Access |
+|---|---|---|---|
+| `data/{exchange}.h5` | `Hdf5Client` (Python h5py) | OHLCV candle data per symbol | `database.py` |
+| `data/{exchange}_ticks.h5` | C++ `TickStore` | Raw trades and depth snapshots | `TickStore` C++ class, used by `ReplayFeed` |
+
+**OHLCV schema:** `(timestamp, open, high, low, close, volume)` or 7-col with `spread` — flat float64 arrays.
+
+**Tick data schema (C++ TickStore):** HDF5 datasets for trades (ts, price, qty, is_buyer_maker) and depth snapshots.
+
+**What's missing:**
+- No strategy signal/event storage in .h5.
+- No arm/disarm state persistence.
+- No strategy snapshot time series storage.
+- No time-bucketed aggregation storage.
+- No schema versioning on .h5 files.
+- `BacktestResult` has `h5_serialise()` but `write_optimised_parameters` is commented out in `main.py`.
+
+---
+
+## 3. Order Flow View Update Plan
+
+### 3.1 Design Goals
+
+Transform the heatmap x-axis from a continuous millisecond timeline to a **bucketed candle-like time axis** while preserving the order flow visual character (bubbles, depth heatmap, price on y-axis, smooth scrolling).
+
+**Key principles:**
+- Default bucket size: **1 minute** (60,000 ms).
+- Bucket boundaries are aligned to wall-clock minute boundaries (e.g., 14:01:00, 14:02:00).
+- Within each bucket, depth/bubble data is still rendered with continuous sub-bucket positioning.
+- The visual result should feel like the current order flow view but with clearer temporal structure.
+- Future parameterization for 5s, 15s, 30s, 5m, 15m buckets.
+- The `_candle_combo` already exists in the toolbar — wire it to control bucket size.
+
+### 3.2 Bucket Model
+
+Each time bucket represents a fixed-duration period:
+
+```
+BucketIndex = floor(timestamp / bucket_duration_ms)
+BucketStart = BucketIndex * bucket_duration_ms
+BucketEnd   = BucketStart + bucket_duration_ms
+```
+
+**Within-bucket x-position:**
+```
+bucket_frac = (ts - bucket_start) / bucket_duration_ms    # in [0, 1)
+x = bucket_left_px + bucket_frac * bucket_width_px
+```
+
+This gives smooth continuous positioning within buckets while creating visual gaps or separators between buckets.
+
+### 3.3 Visual Design
+
+**Bucket visual structure:**
+- Each bucket occupies a fixed pixel width on screen (determined by visible window and number of visible buckets).
+- A subtle vertical separator line (1px, darker than grid) marks bucket boundaries.
+- Optionally, a thin OHLC bar or price range indicator at the bucket boundary to reinforce the candle metaphor.
+- Depth heatmap continues rendering within each bucket as before (the 100ms slice quantization still applies within the bucket).
+- Bubbles (trades) are positioned within their bucket using sub-bucket fractional x-mapping.
+- The current bucket (rightmost, in progress) grows in real-time as new data arrives.
+
+**Visible window:**
+- Instead of `VISIBLE_WINDOW_MS = 60_000`, the visible window becomes N visible buckets.
+- For 1m buckets with a 60s visible window: only 1 bucket is visible. This is too few.
+- **Recommended default:** 5 visible buckets at 1m each = 5 minutes visible.
+- This means expanding `VISIBLE_WINDOW_MS` to `bucket_duration_ms * num_visible_buckets`.
+- `num_visible_buckets` should default to 5 and be configurable.
+
+### 3.4 Data Structure Changes
+
+**Current:** `_slices` is a deque of `(slice_ts, bids, asks, bid, ask, prices, qtys)` at 100ms resolution.
+
+**Proposed:** Add a bucket-level indexing layer on top of the existing slice deque.
+
+```python
+@dataclass
+class TimeBucket:
+    bucket_ts: int          # bucket start timestamp
+    slice_start_idx: int    # index into _slices deque (approximate)
+    trade_start_idx: int    # index into _trades deque (approximate)
+    high: float             # highest trade price in bucket
+    low: float              # lowest trade price in bucket
+    open_price: float       # first trade price
+    close_price: float      # last trade price
+    volume: float           # total trade volume
+    buy_volume: float       # buy-side volume
+    sell_volume: float      # sell-side volume
+    trade_count: int        # number of trades
+```
+
+The `_buckets` deque maintains a rolling set of these summaries. When a new trade or depth update arrives, it's assigned to the appropriate bucket. When the bucket boundary crosses, a new bucket is created.
+
+**The underlying `_slices` and `_trades` deques remain unchanged.** The bucket layer is an overlay for rendering organization, not a replacement of the raw data.
+
+### 3.5 Rendering Changes
+
+**`_draw_depth` changes:**
+- Currently builds an intensity array mapping `(price_row, time_col)` where `time_col` is derived from `slice_ts`.
+- With bucketing: the column mapping changes from `col = (slice_ts - t_start) / slice_ms` to a two-level mapping: `bucket_idx → bucket_x_start`, then `within_bucket_col`.
+- In practice, the math is similar but the pixel x-range for a given slice now respects bucket boundaries.
+
+**`_draw_bubbles` changes:**
+- Currently: `x = px + (ts - t_start) * inv_ts * pw`.
+- With bucketing: `x = bucket_left_px + (ts - bucket_start) / bucket_duration * bucket_width_px`.
+- This is functionally similar but uses bucket-relative coordinates.
+
+**`_draw_time_axis` changes:**
+- Currently: adaptive tick spacing from `_TIME_TICK_CANDIDATES`.
+- With bucketing: tick marks at bucket boundaries. Label format adapts based on bucket size.
+- Add vertical separator lines at bucket boundaries (more prominent than current grid lines).
+
+**`_draw_bucket_separators` (new):**
+- Draw thin vertical lines at bucket boundaries.
+- Optionally draw a mini OHLC bar or price range ribbon at each bucket boundary.
+
+### 3.6 Scrolling / Interaction Changes
+
+**Current scrolling:**
+- The view auto-scrolls as `chart_now` advances. `t_start = chart_now - visible_window_ms`.
+- Sub-pixel smooth scrolling via `frac = (t_start - t_start_q) / slice_ms`.
+
+**With bucketing:**
+- The current bucket is always the rightmost visible bucket.
+- As time advances within a bucket, the current bucket grows (new slices appear on the right edge).
+- When a bucket boundary is crossed, the entire view shifts left by one bucket width and a new (empty) bucket appears on the right.
+- This creates a "step-scroll" behavior at bucket boundaries with smooth rendering within each bucket.
+- Smooth sub-pixel scrolling can still apply for within-bucket advancement.
+
+**Alternative: continuous scroll with bucket overlay:**
+- Keep the existing smooth continuous scrolling.
+- Simply overlay bucket boundary markers and organize the x-axis labels at bucket boundaries.
+- This is visually simpler and preserves the existing scrolling feel.
+- **Recommended approach** for V1 — add bucket separators and labels to the existing continuous scroll.
+
+### 3.7 Replay / Backtest Compatibility
+
+- The bucket model is purely a UI rendering concern.
+- The underlying data (trades, depth slices) remains continuous.
+- In replay mode, `chart_now` advances based on event timestamps — buckets are computed from these timestamps identically to live mode.
+- No changes to the C++ `ReplayFeed` or `TickStore` are required.
+- Bucket boundaries are derived from timestamps and bucket size — deterministic.
+
+### 3.8 Configuration
+
+| Parameter | Default | Where Set |
+|---|---|---|
+| `bucket_duration_ms` | 60000 (1 min) | Toolbar `_candle_combo` (already exists) |
+| `num_visible_buckets` | 5 | New toolbar control or hardcoded default |
+| `show_bucket_separators` | True | Settings |
+| `show_bucket_ohlc` | False | Settings (deferred) |
+
+---
+
+## 4. Time-Bucketed X-Axis Design
+
+### 4.1 Axis Layout
+
+The x-axis is divided into N visible buckets, each occupying `bucket_width_px = plot_width / num_visible_buckets` pixels.
+
+```
+|  Bucket N-4  |  Bucket N-3  |  Bucket N-2  |  Bucket N-1  |  Current  |
+|  14:01-14:02 |  14:02-14:03 |  14:03-14:04 |  14:04-14:05 |  14:05-.. |
+```
+
+Labels at bucket boundaries show the bucket start time. Format depends on bucket duration:
+- < 1 min: `HH:MM:SS`
+- 1-59 min: `HH:MM`
+- >= 1 hr: `HH:MM`
+
+### 4.2 Bucket Boundary Rendering
+
+At each bucket boundary:
+- A vertical line (1px, `#2a2a45`, slightly more visible than grid lines).
+- A time label centered on the boundary or at the bucket start.
+- Optionally, a thin horizontal band showing the bucket's OHLC range (deferred to later iteration).
+
+### 4.3 Within-Bucket Rendering
+
+Within each bucket, the existing rendering logic applies at reduced horizontal scale:
+- Depth slices are positioned within the bucket's pixel range.
+- Bubbles are positioned within the bucket's pixel range.
+- The sub-pixel scrolling logic applies to the current (rightmost) bucket.
+
+### 4.4 Transition Behavior
+
+When `chart_now` crosses a bucket boundary:
+1. `visible_window_ms` is recalculated as `num_visible_buckets * bucket_duration_ms`.
+2. `t_start` shifts to align with the new visible bucket range.
+3. Old data outside the visible window is pruned as before.
+
+---
+
+## 5. Rendering / Layout Implications
+
+### 5.1 Heatmap Intensity Image
+
+The depth intensity image currently has dimensions `(n_price_rows, n_time_cols)` where `n_time_cols = visible_window_ms / slice_ms`.
+
+With 5 visible buckets at 1m each: `visible_window_ms = 300,000 ms`. At 100ms slices: `n_time_cols = 3,000`. This is 5x the current column count (600 for 60s).
+
+**Mitigation options:**
+- Increase `slice_ms` proportionally (e.g., 500ms for 5-bucket view).
+- Dynamically adjust `slice_ms` based on `visible_window_ms` to keep `n_time_cols` bounded (target: 600-1200).
+- Use level-of-detail: older buckets rendered at coarser time resolution, current bucket at full resolution.
+
+**Recommended:** Dynamically set `slice_ms = max(100, visible_window_ms / 1200)`. For 5m visible: `slice_ms = 250ms`. For 60s visible: `slice_ms = 100ms` (unchanged).
+
+### 5.2 Bubble Density
+
+With a 5-minute visible window, there will be more trades visible simultaneously. The existing `p95_size` normalization handles density, but bubble overlap may increase.
+
+**Mitigation:** Reduce `MAX_BUBBLE_RADIUS` proportionally to the number of visible buckets, or use a density-aware radius calculation.
+
+### 5.3 Memory
+
+More visible data means more items in the `_slices` and `_trades` deques. The existing `maxlen` limits should accommodate 5x the current window. Current maxlen:
+- `_slices`: 10,000 (sufficient for 5min at 250ms = 1,200 slices).
+- `_trades`: 100,000 (sufficient for 5 minutes of active trading).
+
+No changes needed.
+
+---
+
+## 6. Interaction / Scrolling Behavior
+
+### 6.1 Recommended Approach: Continuous Scroll with Bucket Overlay
+
+Keep the existing smooth continuous scrolling and add bucket separators as a visual overlay:
+
+1. `visible_window_ms = num_visible_buckets * bucket_duration_ms`.
+2. `t_start = chart_now - visible_window_ms`.
+3. Depth/bubble rendering uses the same continuous x-mapping as before.
+4. `_draw_time_axis` is replaced with `_draw_bucket_axis` that draws labels and separators at bucket boundaries.
+5. The visual effect: the view scrolls smoothly but bucket boundary lines march across the screen like candlestick separators.
+
+This preserves the existing order flow feel while adding temporal structure.
+
+### 6.2 Zoom / Pan Behavior
+
+- Vertical zoom/pan remains unchanged (price axis).
+- Horizontal zoom could be added later (change `num_visible_buckets`).
+- For V1, horizontal extent is fixed at `num_visible_buckets` buckets.
+- The `_candle_combo` changes `bucket_duration_ms`, which changes `visible_window_ms`.
+
+### 6.3 Auto-Scale
+
+The existing `_auto_scale` flag controls vertical price range. This remains unchanged. Horizontal auto-scroll (following `chart_now`) is the default and only behavior in V1.
+
+---
+
+## 7. Candlestick Bucket Model
+
+### 7.1 Bucket Lifecycle
+
+```
+FORMING → COMPLETE → VISIBLE → PRUNED
+```
+
+- **FORMING:** The current (rightmost) bucket. New data is appended. OHLC/volume updated on each trade.
+- **COMPLETE:** A bucket whose time period has elapsed. No new data can be added.
+- **VISIBLE:** A complete bucket that falls within the visible window.
+- **PRUNED:** A bucket that has scrolled off the left edge and been discarded.
+
+### 7.2 Bucket OHLC Computation
+
+For each bucket:
+- `open` = price of first trade in the bucket.
+- `high` = max trade price.
+- `low` = min trade price.
+- `close` = price of last trade.
+- `volume` = sum of trade quantities.
+- `buy_volume` = sum of quantities where `is_buyer_maker == False` (taker buy).
+- `sell_volume` = sum of quantities where `is_buyer_maker == True` (taker sell).
+
+These are computed incrementally as trades arrive. They are used for:
+- Optional OHLC rendering at bucket boundaries.
+- Signal log context ("this trade occurred in a bucket with this OHLC profile").
+- Volume-at-bucket aggregation.
+
+### 7.3 Future Bucket Sizes
+
+The bucket model should be parameterized from the start:
+
+| Bucket Size | Use Case |
+|---|---|
+| 5s | Ultra-short-term scalping view |
+| 15s | Short-term order flow view |
+| 30s | Default for fast markets |
+| 1m | Default standard view |
+| 5m | Wider context view |
+| 15m | Session overview |
+
+The `_candle_combo` already has 1m, 5m, 15m, 30m, 1hr options. Shorter intervals (5s, 15s, 30s) should be added.
+
+---
+
+## 8. Strategy UI Integration Plan
+
+### 8.1 Design Goals
+
+Create a unified strategy arm/disarm UX that:
+- Controls the full Tide/Wave/Ripple strategy stack.
+- Shows clear state (armed, disarmed, waiting, active, invalidated, exited).
+- Integrates with the signal log for strategy-specific events.
+- Respects the deterministic baseline and does not introduce non-determinism.
+- Works across app modes (UI live, replay, paper).
+
+### 8.2 Strategy State Model
+
+The UI should expose a single top-level strategy state machine:
+
+```
+DISARMED → ARMING → ARMED_WAITING → ARMED_ACTIVE → ARMED_EXITING → ARMED_COOLDOWN
+    ↑                                                                      ↓
+    └──────────────────────── DISARMING ←──────────────────────────────────┘
+```
+
+| State | Meaning | UI Indicator |
+|---|---|---|
+| `DISARMED` | Strategy is not active. Ripple decisions are ignored. | Grey badge, "Strategy Off" |
+| `ARMING` | User has requested arm. System is validating preconditions (feed health, risk config). | Yellow badge, "Arming..." |
+| `ARMED_WAITING` | Strategy is armed but no trade setup is in progress. Ripple is scanning. | Green badge, "Watching" |
+| `ARMED_ACTIVE` | A trade is in an active lifecycle state (SETUP through MATURATION). | Bright green badge, "Active: {archetype}" |
+| `ARMED_EXITING` | A trade is in EXIT state. | Orange badge, "Exiting" |
+| `ARMED_COOLDOWN` | A trade has completed and is in cooldown. | Blue badge, "Cooldown" |
+| `DISARMING` | User has requested disarm. System is closing any open position. | Yellow badge, "Disarming..." |
+
+This maps directly to the existing `LifecycleState` enum from `strategy.md` §12:
+- `DISARMED` = no lifecycle active.
+- `ARMED_WAITING` = lifecycle is idle (post-cooldown or initial).
+- `ARMED_ACTIVE` = lifecycle in `SETUP`, `ENTRY`, `CONFIRMATION`, `EXPANSION`, or `MATURATION`.
+- `ARMED_EXITING` = lifecycle in `EXIT`.
+- `ARMED_COOLDOWN` = lifecycle in `COOLDOWN`.
+
+### 8.3 Integration Points
+
+| Component | Role |
+|---|---|
+| `MainWindow` | Holds top-level strategy state. Coordinates arm/disarm. |
+| Ripple mode combo | **Replaced or augmented** by a unified strategy state control. |
+| Arm Execution button | **Replaced** by a unified Arm/Disarm strategy button. |
+| `StrategyDiagnosticsPanel` | Extended to show strategy state prominently. |
+| `TradeBlotter` | Extended to include strategy-level context in signals. |
+| `OrderFlowEngine` (C++) | Already provides `get_strategy_snapshot()`. |
+| Execution Manager | Continues to handle order routing. Armed state gates execution. |
+
+---
+
+## 9. Arm / Disarm UX Design
+
+### 9.1 Primary Control
+
+Replace the current separate "Arm Execution" button and "Ripple" mode combo with a single unified control:
+
+**Strategy Control Widget** (in toolbar):
+```
+[Strategy: ▼ Observe | Paper | Live] [ARM / DISARM button]
+```
+
+- **Observe** mode: Strategy runs, signals logged, no execution. (Replaces "Log Only".)
+- **Paper** mode: Strategy runs with paper fills. (Replaces "Paper".)
+- **Live** mode: Strategy runs with real execution. (Replaces the old "Arm Execution" flow.)
+
+The ARM button:
+- When disarmed: labeled "ARM", green border. Click to arm.
+- When armed: labeled "DISARM", red border. Click to disarm.
+- When transitioning: labeled "..." with yellow border. Not clickable.
+
+### 9.2 Arm Preconditions
+
+Before the strategy can be armed, the following must be true:
+1. Feed is connected and healthy (both trade and depth streams live).
+2. `OrderFlowEngine` is initialized and has received initial data.
+3. If Live mode: execution manager is connected and authenticated.
+4. Risk configuration is valid (ES budget > 0, max position > 0).
+
+If preconditions are not met, the ARM button shows a tooltip explaining what's missing.
+
+### 9.3 Disarm Behavior
+
+When the user clicks DISARM:
+1. If a trade is active (ARMED_ACTIVE or ARMED_EXITING), emit a forced exit signal.
+2. Transition to DISARMING.
+3. Wait for the trade to close (or timeout).
+4. Transition to DISARMED.
+5. Log a "Strategy disarmed" event to the signal log.
+
+If no trade is active, transition directly to DISARMED.
+
+### 9.4 Persistence
+
+Strategy mode (Observe/Paper/Live) is persisted via QSettings (replacing the current `ripple/mode` setting). Armed state is **not** persisted — the strategy always starts disarmed on app launch.
+
+---
+
+## 10. Signal Log Integration Plan
+
+### 10.1 Current Signal Log
+
+The `TradeBlotter` uses `SignalEntry` with these categories:
+- `RIPPLE_ENTRY`, `RIPPLE_EXIT`, `RIPPLE_PREPARE`, `RIPPLE_CANCEL`, `RIPPLE_REARM`
+- `EXECUTION`
+- `LEGACY_RAW`
+- `CONTEXT`
+- `DIAGNOSTIC`
+
+### 10.2 Required Changes
+
+**Add new signal categories:**
+- `STRATEGY_ARM` — strategy was armed.
+- `STRATEGY_DISARM` — strategy was disarmed.
+- `STRATEGY_STATE_CHANGE` — strategy state transition (e.g., WAITING → ACTIVE).
+
+**Enrich existing Ripple signal entries with strategy context:**
+
+Each `SignalEntry` should include optional metadata:
+
+```python
+@dataclass
+class SignalEntry:
+    # ... existing fields ...
+    wave_regime: str = ""          # Wave regime at time of signal
+    tide_bias: str = ""            # Tide bias at time of signal
+    risk_budget_pct: float = 0.0   # ES budget usage at time of signal
+    lifecycle_state: str = ""      # Trade lifecycle state
+    archetype: str = ""            # Trade archetype (BOUNCE/BREAKOUT)
+```
+
+### 10.3 Signal Log Filtering
+
+The existing category filter (Source combo, "Ripple only", "Exec only" checkboxes) should be extended:
+
+- Add a "Strategy" filter that shows only STRATEGY_* and RIPPLE_* categories.
+- Add an "All Active" filter that hides LEGACY_RAW and DIAGNOSTIC by default.
+
+### 10.4 Signal Log for This Strategy
+
+For the Tide/Wave/Ripple strategy specifically, the signal log should show:
+
+| Event | Category | Description Format |
+|---|---|---|
+| Setup detected | RIPPLE_PREPARE | "{archetype} setup at {wall_price}, Wave={regime}" |
+| Entry confirmed | RIPPLE_ENTRY | "{archetype} entry {side} at {price}, size={qty}" |
+| Scale-in | RIPPLE_ENTRY | "Scale-in {side} at {price}, tranche {n}" |
+| Scale-out | RIPPLE_EXIT | "Scale-out at {price}, target {n}/{total}" |
+| Exit | RIPPLE_EXIT | "{exit_type} exit at {price}, PnL={pnl}" |
+| Cancel | RIPPLE_CANCEL | "Setup cancelled: {reason}" |
+| Strategy armed | STRATEGY_ARM | "Strategy armed in {mode} mode" |
+| Strategy disarmed | STRATEGY_DISARM | "Strategy disarmed, reason: {reason}" |
+| State change | STRATEGY_STATE_CHANGE | "State: {old} → {new}" |
+
+---
+
+## 11. Strategy Status / Visibility in UI
+
+### 11.1 Strategy Diagnostics Panel Update
+
+The existing `StrategyDiagnosticsPanel` should be extended to show:
+
+**Row 1 (prominent):** Strategy state badge with color.
+**Existing rows:** Wave regime, η, liquidity state, µPrice, trade state, uPnL, ES usage, imbalance.
+**New rows:**
+- Tide bias (LONG/SHORT/NEUTRAL with color).
+- Trade archetype (BOUNCE/BREAKOUT/—).
+- Current stop price.
+- Current target price.
+- Hold time (formatted as MM:SS).
+- Scale-in count.
+- PnL (cumulative session PnL).
+
+### 11.2 Status Bar Update
+
+The status bar should show a compact strategy state indicator:
+```
+Strategy: WATCHING | Wave: NEUTRAL | Trades: 3 | PnL: +0.0042
+```
+
+### 11.3 Heatmap Overlays
+
+When the strategy is armed and a trade is active:
+- Draw a horizontal line at the stop price (red, dashed).
+- Draw a horizontal line at the target price (green, dashed).
+- Draw a horizontal line at the entry price (white, solid).
+- These lines appear as overlays on the heatmap within the `paintEvent`.
+
+---
+
+## 12. Inactive UI Elements Audit
+
+### 12.1 Audit Method
+
+For each UI element, check:
+1. Is it wired to backend logic that runs?
+2. Does it affect any behavior when changed?
+3. Is it relevant to the Tide/Wave/Ripple strategy?
+4. Would removing it break any test or functionality?
+
+### 12.2 Audit Results
+
+| Element | File | Verdict | Action |
+|---|---|---|---|
+| **Candle combo** | `main_window.py:517-527` | Partially wired — sets `_candle_duration_ms` for VP recompute cadence, but label "Candle" implies visual bucketing. | **Repurpose** — wire to heatmap bucket size. |
+| **Tick Size input** | `main_window.py:531-533` | Wired to `ofe.EngineConfig.tick_size`. Used by the C++ signal engine (legacy, pre-Ripple). Not used by Tide/Wave/Ripple. | **Hide now, keep in code** — may be useful for legacy strategy testing. |
+| **Imbalance input** | `main_window.py:536-538` | Wired to `ofe.EngineConfig.imbalance_threshold`. Legacy signal engine parameter. Ripple has its own `absorption_entry` etc. | **Hide now, keep in code** — same rationale as Tick Size. |
+| **Sizing controls** | `main_window.py:543-553` | Used by execution manager. Only meaningful when armed. | **Keep, but disable when disarmed.** |
+| **Account Panel** | `ui/account_panel.py` | Shows Binance account state. Empty/stale when not connected to broker. | **Keep, but show "Not connected" placeholder when broker unavailable.** |
+| **Ripple mode combo** | `main_window.py:564-575` | Currently functional but will be superseded by unified strategy control. | **Replace** with unified strategy mode (Observe/Paper/Live). |
+| **Arm Execution button** | `main_window.py:556-559` | Currently functional but will be superseded by unified ARM/DISARM. | **Replace** with unified ARM/DISARM button. |
+| **Ripple status label** | `main_window.py:577-579` | Shows Ripple suppression metrics. Useful for diagnostics. | **Keep** — move to diagnostics panel or status bar. |
+| **Mode combo (Live/Replay)** | `main_window.py:483-487` | "Replay" option exists but replay in UI is not fully implemented (no file picker). | **Keep "Live" active, grey out "Replay" with tooltip "Coming soon".** |
+| **VP Window combo** | `main_window.py:502-513` | Fully functional — controls VP time window. | **Keep as-is.** |
+| **Legacy strategies** | `strategies/{ichimoku,obv,support_resistance}.py` | Not exposed in UI mode. Used in backtest/optimise modes via `main.py`. | **Defer decision** — these are separate from the Tide/Wave/Ripple path. No UI action needed. |
+
+---
+
+## 13. Proposed Removals / Hiding / Deferrals
+
+### 13.1 Remove Now
+- Nothing should be deleted outright in this phase. All changes should be hiding or replacement.
+
+### 13.2 Hide Now / Keep in Code
+
+| Element | How to Hide | Why Keep |
+|---|---|---|
+| Tick Size input | `setVisible(False)` on the QLabel + QLineEdit | Legacy signal engine may still be useful for debugging |
+| Imbalance input | `setVisible(False)` on the QLabel + QLineEdit | Same rationale |
+| Sizing controls (when disarmed) | `setEnabled(False)` + reduced opacity | Controls are valid but only meaningful when armed |
+
+### 13.3 Replace Now
+
+| Old Element | New Element |
+|---|---|
+| Ripple mode combo + Arm Execution button | Unified Strategy mode combo (Observe/Paper/Live) + ARM/DISARM button |
+
+### 13.4 Defer Decision
+
+| Element | Rationale |
+|---|---|
+| Legacy strategies | Not visible in UI mode. No immediate harm. |
+| Replay mode | Useful feature but not complete. Grey out rather than remove. |
+| Account Panel (empty state) | Show placeholder text instead of empty table. Low priority. |
+
+### 13.5 Cleanup Safety
+
+- All hidden elements remain in code with `setVisible(False)` or `setEnabled(False)`.
+- No files are deleted.
+- No UI widget classes are removed.
+- Changes are reversible by toggling visibility flags.
+
+---
+
+## 14. HDF5 / .h5 Data Model Update Plan
+
+### 14.1 New Data Requirements
+
+| Data | Purpose | Storage Location |
+|---|---|---|
+| Strategy signals/events | Replay and audit signal log | New HDF5 group in tick store |
+| Strategy snapshots | Time series of strategy state for replay | New HDF5 group in tick store |
+| Arm/disarm events | Session audit trail | New HDF5 group in tick store |
+| Bucket OHLC summaries | Optional pre-computed bucket data | New HDF5 group in tick store |
+| Session metadata | Schema version, session config hash | HDF5 attributes on root group |
+
+### 14.2 Proposed Schema Extensions
+
+All new data goes into the existing `data/{exchange}_ticks.h5` file managed by C++ `TickStore`. This keeps all real-time data co-located and replayable.
+
+**New HDF5 groups:**
+
+```
+/{symbol}/
+    trades/          (existing)
+    depth_snapshots/ (existing)
+    strategy_signals/    (NEW)
+        timestamp    int64     event timestamp (ms)
+        signal_type  string    RIPPLE_ENTRY, RIPPLE_EXIT, etc.
+        category     string    signal category
+        side         string    BUY/SELL/NONE
+        price        float64   signal price
+        quantity     float64   signal quantity (if applicable)
+        archetype    string    BOUNCE/BREAKOUT/NONE
+        lifecycle    string    lifecycle state at signal time
+        wave_regime  string    Wave regime at signal time
+        tide_bias    string    Tide bias at signal time
+        risk_pct     float64   ES budget usage percentage
+        description  string    human-readable description
+    strategy_snapshots/  (NEW)
+        timestamp    int64
+        wave_regime  string
+        tide_bias    string
+        liquidity_state string
+        lifecycle_state string
+        microprice   float64
+        imbalance    float64
+        unrealized_pnl float64
+        consumed_es  float64
+        es_budget    float64
+        cumulative_pnl float64
+    session_events/      (NEW)
+        timestamp    int64
+        event_type   string    ARM, DISARM, CONNECT, DISCONNECT, ERROR
+        details      string    JSON-encoded metadata
+```
+
+### 14.3 Schema Versioning
+
+Add an HDF5 attribute `schema_version` to the root group:
+
+```
+/{symbol}.attrs['schema_version'] = 2
+```
+
+- Version 1: existing trades + depth_snapshots.
+- Version 2: adds strategy_signals, strategy_snapshots, session_events.
+
+On read, check `schema_version`:
+- If missing or 1: legacy format, no strategy data.
+- If 2: full format with strategy data.
+
+### 14.4 Write Path
+
+**Strategy signals:** Written from Python (not C++) since signals are generated in the Python UI/strategy layer. Options:
+1. **Via pybind11:** Extend `TickStore` with a `write_strategy_signal()` method callable from Python.
+2. **Via h5py:** Open the same .h5 file from Python and write to separate groups.
+
+**Recommended:** Option 1 (pybind11 extension) for consistency and to avoid concurrent file access issues. Alternatively, buffer signals in Python and write in batch at session end.
+
+**Strategy snapshots:** Written periodically (every 1-5 seconds) from the timer tick. Batch writes to avoid per-tick I/O.
+
+**Session events:** Written on arm/disarm/connect/disconnect. Infrequent, immediate write is acceptable.
+
+### 14.5 Read Path
+
+For replay:
+- `ReplayFeed` continues to replay trades and depth as before.
+- Strategy signals and snapshots are read by the Python replay orchestrator to populate the signal log and diagnostics panel.
+- This enables "replay with strategy overlay" — seeing what the strategy decided at each point.
+
+### 14.6 Backward Compatibility
+
+- Existing .h5 files without the new groups remain readable.
+- The version check on read handles missing groups gracefully.
+- New code that reads strategy data checks for group existence before access.
+- No migration script needed — new groups are created on first write.
+
+---
+
+## 15. Backward Compatibility and Migration Considerations
+
+### 15.1 UI Changes
+
+- The toolbar layout changes (hiding elements, replacing controls) are fully backward compatible at the code level.
+- QSettings keys change from `ripple/mode` to `strategy/mode`. The old key is read as fallback.
+- Existing saved window geometry and splitter positions are unaffected.
+
+### 15.2 Data Format
+
+- Existing .h5 files: no modification needed. New groups are added on new writes.
+- Existing OHLCV .h5 files (`data/{exchange}.h5`): completely unaffected.
+- Backtest results: unaffected.
+
+### 15.3 C++ Interface
+
+- `OrderFlowEngine::get_strategy_snapshot()` is already implemented and bound. No changes needed.
+- If `TickStore` is extended for signal writing, the extension is additive (new methods only).
+- All existing pybind11 bindings remain unchanged.
+
+### 15.4 Strategy Logic
+
+- No changes to Tide, Wave, or Ripple logic.
+- No changes to the C++ hot path.
+- All changes are in the Python UI and orchestration layer.
+
+---
+
+## 16. App Mode Implications
+
+### 16.1 Data Collection Mode (`data`)
+
+**Changes:** None required. Data collection writes trades and depth to .h5 as before. The new HDF5 groups (strategy signals, snapshots) are not written during data collection because the strategy does not run.
+
+**Future consideration:** If context engine data should be collected alongside market data, `data_service.py` would need extension. Out of scope for this plan.
+
+### 16.2 Backtest Mode (`backtest`)
+
+**Changes:**
+- `strategies/orderflow.py:backtest()` remains unchanged for now.
+- Strategy signals generated during backtest should optionally be written to a results file for analysis.
+- The `_build_config()` function in `strategies/orderflow.py` maps params to `EngineConfig`. The new UI bucket duration is not a backtest parameter.
+- Bucket visualization is a UI concern and does not affect backtest.
+
+**Future consideration:** Backtest results could include a strategy signal time series for the replay-with-overlay feature.
+
+### 16.3 Optimise Mode (`optimise`)
+
+**Changes:** None. Optimization runs backtest in a loop. UI changes do not affect optimization.
+
+**Future consideration:** Strategy signal logging could feed into optimization metrics (e.g., signal quality scoring).
+
+### 16.4 UI Mode (`ui`)
+
+**This is the primary mode affected by this plan.** All UI changes described in this document apply to UI mode.
+
+Summary of UI mode changes:
+- Heatmap bucketing and time axis update.
+- Strategy arm/disarm controls.
+- Signal log enrichment.
+- Strategy state visibility.
+- Inactive element cleanup.
+- HDF5 strategy data writing (if armed and live/paper).
+
+### 16.5 Execute Mode (`execute`)
+
+**Changes:** Execute mode (`main.py:execute`) runs without a UI. The arm/disarm concept becomes a CLI parameter or automatic-on-start.
+
+**No immediate changes needed.** Execute mode already has its own execution manager setup. The UI integration plan does not affect it.
+
+### 16.6 Mode-Agnostic Components
+
+| Component | Mode-Agnostic? |
+|---|---|
+| Bucket model for heatmap | Yes — purely a rendering concern |
+| Strategy state machine | Mostly — the state machine is useful in UI and execute modes |
+| Signal logging | Yes — useful in all modes that run the strategy |
+| HDF5 schema extensions | Yes — the schema supports all modes |
+
+### 16.7 Shared Contracts
+
+The following should be defined as shared contracts across modes:
+
+| Contract | Definition | Consumers |
+|---|---|---|
+| `StrategyMode` enum | `OBSERVE`, `PAPER`, `LIVE` | UI, execute, backtest |
+| `StrategyUIState` enum | `DISARMED`, `ARMING`, `ARMED_WAITING`, etc. | UI |
+| `StrategySignalEntry` | Extended `SignalEntry` with strategy context | Signal log, HDF5 |
+| `BucketSummary` | OHLC + volume for a time bucket | UI heatmap, HDF5 (optional) |
+
+---
+
+## 17. Testing Plan
+
+### 17.1 UI Rendering Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_bucket_boundaries_align` | Bucket start timestamps align to wall-clock boundaries |
+| `test_visible_window_matches_buckets` | `visible_window_ms == num_buckets * bucket_duration_ms` |
+| `test_bubble_x_within_bucket` | Trade bubbles render within the correct bucket's x-range |
+| `test_depth_slice_bucket_assignment` | Depth slices are assigned to the correct bucket |
+| `test_bucket_transition_no_data_loss` | When a bucket boundary is crossed, no trades or depth slices are lost |
+| `test_dynamic_slice_ms` | `slice_ms` adjusts correctly for different bucket configurations |
+
+### 17.2 Bucketed Time-Axis Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_bucket_label_format` | Labels use correct format for bucket duration |
+| `test_bucket_separator_positions` | Separator lines are at correct x-coordinates |
+| `test_bucket_ohlc_computation` | OHLC values for a bucket match expected values from trades |
+| `test_empty_bucket_handling` | Buckets with no trades are handled gracefully |
+
+### 17.3 Scrolling Behavior Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_auto_scroll_follows_chart_now` | View tracks latest data |
+| `test_bucket_cross_scroll` | View shifts correctly when bucket boundary is crossed |
+| `test_chart_now_cap_preserved` | `chart_now` capping still works with bucketed view |
+| `test_pruning_with_wider_window` | Pruning works correctly with 5x wider visible window |
+| `test_pruning_uses_trade_time` | Existing bubble pipeline regression test still passes |
+
+### 17.4 Signal Log Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_strategy_arm_signal` | ARM event appears in signal log with correct category |
+| `test_strategy_disarm_signal` | DISARM event appears in signal log |
+| `test_ripple_signal_context` | Ripple signals include Wave regime, Tide bias, risk budget |
+| `test_signal_filtering` | New filter options correctly show/hide categories |
+| `test_signal_entry_metadata` | New fields are populated correctly |
+
+### 17.5 Strategy Arm/Disarm Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_arm_preconditions` | ARM fails gracefully when feed not connected |
+| `test_arm_state_transitions` | State machine transitions correctly |
+| `test_disarm_closes_position` | Active trade is closed on disarm |
+| `test_disarm_no_position` | Disarm from ARMED_WAITING is immediate |
+| `test_mode_persistence` | Strategy mode persists across restart via QSettings |
+| `test_armed_state_not_persisted` | Strategy starts disarmed on launch |
+
+### 17.6 HDF5 Schema Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_schema_version_written` | New files have `schema_version = 2` |
+| `test_legacy_file_readable` | Version 1 files open without error |
+| `test_signal_write_read_roundtrip` | Signals written to .h5 can be read back identically |
+| `test_snapshot_write_read_roundtrip` | Snapshots survive write/read cycle |
+| `test_session_event_persistence` | ARM/DISARM events are stored and recoverable |
+
+### 17.7 Backward Compatibility Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_legacy_h5_no_strategy_groups` | Old .h5 files work without strategy groups |
+| `test_old_qsettings_fallback` | Old `ripple/mode` QSettings key is read as fallback |
+| `test_replay_determinism_preserved` | Existing `test_replay_determinism.py` tests still pass |
+| `test_bubble_pipeline_preserved` | Existing `test_bubble_pipeline.py` tests still pass |
+
+### 17.8 Performance / Regression Tests
+
+| Test | What It Validates |
+|---|---|
+| `test_render_cycle_under_50ms` | Full paint cycle < 50ms with 5-bucket view |
+| `test_signal_log_no_lag` | Adding 100 signals in 1 second doesn't block UI |
+| `test_h5_write_throughput` | Signal writes don't exceed 10ms per batch |
+| `test_memory_bounded` | Deque sizes remain within limits during extended run |
+
+---
+
+## 18. Performance Considerations
+
+### 18.1 Rendering Hot Spots
+
+| Hot Spot | Current | With Bucketing | Mitigation |
+|---|---|---|---|
+| Depth intensity image | 600 cols × ~200 rows | Up to 1200 cols × ~200 rows | Dynamic `slice_ms` adjustment |
+| Bubble drawing | ~1000 trades visible | ~5000 trades visible | Density-aware radius; cull off-screen early |
+| Time axis drawing | 6-12 tick labels | 5-6 bucket labels + separators | Cheaper than current (fewer labels) |
+| VP recomputation | Every `_candle_duration_ms` | Unchanged | No change |
+
+### 18.2 Aggregation/Bucketing Cost
+
+Bucket OHLC computation is O(1) per trade (incremental update). No aggregation scan needed. Cost is negligible.
+
+Bucket assignment (`floor(ts / bucket_ms)`) is a single integer division. Negligible.
+
+### 18.3 Signal Log Volume
+
+Strategy signals are infrequent relative to market events:
+- At most a few signals per minute in active trading.
+- Signal log `_data` deque is bounded at 2,000 entries.
+- No performance concern.
+
+### 18.4 HDF5 Write Throughput
+
+Strategy snapshots at 1-5 second intervals produce ~12-60 rows per minute. At ~200 bytes per row, this is < 1 KB/s. Negligible.
+
+Strategy signals are even rarer (a few per trade lifecycle). Negligible.
+
+**Batch writes are recommended** to avoid HDF5 file lock contention with the C++ TickStore:
+- Buffer snapshots in Python.
+- Flush to HDF5 every 30 seconds or on session end.
+- Use a separate HDF5 file for strategy data if lock contention is an issue: `data/{exchange}_strategy.h5`.
+
+### 18.5 Replay / UI Synchronization
+
+In replay mode, the event-driven clock means buckets are populated at replay speed. No wall-clock timing issues.
+
+In live mode, the timer tick (100ms) drives rendering. Bucket transitions are detected during the timer tick and handled synchronously. No async issues.
+
+---
+
+## 19. Incremental Build Order
+
+### Phase A: Time-Bucketed Order Flow View (standalone, no strategy changes) — **[COMPLETED]**
+
+1. **A1: Bucket model** — ~~Implement `TimeBucket` dataclass and `_buckets` deque in `HeatmapWidget`.~~ **Done.**
+2. **A2: Visible window** — ~~Change `visible_window_ms` to be `num_visible_buckets * bucket_duration_ms`. Wire `_candle_combo` to control `bucket_duration_ms`.~~ **Done.**
+3. **A3: Dynamic slice_ms** — ~~Implement `slice_ms = max(100, visible_window_ms / 1200)`.~~ **Done.**
+4. **A4: Bucket axis** — ~~Implement `_draw_bucket_axis` replacing `_draw_time_axis`. Draw bucket separators and labels.~~ **Done.**
+5. **A5: Test and polish** — ~~Verify bubble pipeline tests pass. Verify render performance < 50ms.~~ **Done.** 64/64 bucket checks + 63/63 bubble checks pass.
+
+### Phase B: Strategy UI Controls (no HDF5 changes) — **[COMPLETED]**
+
+1. **B1: Strategy state model** — ~~Define `StrategyMode` and `StrategyUIState` enums in `execution/models.py`.~~ **Done.**
+2. **B2: Toolbar update** — ~~Replace Ripple mode combo + Arm Execution with unified Strategy mode + ARM/DISARM.~~ **Done.**
+3. **B3: State machine** — ~~Implement strategy state transitions in `MainWindow`.~~ **Done.**
+4. **B4: Diagnostics panel** — ~~Extend `StrategyDiagnosticsPanel` with strategy state, Tide bias, archetype, stop/target, hold time.~~ **Done.**
+5. **B5: Status bar** — ~~Add compact strategy state indicator.~~ **Done.**
+6. **B6: Heatmap overlays** — ~~Draw stop/target/entry lines when strategy is active.~~ **Done.**
+
+### Phase C: Signal Log Integration — **[COMPLETED]**
+
+1. **C1: Signal categories** — ~~Add `STRATEGY_ARM`, `STRATEGY_DISARM`, `STRATEGY_STATE_CHANGE` to `SignalCategory`.~~ **Done.**
+2. **C2: Signal metadata** — ~~Extend `SignalEntry` with strategy context fields.~~ **Done.**
+3. **C3: Signal emission** — ~~Emit strategy events from `MainWindow` state machine.~~ **Done.**
+4. **C4: Filter update** — ~~Add "Strategy" filter to `TradeBlotter`.~~ **Done.**
+
+### Phase D: Inactive UI Cleanup [COMPLETED]
+
+1. **D1: Hide elements** — ~~Hide Tick Size, Imbalance inputs. Disable sizing controls when disarmed.~~ **Done.**
+2. **D2: Replay mode** — ~~Grey out "Replay" option with tooltip.~~ **Done.**
+3. **D3: Account panel** — ~~Show placeholder when broker not connected.~~ **Done.**
+
+### Phase E: HDF5 Data Model [COMPLETED]
+
+1. **E1: Schema version** — ~~Add `schema_version` attribute to .h5 root group.~~ **Done.**
+2. **E2: Strategy signals group** — ~~Implement write path for strategy signals.~~ **Done.**
+3. **E3: Strategy snapshots group** — ~~Implement periodic snapshot writes.~~ **Done.**
+4. **E4: Session events group** — ~~Implement arm/disarm event storage.~~ **Done.**
+5. **E5: Read path** — ~~Implement read path for replay-with-overlay.~~ **Done.**
+6. **E6: Backward compatibility** — ~~Test with legacy .h5 files.~~ **Done.**
+
+---
+
+## 20. Risks / Open Questions
+
+### 20.1 Risks
+
+| Risk | Impact | Likelihood | Mitigation |
+|---|---|---|---|
+| Heatmap performance regression with wider visible window | UI feels laggy | Medium | Dynamic `slice_ms`; profile early; set `num_visible_buckets` conservatively |
+| Bucket separators clutter the view | Reduced readability | Low | Make separators subtle; provide toggle |
+| Unified strategy control confuses users expecting old controls | UX friction | Low | Tooltip help; default to Observe mode |
+| HDF5 file lock contention between C++ TickStore and Python writes | Data corruption or write failures | Medium | Use separate .h5 file for strategy data, or use batched writes with file locking |
+| Existing bubble pipeline tests break from visible window change | Regression in bubble rendering | Medium | Run `test_bubble_pipeline.py` after every change; the tests operate on raw timestamps, not visible window size |
+| Breaking the `chart_now` cap invariant | Bubbles disappear (known regression pattern) | Medium | All changes must preserve the `chart_now = max(t, min(d, t + MAX_DEPTH_LEAD_MS))` formula |
+| Signal log metadata adds complexity to `SignalEntry` | Harder to maintain | Low | All new fields are optional with defaults |
+
+### 20.2 Open Questions
+
+1. **Number of visible buckets:** Should this be configurable from the toolbar, or fixed at 5? More buckets = more context but smaller per-bucket area.
+2. **OHLC bars at bucket boundaries:** Should we render mini OHLC bars? This adds visual complexity. Defer to after basic bucketing is validated?
+3. **Strategy data in separate .h5 file vs. same file as tick data:** Separate file avoids lock contention but means replay needs to open two files. Same file is simpler but riskier.
+4. **Should the strategy be auto-armed in execute mode?** Currently the plan requires manual arming. Execute mode might benefit from auto-arm with a config flag.
+5. **Should the candle combo add shorter intervals (5s, 15s, 30s)?** The current combo has 1m, 5m, 15m, 30m, 1hr. Adding sub-minute intervals is useful for order flow but may cause performance issues.
+6. **Should the bucket model persist across reconnections?** Currently, disconnecting clears the heatmap. Should bucket OHLC summaries survive reconnection?
+7. **How should the wider visible window interact with the existing `_auto_scale` price range?** With 5 minutes of data visible, the price range may be wider, requiring more aggressive auto-scaling.
+8. **Should strategy signals be written to .h5 in Observe mode?** Observe mode logs to UI but should it also persist to disk? This would enable post-session analysis.
+
+---
+
+## 21. Recommended Phase Breakdown
+
+### Phase 1: Order Flow Bucketing (Week 1-2) — **[COMPLETED]**
+- Steps A1-A5.
+- Deliverable: Heatmap renders with bucket separators, configurable bucket size, wider visible window.
+- Test: Existing bubble/heatmap tests pass (63/63). New bucket tests pass (64/64). Render < 50ms.
+- No strategy logic changes.
+- **Implementation notes:**
+  - `TimeBucket` dataclass added to `ui/heatmap_widget.py` with incremental OHLC.
+  - `_buckets` deque tracks per-bucket summaries; updated on each `add_trade()`.
+  - `set_bucket_duration_ms()` recomputes `visible_window_ms` and `slice_ms`.
+  - Default: 5 visible buckets × 1 min = 300s window, `slice_ms = 250ms`.
+  - `_draw_bucket_axis` replaces `_draw_time_axis` — draws separators at bucket boundaries with time labels.
+  - Continuous scroll with bucket overlay approach (§6.1) — no change to depth/bubble rendering math.
+  - `_on_candle_changed` in `main_window.py` now wires to `heatmap.set_bucket_duration_ms()`.
+  - `test_bubble_pipeline.py` updated: pruning test uses wider window-aware timestamps.
+  - `test_bucket_model.py` added: 25 tests, 64 checks covering dataclass, assignment, OHLC, visible window, slice_ms, axis, backward compat, determinism.
+
+### Phase 2: Strategy Controls + Signal Log (Week 2-3) — **[COMPLETED]**
+- Steps B1-B6 + C1-C4.
+- Deliverable: Unified strategy mode + ARM/DISARM in toolbar. Strategy state visible in diagnostics panel and status bar. Signal log enriched with strategy context. Heatmap shows stop/target lines.
+- Test: 117/117 strategy UI checks pass. All existing tests (63 bubble, 64 bucket, 8 replay, 19 tide, 56 wave, 11 HMM, 21 crossvenue, 9 crossvenue-wave) pass. Zero regressions.
+- No HDF5 changes.
+- **Implementation notes:**
+  - `StrategyMode` enum (OBSERVE/PAPER/LIVE) and `StrategyUIState` enum (7 states) added to `execution/models.py`.
+  - `SignalCategory` extended with STRATEGY_ARM, STRATEGY_DISARM, STRATEGY_STATE_CHANGE.
+  - `SignalEntry` extended with wave_regime, tide_bias, risk_budget_pct, lifecycle_state, archetype (all optional, backward-compatible).
+  - Toolbar: Ripple mode combo + Arm Execution button replaced by Strategy mode combo (Observe/Paper/Live) + ARM/DISARM button with dynamic styling.
+  - State machine in `MainWindow._set_strategy_state()` drives transitions; `_update_strategy_state_from_snapshot()` maps C++ trade lifecycle to UI state.
+  - Signal emission: `_emit_strategy_signal()` creates SignalEntry with category and pushes to blotter on arm/disarm/state changes.
+  - `StrategyDiagnosticsPanel`: state badge (row 1), Tide bias, archetype, stop/target, hold time, existing rows preserved.
+  - Status bar: `_strategy_state_label` shows compact state with color.
+  - Heatmap: `set_strategy_overlay()` / `clear_strategy_overlay()` + `_draw_strategy_overlay()` renders entry/stop/target horizontal lines.
+  - `TradeBlotter`: "Strategy" source combo item, strategy checkbox filter, `_STRATEGY_CATEGORIES` set, colors for new categories.
+  - Settings: `strategy/mode` QSettings key; backward-compat migration from `ripple/mode`.
+  - `test_strategy_ui.py`: 17 tests, 117 checks covering enums, signals, state machine, blotter, panel, overlay, migration, backward compat.
+
+### Phase 3: UI Cleanup (Week 3) [COMPLETED]
+- Steps D1-D3.
+- Deliverable: Inactive elements hidden. Replay mode greyed out. Account panel shows placeholder.
+- Test: No regressions. Hidden elements still accessible in code.
+
+**Implementation notes (Phase 3):**
+  - `main_window.py`: Tick Size label+input and Imbalance label+input set to `setVisible(False)`. Widgets retained for legacy engine compatibility.
+  - `main_window.py`: Sizing mode combo and value input gated via `_update_sizing_enabled()` — disabled when `StrategyUIState.DISARMED`, enabled when any armed state.
+  - `main_window.py`: Replay mode combo item disabled via `QStandardItem.setEnabled(False)` with tooltip "Coming soon".
+  - `account_panel.py`: Added `_placeholder` QLabel ("Not connected") and `_content` QWidget wrapper. `set_connected(bool)` toggles visibility. `update_account()` auto-connects. `clear()` reverts to placeholder.
+  - `test_ui_cleanup.py`: 11 tests, 38 checks covering hidden elements, sizing gating, replay disable, account placeholder lifecycle, backward compatibility.
+
+### Phase 4: HDF5 Persistence (Week 3-4) [COMPLETED]
+- Steps E1-E6.
+- Deliverable: Strategy signals, snapshots, and session events persisted in .h5. Schema versioning. Backward compatible reads.
+- Test: Write/read roundtrip. Legacy file compatibility. No TickStore regression.
+
+**Implementation notes (Phase 4):**
+  - `strategy_store.py`: New Python module using h5py. Separate file per symbol (`data/{SYMBOL}_strategy.h5`) to avoid C++ TickStore contention.
+  - Schema version 2 with compound numpy dtypes for `strategy_signals`, `strategy_snapshots`, `session_events`.
+  - Signals written immediately on emission. Snapshots buffered (default batch=50) and flushed periodically. Session events written on ARM/DISARM/CONNECT/DISCONNECT.
+  - Read path: `read_signals()`, `read_snapshots()`, `read_events()` with optional `from_ms`/`to_ms` time-range filtering for replay-with-overlay.
+  - Backward compatibility: `is_legacy()` detects schema_version < 2. `open_readonly()` handles missing datasets gracefully. All read methods return `[]` for legacy files.
+  - `main_window.py`: StrategyStore opened on connect, closed on disconnect. Signal writes via `_emit_strategy_signal()`. Snapshot writes in strategy diagnostics timer tick (only when armed). Session events on connect/disconnect/arm/disarm.
+  - `test_strategy_store.py`: 16 tests, 63 checks covering schema version, signal roundtrip, snapshot buffer/flush, session events, time-range filtering, legacy detection, readonly open, reopen persistence, default field handling.
+
+### Phase 5: Polish and Integration Testing (Week 4) [COMPLETED]
+- End-to-end testing of all four workstreams together.
+- Performance profiling of the full UI render cycle with bucketing + strategy overlays + signal logging.
+- Replay-with-strategy-overlay smoke test.
+- Documentation updates to `TESTING_GUIDE.md`.
+
+**Implementation notes (Phase 5):**
+- `test_integration_e2e.py`: 8 tests, 57 checks. Full session lifecycle (connect → arm → trades → signals → snapshots → disarm → disconnect), cross-workstream state gating (strategy state gates UI cleanup elements), blotter filtering interop with mixed signal categories, bucket + overlay coexistence, HDF5 time-range filtering across all datasets, diagnostics panel from snapshot, deterministic bucket replay, account panel lifecycle.
+- `test_performance_profile.py`: 6 tests, 13 checks. Heatmap paintEvent timing (< 100ms), bucket model throughput (10k trades < 500ms, 1.5µs/trade), signal log append throughput (2k signals < 500ms), HDF5 write throughput (100 signals + 100 snapshots + 20 events < 2s), strategy overlay marginal rendering cost (< 10ms), large trade set render (5k trades + 500 depth < 150ms).
+- `test_replay_overlay.py`: 7 tests, 34 checks. Replay overlay reconstruction from persisted snapshots, signal playback into blotter from HDF5, event timeline reconstruction with JSON detail parsing, deterministic read-back (identical reads), time-windowed partial replay, diagnostics panel from replay snapshot, heatmap with replay trades + overlay.
+- All 15 test suites (542 total checks across 10 suites verified this pass) passing with zero failures.
+
+### Post-Phase Optimization: Bubble Aggregation [COMPLETED]
+- Targeted optimization of bubble rendering path: pre-render aggregation via (time_bucket, price_bucket, side) grid.
+- Price buckets derived from viewport: `pr * AGG_PRICE_BUCKET_PX / ph` (~4 pixels per bucket).
+- Time buckets derived from viewport: `ts_span * AGG_TIME_BUCKET_PX / pw` (~1.7s per bucket on default widget, ~173 x-positions across visible window). Wall-clock aligned for stability.
+- VWAP positioning for aggregated bubbles.
+- Diagnostics: `agg_cells`, `agg_raw_visible`, `agg_culled`, `agg_coarsen_passes` tracked in `_bubble_diag`.
+- `test_bubble_aggregation.py`: 25 tests, 48 checks.
+
+**Bug fix (post-optimization):** Initial implementation used candle-duration (60s) for time buckets, which collapsed all trades within a minute to one x-position — breaking auto-scroll and causing cross-column visual coupling. Fixed by deriving time buckets from pixel resolution (same approach as price buckets). This restored smooth scrolling while preserving aggregation benefits.
+
+### Stability Pass: Hard Caps and Bounded Rendering [COMPLETED]
+- **Problem:** Under sustained live/replay feed, paint times exceeded 1000ms and UI crashed. Root causes: unbounded `_trades` deque (maxlen=100,000), no cap on rendered bubble count, QPainterPath with thousands of ellipses.
+- **Trades deque cap:** `MAX_TRADES_RETAINED = 10,000` (was 100,000). At BTC's ~4 trades/s, this retains ~40 minutes — well beyond the 5-minute visible window.
+- **Rendered bubble hard cap:** `MAX_RENDERED_BUBBLES = 600`. After aggregation, if grid cells exceed this limit, three reduction stages activate:
+  1. **Dynamic coarsening:** Double both time and price bucket sizes, re-grid. Up to 6 passes.
+  2. **Volume culling:** Remove cells with < 2% of max cell volume (`MIN_BUBBLE_QTY_FRAC = 0.02`).
+  3. **Top-N rank cap:** If still over 600, keep only the highest-volume cells.
+- **Grid construction refactored** to `_build_grid()` static method, enabling clean re-invocation during coarsening.
+- **Reduction results:** 10k trades → 580 grid cells → 464 visible (94% reduction); 50k trades → deque capped at 10k → 288 visible (97% reduction). Paint time ~12ms avg for 10k trades.
+- **Tests:** 5 new tests added (rendered cap, coarsening activation, volume culling, deque bounds, largest-bubble survival). Total: 25 tests, 48 checks.
+
+### Viewport Tuning: 1-Minute Window and Wider Heatmap [COMPLETED]
+- **Problem:** Visible time window was 5 minutes (`DEFAULT_NUM_VISIBLE_BUCKETS = 5`), compressing too much history. Auto-scale price range was too narrow (`mid * 0.0004` = ~$33 for BTC), showing depth only in a thin band around price action. Heatmap looked sparse compared to Bookmap-style views.
+- **Time window fix:** Changed `DEFAULT_NUM_VISIBLE_BUCKETS` from 5 to 1. Default visible window is now 60s (1 candle). Adjusts automatically when candle duration changes.
+- **Price range fix:** New constants `AUTO_SCALE_MIN_SPAN_FRAC = 0.002` (was 0.0004) and `AUTO_SCALE_MARGIN_FRAC = 0.5` (was 0.25). For BTC at $83k: minimum span ~$166 with ~$83 margin on each side, showing full depth structure above and below price.
+- **Performance impact:** Positive — 1-minute window means fewer visible trades/slices per frame. Bubble aggregation handles ~2400 visible trades in ~4ms avg (was 10k in ~12ms).
+- **Tests:** Updated `test_bucket_model.py` and `test_bubble_aggregation.py` for new defaults. All 497 checks pass.
+
+### Heatmap Continuity: Forward-Fill for Persistent Depth [COMPLETED]
+- **Problem:** Depth heatmap showed broken segments / visible gaps across the time axis. Resting liquidity that remained in the book did not render continuously across the view. Root cause: `_draw_depth` only populates intensity columns that have a matching slice in the deque. The gap-fill in `add_depth_column` caps at 20 slices (2s at 100ms resolution), so any gap longer than 2 seconds leaves empty columns (black strips).
+- **Fix:** Added `_forward_fill_intensity()` static method to `HeatmapWidget`. Called at the end of `_draw_depth` after the main slice iteration loop and before color-mapping. Two passes:
+  1. **Forward-fill (left→right):** For each zero column, copy the nearest previous non-zero column. Matches order-book semantics: resting liquidity persists until changed.
+  2. **Backward-fill (left edge):** If the first N columns have no data, copy from the first non-zero column to give a clean left edge on startup.
+- **Performance:** `np.any(intensity > 0, axis=0)` vectorized check + bounded column copies. Typical cost < 0.2ms. Short-circuits immediately when all columns already have data.
+- **Determinism:** Same slice deque → same intensity array → same fill → deterministic.
+- **Tests:** `test_heatmap_continuity.py`: 12 tests, 49 checks. Unit tests for the forward-fill static method plus widget integration test with sparse depth.
+
+### Signal Log Strategy Focus and Layout Fix [COMPLETED]
+- **Problem 1 (Signal Log):** Default "All" filter flooded the log with `LEGACY_RAW` `STACKED_IMBALANCE_*` signals, burying strategy-relevant events. `EXHAUSTION_*` and `ABSORPTION_*` signals were classified as `LEGACY_RAW` despite being strategy-relevant.
+- **Problem 2 (Layout):** Strategy panel in `_left_col` made it a 3-widget splitter while `_chart_stack` had 2 widgets. The splitter sync (`setSizes`) passed 2 values to a 3-widget splitter, causing the strategy panel to steal height from the VP and break VP-heatmap vertical alignment.
+- **Signal Log fix (initial):**
+  1. Default "Strategy" checkbox to ON — users see strategy events immediately.
+  2. Added `_CONTEXT_SIGNAL_PREFIXES` (`EXHAUSTION_`, `ABSORPTION_`, `SWEEP_`, `FLIP_`) — these signals are now classified as `CONTEXT` instead of `LEGACY_RAW`.
+  3. Added `CONTEXT` and `EXECUTION` to `_STRATEGY_CATEGORIES` — contextually relevant and execution events visible in strategy view.
+  4. Users can still see all signals by unchecking "Strategy".
+- **Layout fix:**
+  1. Removed strategy panel from `_left_col` (now 2 widgets: VP + StatusPanel, matching chart_stack's 2 widgets).
+  2. Moved strategy panel to bottom-right area in a vertical splitter with account panel.
+  3. Splitter sync now operates on 2:2 widget correspondence, restoring correct VP-heatmap alignment.
+  4. Blotter gets 3x stretch vs 1x for bottom-right panel, giving the signal log most of the width.
+- **Tests:** 5 new tests (133 total in test_strategy_ui.py). Signal reclassification, default filter, uncheck behavior, left column widget count. Updated integration E2E test for expanded strategy filter set.
+
+### Signal Log Architecture Alignment [COMPLETED]
+- **Problem:** Signal log categories were flat and did not reflect the Tide/Wave/Ripple/Trade Lifecycle strategy architecture. Entry and exit decisions from Ripple were categorized as `RIPPLE_ENTRY`/`RIPPLE_EXIT` rather than trade lifecycle events. No Tide or Wave layer categories existed. The "Source" column was implementation-oriented rather than strategy-oriented.
+- **Signal category changes (`execution/models.py`):**
+  1. Added `SignalCategory.TIDE` — macro bias/regime events from the Tide layer.
+  2. Added `SignalCategory.WAVE` — market structure/regime events from the Wave layer.
+  3. Added `SignalCategory.TRADE_LIFECYCLE` — setup/entry/exit/confirmation events (highest priority for user).
+  4. Reclassified `ENTER_BOUNCE_*`, `ENTER_BREAKOUT_*`, `EXIT_BOUNCE`, `EXIT_BREAKOUT` from `RIPPLE_ENTRY`/`RIPPLE_EXIT` to `TRADE_LIFECYCLE`.
+  5. Added `_CATEGORY_LAYER_MAP` — maps every `SignalCategory` to a display layer name (TIDE/WAVE/RIPPLE/TRADE/EXEC/STRATEGY/RAW/CONTEXT/DIAG).
+- **Blotter UI changes (`ui/trade_blotter.py`):**
+  1. Replaced "Source" column with "Layer" column using `_CATEGORY_LAYER_MAP`.
+  2. Replaced source combo + 3 checkboxes with 4 layer-based filter buttons: Strategy (default ON), Trade, Ripple, Raw.
+  3. Filter sets: `_FILTER_STRATEGY` (Tide+Wave+Ripple+Trade+Strategy+Execution+Context), `_FILTER_TRADE` (Trade+Execution), `_FILTER_RIPPLE` (Ripple_* only), `_FILTER_RAW` (Legacy+Context+Diagnostic).
+  4. New color scheme: TIDE = gold, WAVE = slate blue, TRADE_LIFECYCLE = bright cyan/white, LEGACY_RAW = dim grey.
+  5. Bold font for `TRADE_LIFECYCLE` rows to make trade events visually dominant.
+- **Strategy metadata (`ui/main_window.py`):**
+  1. Cached `_last_strategy_snap` from the C++ strategy snapshot.
+  2. `_snap_metadata()` extracts `tide_bias` and `wave_regime` from the cached snapshot.
+  3. All strategy signals and ripple decisions now populate `tide_bias`, `wave_regime`, and `lifecycle_state` fields.
+- **Layout guard:** Added `setMaximumHeight(400)` on `bottom_right` splitter to prevent it from stealing vertical space from the chart area.
+- **Bubble fix:** Added `Qt.FillRule.WindingFill` to buy/sell `QPainterPath` objects to eliminate transparent inner circles on overlapping bubbles.
+- **Tests:** 163 checks in `test_strategy_ui.py` (up from 117). Added `test_trade_filter`, `test_layer_display_map`. Updated `test_blotter_strategy_categories` for new filter sets. Updated `test_integration_e2e.py` for `_FILTER_STRATEGY`.
+- **Files changed:** `execution/models.py`, `ui/trade_blotter.py`, `ui/main_window.py`, `ui/heatmap_widget.py`, `tests/test_strategy_ui.py`, `tests/test_integration_e2e.py`, `tests/test_heatmap_continuity.py`.
+
+### Trade Feed Stale Recovery: Depth-Driven chart_now Fallback [COMPLETED]
+- **Problem:** When the Binance trade WebSocket feed stalls (connection drop, quiet period), `chart_now` freezes at `_last_trade_ts + _MAX_DEPTH_LEAD_MS (5000ms)`. Depth keeps arriving but the heatmap cannot scroll — the display looks completely frozen. PERF logs showed skew growing from 0 to 18,562ms with the trade count stuck and `lag=5000ms` hitting the cap repeatedly. The Qt event loop was still running but the visual output was static.
+- **Root cause:** `chart_now` property: `max(t, min(d, t + 5000))`. When `t` (trade time) stops advancing, chart_now is pinned at `t + 5000` indefinitely regardless of how far `d` (depth time) advances.
+- **Fix:** Added `_STALE_TRADE_THRESHOLD_MS = 10,000`. When `depth_ts - trade_ts` exceeds this threshold, `chart_now` switches to `depth_ts - _MAX_DEPTH_LEAD_MS`, allowing the heatmap to scroll with depth time while preserving a margin for any remaining bubbles. New `trade_feed_stale` property for UI status checks.
+- **Visual indicator:** "Trade feed stale (Xs)" warning rendered at the bottom of the heatmap when the stale threshold is exceeded.
+- **Recovery:** When trades resume and skew drops below the threshold, the normal capping formula takes over automatically.
+- **Tests:** Updated `test_chart_now_caps_depth_lead` to cover medium skew (8s, normal cap) and large skew (14s, stale fallback). Added `trade_feed_stale` property assertions. Updated `test_heatmap_slices_within_visible_window` and `test_chart_now_unchanged` to use sub-threshold skew values.
+- **Files changed:** `ui/heatmap_widget.py`, `tests/test_bubble_pipeline.py`, `tests/test_bucket_model.py`.
+
+### Full Depth Book Auto-Scale [COMPLETED]
+- **Problem:** Auto-scale used only `best_bid` and `best_ask` (inside quote, ~$2 spread on BTC) to set the visible price range. With `AUTO_SCALE_MIN_SPAN_FRAC = 0.002` and the margin, the visible range was ~$332 — far narrower than the depth book's ~$200 per side. The heatmap showed full depth initially (before trades arrived), but once trades started driving auto-scale, the range narrowed to the action area and distant depth levels were clipped out of the rendered window.
+- **Fix:** Auto-scale now uses `_cur_depth_prices.min()` / `.max()` — the full extent of all resting liquidity in the order book — instead of just `best_bid` / `best_ask`. On slice pruning, recalculation scans the actual `snap_prices` arrays (element [5]) from sampled slices. Trade prices are still included as a safety net so bubbles are never clipped, but trades cannot narrow the range below the depth book extent.
+- **Margin reduction:** `AUTO_SCALE_MARGIN_FRAC` reduced from `0.5` to `0.05`. With a ~$200 depth range, 50% margin added $100 of empty space per side. The 5% margin adds ~$10 buffer — enough padding without wasting screen space.
+- **Performance impact:** `np.min()` / `np.max()` on ~400 floats (200 bids + 200 asks) is negligible (<0.01ms).
+- **Files changed:** `ui/heatmap_widget.py`.
+
+### Trade Storage Refactor: Time-Bucketed Slice Store [COMPLETED]
+- **Problem:** The bubble rendering path stored trades in two redundant structures: a raw `_trades` deque and a `_live_grid` dict of `{(p_key, is_buy): [qty, count, sum_pq]}` lists. The grid keyed on `(t_idx, p_key, is_buy)`, treating buy/sell as separate cells, and used viewport-derived variable-width time buckets. This resulted in ~2× the cell count needed, variable-width time resolution that coupled the store to the viewport, and no structured buy/sell imbalance data per cell.
+- **Solution (Time-bucketed slice store):** Replaced `_live_grid` with `_trade_slices: dict[int, TradeSlice]`, a store keyed by `floor(trade_ts / 100) * 100` (fixed 100 ms time slices). Each `TradeSlice` contains a `price_levels: dict[int, TradeBucketAggregate]` where `TradeBucketAggregate` tracks `trade_count`, `buy_count`, `sell_count`, `total_qty`, `buy_qty`, `sell_qty`, and `sum_price_qty`. Buy and sell trades at the same time/price cell merge into a single aggregate; bubble colour derives from buy/sell imbalance.
+- **Data model (conceptual):**
+  ```
+  TradeBucketsByTime:
+    dict[int, TradeSlice]       # key = bucket_start_ms (100 ms aligned)
+  TradeSlice:
+    bucket_start_ms: int
+    price_levels: dict[int, TradeBucketAggregate]
+  TradeBucketAggregate:
+    trade_count, buy_count, sell_count
+    total_qty, buy_qty, sell_qty
+    sum_price_qty               # for VWAP = sum_price_qty / total_qty
+  ```
+- **Lifecycle:**
+  1. **Incremental insert in `add_trade()`:** O(1) per trade. Computes `bucket_ms = (ts // TRADE_SLICE_MS) * TRADE_SLICE_MS` and `p_key = round(price / price_bucket_size)`. Creates or updates the `TradeBucketAggregate` at that cell.
+  2. **Incremental prune in `add_depth_column()`:** Slices with `bucket_ms < cutoff` are removed. O(B) where B = number of expired buckets.
+  3. **Full rebuild on price-bucket change:** When `price_bucket_size` drifts > 10% (viewport resize/zoom), slices are rebuilt from the `_trades` deque. O(N) but infrequent.
+  4. **Helper API:** `get_visible_slices(start_ms, end_ms)`, `prune_older_than(cutoff_ms)`.
+- **Render path change:** `_draw_bubbles()` iterates `_trade_slices` (O(S) where S = visible slices × price levels). Render cells store `[total_qty, trade_count, buy_qty, sell_qty, sum_pq]`. Bubble colour: buy_qty ≥ sell_qty → buy colour, otherwise sell colour.
+- **Key design details:**
+  - Fixed 100 ms time slices (`TRADE_SLICE_MS = 100`) decoupled from viewport pixel width.
+  - Price keys use `round(price / bucket_size)` for IEEE 754 boundary stability.
+  - Raw `_trades` deque retained for P95 normalization and rebuild; not iterated in the per-frame render path.
+  - `_slice_trade_total` tracks aggregate trade count for diagnostics.
+- **Performance results:**
+  - Steady-state draw: **0.63 ms avg** (10-draw average, 500 trades)
+  - 10k trades input: **1.46 ms avg** draw
+  - 84% aggregation reduction (3000 raw → 481 aggregated)
+  - 50k trades bounded: deque=3000, visible≤600
+  - Well under the 50 ms UI render target (§9.2)
+- **Bounded data structure (§9.1.1):** Store bounded by retention window / TRADE_SLICE_MS × price fan-out. Eviction: time-based pruning on `trade_cutoff`. Overflow: coarsening + volume culling + hard cap (MAX_RENDERED_BUBBLES = 600).
+- **Preserved invariants:**
+  - `chart_now` capping (§21.2) — untouched
+  - Trade pruning uses trade-derived time only (§21.3) — untouched
+  - `_bubble_diag` instrumentation (§21.5) — preserved, counts raw trades not cells
+  - All 6 mandatory regression tests in `test_bubble_pipeline.py` — pass
+  - Deterministic replay — preserved (store is deterministic for same inputs)
+- **Tests:** 6 trade-slice tests in `test_bubble_aggregation.py`: incremental insert, prune, rebuild, steady-state no-rebuild, render all visible, boundary stability. Total: 30 tests, 67 checks.
+- **Files changed:** `ui/heatmap_widget.py`, `tests/test_bubble_aggregation.py`.
+
+---
+
+## Recommended Heatmap Improvements
+
+The following items were identified during diagnosis of the current rendering pipeline. They are not yet implemented but represent concrete opportunities to improve the heatmap's visual quality and usefulness.
+
+### 1. Increase Depth Level Count (High Impact)
+
+**Current:** `main_window.py` line 1579-1580 truncates the C++ engine's book snapshot to `[:200]` per side (400 levels total). The REST snapshot fetches 1000 per side, but the live feed only passes 200.
+
+**Recommendation:** Increase to `[:500]` or remove the cap entirely. More levels = wider depth coverage = denser heatmap. The bottleneck is not the number of levels (numpy vectorised ops scale linearly), it's the pixel resolution.
+
+**Location:** `ui/main_window.py` lines 1579-1580.
+
+### 2. Increase Heatmap Pixel Resolution (Medium Impact)
+
+**Current:** `_draw_depth` caps vertical resolution at `n_rows = min(ph, 400)` (line 658). On a 1080p display with ~700px of chart height, this means the heatmap image is 400 rows regardless of screen space. Multiple depth levels at nearby prices collapse into the same pixel row.
+
+**Recommendation:** Increase the cap to 800 or remove it (use full `ph`). The cost scales linearly with `n_rows` — at 800 rows the `_draw_depth` loop adds ~0.2ms. The QImage scaling from `n_rows` to `ph` already handles the pixel mapping.
+
+**Location:** `ui/heatmap_widget.py` line 658.
+
+### 3. Improve Color Gradient Contrast (Medium Impact)
+
+**Current:** `HEAT_GRADIENT` (lines 32-44) uses 11 stops from dark blue to red. The 0-30% intensity range (where most resting liquidity falls) is compressed into dark blue/cyan shades that are hard to distinguish against the dark background. Only very large orders reach the green/orange/red range.
+
+**Recommendation:** Consider a gradient with more visual separation in the low-to-mid range:
+- Wider cyan-to-teal band for typical resting liquidity
+- Distinct green band for above-average levels
+- Orange/red reserved for significant walls
+- Alternative: offer a user-selectable gradient (Bookmap-style blue/yellow, or grayscale)
+
+**Location:** `ui/heatmap_widget.py` lines 32-44 (`HEAT_GRADIENT`).
+
+### 4. Decouple Intensity Normalisation from Current Book (Low-Medium Impact)
+
+**Current:** Intensity is normalised by `_cur_log_max` — the maximum `log1p(qty)` in the current book snapshot. This means a single very large resting order makes everything else appear dim. When that order is removed, all levels suddenly brighten (visual instability).
+
+**Recommendation:** Use a rolling or percentile-based normalisation (e.g., p99 of recent `log_max` values over the last N slices) to smooth out visual transitions. Alternatively, use a fixed reference value derived from the initial snapshot.
+
+**Location:** `ui/heatmap_widget.py` lines 662-664 and 358-360.
+
+### 5. Fading / Time-Weighted Depth Columns (Low Impact, Visual Polish)
+
+**Current:** Forward-filled columns are identical copies of the source column. Old depth that hasn't been updated for many seconds looks the same as fresh depth.
+
+**Recommendation:** Apply a subtle alpha fade to forward-filled columns based on their age relative to the source. For example, a column 5 seconds after the last real update could render at 80% intensity. This would give visual cues about depth freshness without introducing gaps.
+
+**Location:** `ui/heatmap_widget.py` `_forward_fill_intensity()` and `_draw_depth()`.
+
+### 6. Heatmap Data Pipeline Summary
+
+For reference, the end-to-end data flow:
+
+```
+Binance REST API (1000 levels)
+  └─> C++ OrderFlowEngine.process_depth()
+        └─> Python: engine.get_order_book().get_snapshot()
+              └─> main_window._on_timer_tick() [every 100ms]
+                    └─> bids[:200], asks[:200]  ← TRUNCATION HERE
+                          └─> heatmap.add_depth_column()
+                                ├─> _cur_depth_prices (numpy array of all prices)
+                                ├─> _cur_depth_log_qtys (log1p of quantities)
+                                ├─> _slices deque (time-indexed snapshots)
+                                └─> auto-scale: _price_min / _price_max
+                                      └─> paintEvent → _draw_depth()
+                                            ├─> intensity matrix (n_rows × n_cols)
+                                            ├─> price→row mapping, log_qty→intensity
+                                            ├─> forward-fill gaps
+                                            ├─> LUT color mapping → QImage
+                                            └─> draw to screen with sub-pixel scroll
+```
+
+**Total estimated effort: 4-5 weeks.** All phases complete.
+
+---
+
+## Appendix A: File Change Summary
+
+| File | Changes | Phase |
+|---|---|---|
+| `ui/heatmap_widget.py` | Bucket model, `_draw_bucket_axis`, dynamic `slice_ms`, visible window, stop/target/entry overlays, bubble aggregation, hard caps, dynamic coarsening, volume culling, 1-min window, wider auto-scale, depth forward-fill, stale-trade chart_now fallback, full depth book auto-scale, time-bucketed trade slice store (`TradeBucketAggregate`, `TradeSlice`, `TRADE_SLICE_MS`) | 1, 2, Opt, Stab, VP, HmC, TFS, FDA, PG, TS |
+| `ui/main_window.py` | Unified strategy controls, state machine, toolbar update, hide inactive elements, strategy state in status bar, StrategyStore integration, layout fix: strategy panel moved to bottom-right | 2, 3, 4, SLF |
+| `ui/strategy_panel.py` | Extended diagnostics rows (Tide bias, archetype, stop, target, hold time, session PnL) | 2 |
+| `ui/trade_blotter.py` | New signal categories, metadata columns, strategy filter, context signal reclassification, default strategy filter | 2, SLF |
+| `ui/account_panel.py` | "Not connected" placeholder, connect/disconnect visibility toggle | 3 |
+| `execution/models.py` | `StrategyMode` enum, `StrategyUIState` enum, extended `SignalEntry`, new `SignalCategory` values | 2 |
+| `strategy_store.py` | HDF5 persistence for strategy signals, snapshots, session events (separate file per symbol) | 4 |
+| `tests/test_bucket_model.py` | TimeBucket OHLC, bucket assignment, visible window, determinism | 1, VP |
+| `tests/test_strategy_ui.py` | Strategy controls, state machine, signal emission, blotter filter, overlay, context reclassification, default filter, layout widget count | 2, SLF |
+| `tests/test_ui_cleanup.py` | Hidden elements, sizing gating, Replay disabled, account panel lifecycle | 3 |
+| `tests/test_strategy_store.py` | HDF5 schema versioning, signal/snapshot/event roundtrip, legacy compat | 4 |
+| `tests/test_integration_e2e.py` | Cross-workstream integration (all four phases together) | 5 |
+| `tests/test_performance_profile.py` | Render cycle profiling, throughput benchmarks | 5 |
+| `tests/test_replay_overlay.py` | Replay-with-strategy-overlay smoke test | 5 |
+| `tests/test_bubble_pipeline.py` | Stale-trade chart_now fallback, trade_feed_stale property, updated skew thresholds | TFS |
+| `tests/test_bucket_model.py` | Updated chart_now_unchanged for sub-threshold skew | TFS |
+| `tests/test_bubble_aggregation.py` | Bubble aggregation correctness, determinism, performance, hard caps, coarsening, culling, trade-slice incremental insert/prune/rebuild/boundary tests, buy/sell imbalance | Opt, Stab, VP, PG, TS |
+| `tests/test_heatmap_continuity.py` | Forward-fill unit tests, left-edge backward-fill, sparse depth integration, determinism | HmC |
+
+| File | No Changes |
+|---|---|
+| All C++ strategy logic | Unchanged |
+| `strategies/orderflow.py` | Unchanged |
+| `tide/`, `wave/`, `hmm/`, `crossvenue/` | Unchanged |
+| `backtester.py`, `optimiser.py` | Unchanged |
+| `data_service.py` | Unchanged |
+| `database.py` | Unchanged |
+| `schemas.py` | Unchanged |
+
+## Appendix B: Dependency Graph
+
+```
+Phase A (Bucketing) ──────────────────────────────────────────────┐
+                                                                   │
+Phase B (Strategy Controls) ─── depends on ─── Phase C (Signals) ─┤
+                                                                   │
+Phase D (UI Cleanup) ── independent ──────────────────────────────┤
+                                                                   │
+Phase E (HDF5) ─── depends on C (signal schema) ─────────────────┘
+                                                                   │
+Phase 5 (Polish) ─── depends on all above ────────────────────────┘
+```
+
+Phases A and D are independent of each other and of B/C. Phase B and C are tightly coupled. Phase E depends on C for the signal schema but can start in parallel with B.
+
+**Maximum parallelism:** A + D in parallel, then B + C + E, then Phase 5.
+
+**Serial path:** A → B+C → D → E → Phase 5 (simplest, lowest risk).
+
+---
+
+## Phase 6: Multi-View MVVM Architecture [COMPLETED — First Slice]
+
+### Overview
+
+Evolves the monolithic `MainWindow` layout into a multi-view architecture with
+shared state.  Three views are available via a `QTabWidget`:
+
+| Tab | Name | Purpose |
+|-----|------|---------|
+| 0 | **Order Flow** | Existing heatmap / bubbles / CVD / VP — unchanged |
+| 1 | **Chart** | QPainter candlestick chart reading shared candle data |
+| 2 | **Strategy** | Strategy diagnostics, signal log, account panel, future diagnostics placeholder |
+
+### Architecture
+
+```
+Data Feed / Replay
+    → MainWindow._on_timer_tick
+    → MarketState (shared fields)
+    → Active view .update()
+
+MarketState
+    .candles         ← deque[TimeBucket] (shared with HeatmapWidget)
+    .chart_now       ← unified timestamp
+    .visible_window_ms / .bucket_duration_ms
+    .best_bid / .best_ask
+    .strategy_snapshot
+    .strategy_ui_state
+    .signals         ← deque[SignalEntry]
+```
+
+**Key principles:**
+- Views consume shared state — no duplicated heavy computation per view.
+- Only the active tab is repainted each tick (tab-gated `.update()`).
+- HeatmapWidget and CandleChartView share the same `deque[TimeBucket]` candle store.
+- Both Order Flow and Strategy Dashboard blotters receive all signals (broadcast).
+- Deterministic replay is preserved — candle and trade aggregation are unchanged.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `ui/market_state.py` | `MarketState` shared model class |
+| `ui/candle_chart_view.py` | `CandleChartView` — QPainter candlestick chart with overlay hooks |
+| `ui/strategy_dashboard_view.py` | `StrategyDashboardView` — composite strategy/signal/account view |
+| `tests/test_market_state.py` | MarketState construction, candle sharing, property helpers |
+| `tests/test_candle_chart_view.py` | Candle rendering data flow, auto-scale, overlay registration, coordinate helpers |
+| `tests/test_multi_view.py` | Tab switching, signal broadcast, repaint gating, deterministic candle sharing |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| `ui/main_window.py` | `QTabWidget` wrapper, `MarketState` creation, tab-gated repaint, `_broadcast_entry` for dual-blotter signal delivery, `_on_tab_changed` |
+| `ui/heatmap_widget.py` | `candle_store` constructor parameter for shared candle deque |
+
+### Performance
+
+- Only the active tab repaints (inactive tabs do zero rendering work).
+- No additional per-tick computation — MarketState sync is scalar field copies.
+- Candle deque shared by reference — zero duplication.
+
+### Future Work (Phase 6+)
+
+- Candle chart overlays: SMA, EMA, Bollinger Bands, Volume Profile overlay, value area (80/90/95), structural levels (ATH/ATL, session H/L)
+- Strategy dashboard: correlation heatmaps (seaborn-style), state-variable time-series plots, Tide/Wave/Ripple state summary panels
+- View synchronization: crosshair / time-cursor sync across tabs
+- Unified signal model: single signal model instance consumed by both blotters (reparenting)

@@ -1,3 +1,11 @@
+TRON
+Monero - neg corr with BTC
+SOL
+Crypto Total
+
+#### Activate Virtual Environment
+source ./.venv/bin/activate
+
 # Trading App - Backtesting & Order Flow Engine
 
 #### Activate Virtual Environment
