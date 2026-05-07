@@ -91,6 +91,10 @@ class CandleChartView(QWidget):
         self._font_price_tag = QFont("Menlo", 9, QFont.Bold)
         self._overlays: List = []
 
+        # Default overlays (register before any external overlays so the
+        # caller can append more / clear them via clear_overlays()).
+        self._register_default_overlays()
+
     # ------------------------------------------------------------------ public
 
     @property
@@ -134,6 +138,30 @@ class CandleChartView(QWidget):
 
     def register_overlay(self, overlay_fn):
         self._overlays.append(overlay_fn)
+
+    def clear_overlays(self):
+        """Remove all registered overlays (including defaults)."""
+        self._overlays.clear()
+
+    def _register_default_overlays(self):
+        """Install the standard SMA / EMA / VWAP / structural / VP overlays.
+
+        Called once from __init__. The full default set is installed so
+        the chart is informative out-of-the-box. Callers that want a
+        clean slate can call clear_overlays() then register their own.
+        """
+        # Local import keeps chart_overlays out of module-level cycle risk.
+        from ui.chart_overlays import (
+            SmaOverlay, EmaOverlay, VwapOverlay,
+            StructuralLevelsOverlay, VolProfileOverlay,
+        )
+        self._overlays.append(SmaOverlay(period=20))
+        self._overlays.append(EmaOverlay(period=50))
+        self._overlays.append(VwapOverlay())
+        self._structural_overlay = StructuralLevelsOverlay(
+            extra_candles=self._candles)
+        self._overlays.append(self._structural_overlay)
+        self._overlays.append(VolProfileOverlay())
 
     # ------------------------------------------------------------------ paint
 

@@ -36,14 +36,22 @@ if __name__ == "__main__":
     exchange = None
 
     while True:
-        mode = input("Choose the program mode (data / backtest / optimise / ui / execute): ").lower()
-        if mode in ["data", "backtest", "optimise", "ui", "execute"]:
+        mode = input("Choose the program mode (data / backtest / optimise / tide / wave / ui / execute): ").lower()
+        if mode in ["data", "backtest", "optimise", "tide", "wave", "ui", "execute"]:
             break
 
     if mode == "ui":
         from ui.app import main as ui_main
         ui_main()
         exit(0)
+
+    if mode == "tide":
+        from tide.tide_cli import run_interactive
+        exit(run_interactive())
+
+    if mode == "wave":
+        from wave.wave_cli import run_interactive as wave_interactive
+        exit(wave_interactive())  # noqa: direct import avoids __init__ runpy conflict
 
     if mode == "execute":
         import sys, os, asyncio, time, signal as signal_mod, json

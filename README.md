@@ -1,17 +1,78 @@
-TRON
-Monero - neg corr with BTC
-SOL
-Crypto Total
+# Trading App — Backtesting & Optimisation Platform
 
-#### Activate Virtual Environment
-source ./.venv/bin/activate
+A multi-layer crypto trading strategy research platform implementing the
+**Tide / Wave / Ripple** hierarchy with event-time backtesting, multi-objective
+parameter optimisation (NSGA-II), and a C++ order flow engine.
 
-# Trading App - Backtesting & Order Flow Engine
+---
 
-#### Activate Virtual Environment
-source ./.venv/bin/activate
+## Architecture Overview
 
-A multi-strategy backtesting and optimisation platform with a C++ order flow engine and Bookmap-style UI.
+```
+main.py                          CLI entry point (data / tide / wave / backtest / optimise / ui / execute)
+
+── Tide Layer (macro bias, risk budgeting) ──────────────────────────────────
+tide/
+  tide_engine.py                 Deterministic Tide regime classifier + risk multiplier publisher
+  tide_features.py               L1-only feature computation (realized vol, η, LSI proxy)
+  tide_backtest.py               Event-time Tide-overlay backtester + SizingMode
+  tide_metrics.py                Full quantitative performance + risk metrics suite
+  tide_accuracy.py               Forward-looking signal accuracy analysis (hit rate, IC, PnL proxy)
+  tide_report.py                 Markdown + text report writer, equity/drawdown/signal plots
+  tide_optimiser.py              NSGA-II over Tide params (Sharpe, Calmar, MaxDD objectives)
+  tide_cli.py                    CLI: backtest / optimise subcommands
+
+── Wave Layer (meso-scale regime classification) ────────────────────────────
+wave/
+  wave_engine.py                 Deterministic WaveRegime classifier + PermissionSet publisher
+  wave_features.py               L1-only Wave feature computation (η, VWAP, structure, D proxy, AR proxy)
+  wave_backtest.py               Wave-overlay backtester — isolated and stacked modes
+  wave_metrics.py                Wave performance + regime accuracy metrics suite
+  wave_accuracy.py               Regime accuracy analysis (hit rate, IC, transition matrix, stability)
+  wave_report.py                 Markdown + text report writer, regime timeline + accuracy plots
+  wave_optimiser.py              NSGA-II over Wave params including timeframe
+  wave_cli.py                    CLI: backtest / optimise subcommands
+
+── Shared ───────────────────────────────────────────────────────────────────
+schemas.py                       Canonical data contracts (TideBias, VolRegime, WaveRegime, PermissionSet, …)
+METRICS_GLOSSARY.md              Full mathematical + plain-language definitions of every metric
+
+── Legacy Order Flow Engine ─────────────────────────────────────────────────
+data_service.py                  Tick data collection (Python WebSocket → C++ engine → HDF5)
+backtester.py                    Strategy dispatcher (obv, sma, orderflow, …)
+optimiser.py                     Legacy NSGA-II (for legacy strategies)
+strategies/orderflow.py          Python wrapper for C++ order flow backtest
+ui/                              PySide6 Bookmap-style trading UI
+backtestingCpp/orderflow/        C++ order flow engine (L2 order book, signal generation, TickStore, …)
+```
+
+---
+
+## Strategy Architecture — Tide / Wave / Ripple
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  TIDE  (macro bias, risk budgeting, capital allocation)              │
+│  L1 OHLCV only — does NOT trigger trades                             │
+│  Output: TideBias (LONG / SHORT / NEUTRAL), risk_multiplier          │
+└───────────────────────────┬──────────────────────────────────────────┘
+                            │ TideBias, risk_multiplier
+                            ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  WAVE  (meso-scale regime classification, structural context)        │
+│  L1 OHLCV only — does NOT trigger trades                             │
+│  Output: WaveRegime (BREAKOUT / MEAN_REVERSION / BREAKDOWN / NEUTRAL)│
+│          PermissionSet gating Ripple archetypes                      │
+└───────────────────────────┬──────────────────────────────────────────┘
+                            │ WaveRegime, PermissionSet
+                            ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  RIPPLE  (microstructure execution — L2 data)                        │
+│  Triggers actual trades based on permissions from Tide + Wave        │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Each layer is backtested independently (isolated) and in combination (stacked) to measure incremental contribution.
 
 ---
 
@@ -38,7 +99,7 @@ brew install cmake boost hdf5 openssl nlohmann-json pybind11
 pip install -r requirements.txt
 ```
 
-### 3. Build the C++ order flow engine
+### 3. Build the C++ order flow engine (optional — for legacy strategies)
 
 ```bash
 cd backtestingCpp/orderflow
@@ -46,315 +107,239 @@ chmod +x build.sh
 ./build.sh
 ```
 
-Verify the build:
-
-```bash
-cd ../..
-python -c "
-import sys; sys.path.insert(0, 'backtestingCpp/orderflow/build')
-import orderflow_engine as ofe
-print('Module loaded:', [x for x in dir(ofe) if not x.startswith('_')])
-engine = ofe.OrderFlowEngine()
-print('Engine OK, running:', engine.is_running())
-"
-```
-
-You should see the full class list and `Engine OK, running: False`.
-
 ### 4. Create required directories
 
 ```bash
-mkdir -p logs data
+mkdir -p logs data reports
 ```
 
 ---
 
-## Testing Guide
+## Running the Tide Layer
 
-### Test 1: Collect Tick Data (WebSocket)
-
-This streams live Binance Futures trade and depth data via WebSocket and stores it in HDF5.
+### Interactive mode
 
 ```bash
 python main.py
+# Mode: tide
+# Subcommand: backtest
 ```
 
-Then enter:
-- Mode: `data`
-- Exchange: `binance`
-- Symbol: `BTCUSDT`
-- Pull type: `ticks`
-- Duration: `30` (seconds, use `0` for indefinite with Ctrl+C to stop)
-
-**Expected output:**
-```
-Starting tick data collection for BTCUSDT
-Loaded depth snapshot: 1000 bids, 1000 asks
-Collected X trades, Y depth updates
-Tick data collection complete for BTCUSDT: X trades, Y depth updates
-```
-
-**Verify the stored data:**
+### CLI — single backtest
 
 ```bash
-python -c "
-import sys, time; sys.path.insert(0, 'backtestingCpp/orderflow/build')
-import orderflow_engine as ofe
-store = ofe.TickStore('data/binance_ticks.h5')
-print('Symbols:', store.list_symbols())
-trades = store.load_trades('BTCUSDT', 0, int(time.time()*1000))
-print(f'Trades: {len(trades)}')
-if trades:
-    t = trades[0]
-    print(f'  First: ts={t.timestamp} price={t.price:.2f} qty={t.quantity}')
-depths = store.load_depth_updates('BTCUSDT', 0, int(time.time()*1000))
-print(f'Depth updates: {len(depths)}')
-snaps = store.load_depth_snapshots('BTCUSDT', 0, int(time.time()*1000))
-print(f'Depth snapshots: {len(snaps)}')
-store.close()
-"
+python -m tide.tide_cli backtest \
+  --symbol BTCUSDT --exchange binance \
+  --timeframe 1h \
+  --sizing-mode base --max-position-base 1.0 \
+  --from-time 2023-01-01
 ```
 
-**Collect more data** for better backtesting results. Run for several minutes or longer. The more tick data you have, the more meaningful the backtests and optimisation will be.
+### CLI — multi-objective optimisation
+
+```bash
+python -m tide.tide_cli optimise \
+  --symbol BTCUSDT --exchange binance \
+  --timeframes 1h 4h 12h 1d \
+  --pop-size 30 --generations 20 \
+  --sizing-mode base --max-position-base 1.0
+```
+
+### Key output files
+
+| File | Description |
+|---|---|
+| `reports/tide_BTCUSDT_<ts>.md` | Full backtest report (returns, risk, accuracy, regime breakdown) |
+| `reports/tide_BTCUSDT_<ts>_equity.png` | Equity curve vs Buy & Hold |
+| `reports/tide_BTCUSDT_<ts>_signal_timeline.png` | LONG/SHORT/NEUTRAL regime overlay on price |
+| `reports/tide_BTCUSDT_<ts>_hit_rate.png` | Signal hit rate vs forward horizon |
+| `reports/tide_optimise_BTCUSDT_best01.md` | Pareto-optimal parameter set #1 report |
 
 ---
 
-### Test 2: Backtest the Order Flow Strategy
+## Running the Wave Layer
 
-Requires tick data from Test 1.
+### Isolated mode (Wave alone, TideBias pinned to NEUTRAL)
+
+```bash
+python -m wave.wave_cli backtest \
+  --symbol BTCUSDT --exchange binance \
+  --timeframe 1h --mode isolated \
+  --sizing-mode base --max-position-base 1.0
+```
+
+### Stacked mode (Wave ingests Tide signals)
+
+```bash
+python -m wave.wave_cli backtest \
+  --symbol BTCUSDT --exchange binance \
+  --timeframe 1h --mode stacked \
+  --sizing-mode base --max-position-base 1.0
+```
+
+In stacked mode the backtester automatically runs a Tide backtest inline to
+produce `TideBias` and `risk_multiplier` for every bar, then feeds them into
+the Wave engine. This mirrors how the layers will operate in production.
+
+### CLI — Wave optimisation (all parameters including timeframe)
+
+```bash
+python -m wave.wave_cli optimise \
+  --symbol BTCUSDT --exchange binance \
+  --mode stacked \
+  --timeframes 1h 4h 12h 1d \
+  --pop-size 30 --generations 20
+```
+
+### Key output files
+
+| File | Description |
+|---|---|
+| `reports/wave_BTCUSDT_<ts>.md` | Full Wave backtest report |
+| `reports/wave_BTCUSDT_<ts>_equity.png` | Equity curve vs Buy & Hold |
+| `reports/wave_BTCUSDT_<ts>_wave_timeline.png` | Regime timeline overlay on price |
+| `reports/wave_BTCUSDT_<ts>_wave_hit_rate.png` | Regime hit rate vs forward horizon |
+| `reports/wave_BTCUSDT_<ts>_wave_fwd_return.png` | Per-regime mean forward return vs horizon |
+| `reports/wave_BTCUSDT_<ts>_wave_transition.png` | Regime transition matrix heatmap |
+| `reports/wave_BTCUSDT_<ts>_wave_confusion.png` | Regime × Tide bias confusion heatmap |
+
+---
+
+## Interpreting Results
+
+### Tide Layer
+
+The Tide backtest implements a **regime-following overlay strategy**: Tide's
+output (`TideBias`, `risk_multiplier`) drives a notional position in the
+underlying. A LONG bias at full risk multiplier holds `max_position_base` BTC;
+NEUTRAL flattens to zero.
+
+This measures the economic value of Tide's directional signal and risk
+management — not Ripple execution quality.
+
+**Signal accuracy tables** in the report answer: "Is the bias at time $t$ correct
+for $t+1, t+2, \ldots, t+T$?" using hit rate, IC, and PnL proxy at each
+forward horizon.
+
+### Wave Layer — Isolated Mode
+
+In isolated mode TideBias is permanently NEUTRAL, so Wave's position-sizing
+proxy is driven by regime alone:
+
+| Regime | Size fraction | Direction logic |
+|---|---|---|
+| BREAKOUT | 1.0 (full) | Long above VWAP, short below VWAP |
+| MEAN_REVERSION | `reduced_size_fraction` (default 0.5) | Fade: short above VWAP, long below |
+| BREAKDOWN | 0.0 (flat) | No position — instability, all archetypes off |
+| NEUTRAL | `reduced_size_fraction` | Conservative; same direction logic as BREAKOUT |
+
+Use isolated mode to validate the regime classifier independently of Tide.
+
+### Wave Layer — Stacked Mode
+
+In stacked mode Tide provides direction (via `TideBias`) and a `risk_multiplier`
+scaling factor. Wave applies an additional `wave_size_fraction` gating:
+
+```
+target_units = tide_bias_sign × tide_risk_mult × wave_size_fraction × max_position
+```
+
+This measures the incremental value of Wave's regime filter on top of Tide
+signals. A Sharpe improvement over the isolated Tide backtest indicates Wave
+adds genuine structural context.
+
+### Regime Accuracy
+
+The **regime accuracy report** answers: "Does the Wave regime classification
+predict forward returns over the next $h$ bars?"
+
+- **Hit Rate %**: fraction of BREAKOUT/BREAKDOWN bars where the forward return
+  aligns with the regime's expected direction (BREAKOUT → positive, BREAKDOWN → negative).
+- **IC**: Pearson correlation of regime signal with forward log-returns.
+- **Transition Matrix**: probability of transitioning from one regime to another bar-by-bar.
+- **Regime Stability**: mean consecutive-bar run length per regime.
+- **Regime × Bias Confusion**: in stacked mode, shows mean forward return for
+  every `(WaveRegime, TideBias)` combination at $h=1$.
+
+---
+
+## Running Tests
+
+```bash
+# Wave layer tests (46 tests)
+python -m unittest tests/test_wave_backtest.py -v
+
+# Tide layer tests
+python -m unittest tests/test_tide_accuracy.py -v
+```
+
+---
+
+## Legacy Order Flow Tests
+
+### Collect tick data
 
 ```bash
 python main.py
+# Mode: data | Exchange: binance | Symbol: BTCUSDT | Pull type: ticks | Duration: 30
 ```
 
-Then enter:
-- Mode: `backtest`
-- Exchange: `binance`
-- Symbol: `BTCUSDT`
-- Strategy: `orderflow`
-- Timeframe: `1m` (or any supported)
-- From: press Enter (uses all data)
-- To: press Enter (uses all data)
-
-Then enter strategy parameters when prompted:
-- Imbalance Threshold: `3.0`
-- Stacked Imbalance Levels: `3`
-- Absorption Volume Ratio: `5.0`
-- CVD Divergence Lookback: `100`
-- Exhaustion Lookback Bars: `5`
-- Min Signal Strength: `0.3`
-- Tick Size: `0.01`
-
-**Expected output:** A tuple of `(pnl, max_drawdown, num_trades, sharpe_ratio, cagr)`.
-
-If you get `FileNotFoundError`, you need to collect tick data first (Test 1).
-
----
-
-### Test 3: Optimise Order Flow Parameters (NSGA-II)
-
-Requires tick data from Test 1.
+### Backtest the order flow strategy
 
 ```bash
 python main.py
+# Mode: backtest | Exchange: binance | Symbol: BTCUSDT | Strategy: orderflow | Timeframe: 1m
 ```
 
-Then enter:
-- Mode: `optimise`
-- Exchange: `binance`
-- Symbol: `BTCUSDT`
-- Strategy: `orderflow`
-- Timeframe: `1m`
-- From / To: press Enter for both
-- Save results: `f`
-- Population size: `10` (small for testing, use 50+ for real runs)
-- Generations: `3` (small for testing, use 20+ for real runs)
-
-**Expected output:** Progress percentage and a table of Pareto-optimal parameter sets ranked by PnL, max drawdown, and Sharpe ratio.
-
----
-
-### Test 4: Launch the UI
+### Optimise (NSGA-II)
 
 ```bash
 python main.py
+# Mode: optimise | Strategy: orderflow | Population: 10 | Generations: 3
 ```
 
-Then enter: `ui`
-
-**Expected:** A PySide6 window opens with:
-- **Toolbar**: Symbol input, Mode selector (Live/Replay), Connect/Disconnect buttons, Tick Size, Imbalance threshold
-- **Heatmap widget** (top right): Bookmap-style depth heatmap
-- **Volume Profile widget** (top left): Horizontal volume bars with POC and value area
-- **CVD chart** (bottom left): Cumulative Volume Delta line chart
-- **Trade Blotter** (bottom right): Signal log table
-
-#### Known issue: Live mode in the UI
-
-The UI's "Live" Connect button currently uses the C++ `BinanceWsFeed` for WebSocket streaming, which has a known crash with Boost.Beast 1.90 on macOS (`mutex lock failed` after ~100 messages). This needs to be ported to the same Python WebSocket approach used by the tick data collector.
-
-**To test the UI visually**, you can launch it and verify:
-1. The window renders correctly with all 4 panels
-2. The dark theme applies
-3. The toolbar controls are interactive
-4. The status bar shows at the bottom
-
-**To make the UI work with live data**, the `_on_connect` method in `ui/main_window.py` needs to be updated to use Python WebSocket streaming (like `TickDataCollector`) instead of `ofe.BinanceWsFeed`. This is the remaining work item.
-
----
-
-### Test 5: Verify C++ Engine Processing Directly
-
-Quick standalone test of the engine's data processing pipeline:
+### Launch the UI
 
 ```bash
-python -c "
-import sys, time; sys.path.insert(0, 'backtestingCpp/orderflow/build')
-import orderflow_engine as ofe
-
-engine = ofe.OrderFlowEngine()
-
-# Process some synthetic trades
-for i in range(100):
-    t = ofe.Trade()
-    t.timestamp = 1000 + i
-    t.price = 50000.0 + (i % 20) * 0.5
-    t.quantity = 0.01 + (i % 5) * 0.005
-    t.is_buyer_maker = (i % 3 != 0)
-    engine.process_trade(t)
-
-# Process a depth snapshot
-d = ofe.DepthUpdate()
-d.timestamp = 2000
-d.is_snapshot = True
-d.first_update_id = 1
-d.final_update_id = 1
-bids, asks = [], []
-for i in range(10):
-    b = ofe.DepthLevel(); b.price = 49995.0 + i; b.quantity = 1.0 + i * 0.1
-    a = ofe.DepthLevel(); a.price = 50005.0 + i; a.quantity = 1.0 + i * 0.1
-    bids.append(b); asks.append(a)
-d.bids = bids; d.asks = asks
-engine.process_depth(d)
-
-# Check results
-tf = engine.get_trade_flow()
-print(f'Delta:      {tf.get_delta():.4f}')
-print(f'Buy vol:    {tf.get_buy_volume():.4f}')
-print(f'Sell vol:   {tf.get_sell_volume():.4f}')
-print(f'Total vol:  {tf.get_total_volume():.4f}')
-
-cvd = engine.get_cvd()
-print(f'CVD:        {cvd.get_cvd():.4f}')
-
-ob = engine.get_order_book()
-print(f'Best bid:   {ob.get_best_bid():.2f}')
-print(f'Best ask:   {ob.get_best_ask():.2f}')
-print(f'Spread:     {ob.get_spread():.2f}')
-
-vp = engine.get_volume_profile()
-print(f'POC:        {vp.get_poc_price():.2f}')
-va = vp.compute_value_area(0.70)
-print(f'Value Area: {va.val:.2f} - {va.vah:.2f}')
-
-fp = engine.get_footprint()
-print(f'Footprint bars: {fp.bar_count()}')
-
-se = engine.get_signal_engine()
-print(f'Signals:    {len(se.get_signals())}')
-print(f'PnL:        {se.get_pnl():.2f}%')
-print(f'Num trades: {se.get_num_trades()}')
-print()
-print('All engine components working!')
-"
-```
-
----
-
-### Test 6: Replay Feed (Historical Backtest via C++)
-
-If you have tick data stored from Test 1:
-
-```bash
-python -c "
-import sys, time; sys.path.insert(0, 'backtestingCpp/orderflow/build')
-import orderflow_engine as ofe
-
-store = ofe.TickStore('data/binance_ticks.h5')
-print('Symbols:', store.list_symbols())
-
-config = ofe.EngineConfig()
-config.tick_size = 0.01
-engine = ofe.OrderFlowEngine(config)
-
-replay = ofe.ReplayFeed(store, 0.0)
-replay.set_time_range(0, int(time.time() * 1000))
-
-ofe.connect_feed(engine, replay)
-engine.start('BTCUSDT')
-replay.run_sync()
-
-se = engine.get_signal_engine()
-print(f'Replay complete')
-print(f'  Signals:    {len(se.get_signals())}')
-print(f'  PnL:        {se.get_pnl():.4f}%')
-print(f'  Max DD:     {se.get_max_drawdown():.4f}%')
-print(f'  Num trades: {se.get_num_trades()}')
-
-tf = engine.get_trade_flow()
-print(f'  Total vol:  {tf.get_total_volume():.4f}')
-
-engine.stop()
-store.close()
-"
+python main.py
+# Mode: ui
 ```
 
 ---
 
 ## Remaining Work
 
-### UI Live Mode (Priority)
-The `ui/main_window.py` `_on_connect()` method uses the C++ `BinanceWsFeed` which crashes with Boost 1.90 on macOS. Port it to use Python `websockets` (async) feeding data into the engine via `process_trade()` / `process_depth()`, matching the pattern in `data_service.py` `TickDataCollector`.
+### Ripple Layer (Phase Next)
+Microstructure execution layer using L2 order book data. Ingests `PermissionSet`
+from Wave and `TideBias` + risk multiplier from Tide. Triggers actual trades via
+bounce / breakout archetypes.
 
-### Other Items
-- **HDF5 first-open diagnostic**: The HDF5 error trace when creating a new file is suppressed in `TickStore`, but may still appear if other code paths create stores
-- **Longer data collection**: Collect hours/days of tick data for meaningful backtest and optimisation results
-- **UI Replay mode**: Wire the Replay button in the UI to use `ReplayFeed` with a stored HDF5 file
-- **Signal tuning**: Adjust `SignalParams` thresholds based on backtest results for better signal quality
+### Wave Parameter Tuning
+Default thresholds (`eta_bo_threshold=0.7`, `dispersion_critical=1.2`, etc.) are
+V1 defaults. Run the Wave optimiser on your dataset to calibrate them.
+
+### Multi-Asset Dispersion & Absorption Ratio (V2/V3)
+V1 uses single-symbol proxies for dispersion (rolling return std) and absorption
+ratio (vol-of-vol ratio). True cross-sectional metrics require a panel of
+correlated assets — planned for V2/V3 per `strategy.md` roadmap.
+
+### UI Live Mode
+The `ui/main_window.py` `_on_connect()` method uses the C++ `BinanceWsFeed`
+which has a known crash with Boost 1.90 on macOS. Port to the Python WebSocket
+approach used by `TickDataCollector`.
 
 ---
 
-## Architecture
+## Metric Documentation
 
-```
-main.py                     CLI entry point (data / backtest / optimise / ui)
-data_service.py             Tick data collection (Python WebSocket -> C++ engine -> HDF5)
-backtester.py               Strategy dispatcher (incl. orderflow)
-optimiser.py                NSGA-II multi-objective optimiser
-strategies/orderflow.py     Python wrapper for C++ order flow backtest
+See [`METRICS_GLOSSARY.md`](METRICS_GLOSSARY.md) for full mathematical and
+plain-language definitions of every metric in the reports, covering:
 
-ui/
-  app.py                    PySide6 application entry
-  main_window.py            Main window with toolbar, panels, engine integration
-  heatmap_widget.py         Bookmap-style depth heatmap
-  volume_profile_widget.py  Volume at price histogram
-  cvd_widget.py             Cumulative Volume Delta chart
-  trade_blotter.py          Signal log table
-
-backtestingCpp/orderflow/
-  Types.h                   Core structs (Trade, DepthUpdate, Signal, etc.)
-  IDataFeed.h               Abstract data feed interface
-  OrderBook.h/cpp           L2 order book with absorption detection
-  TradeFlow.h/cpp           Trade flow analysis, delta, large trade detection
-  VolumeProfile.h/cpp       Volume at price, POC, value area
-  CumulativeVolumeDelta.h/cpp  CVD tracking, divergence detection
-  FootprintChart.h/cpp      Footprint bars with bid/ask per price
-  SignalEngine.h/cpp         Auction market theory signal generation + PnL
-  OrderFlowEngine.h/cpp     High-level facade wiring all components
-  BinanceWsFeed.h/cpp       C++ WebSocket feed (has Boost 1.90 crash - use Python instead)
-  TickStore.h/cpp           HDF5 storage for trades and depth data
-  ReplayFeed.h/cpp          Replay historical data through IDataFeed
-  bindings.cpp              pybind11 Python bindings
-  CMakeLists.txt            Build configuration
-  build.sh                  One-step build script
-```
+- Returns & Growth (Total Return, CAGR)
+- Risk (Volatility, Max Drawdown, VaR, CVaR, Ulcer Index, Skewness, Kurtosis)
+- Risk-Adjusted (Sharpe, Sortino, Calmar, Omega)
+- Activity & Trades (Win Rate, Profit Factor, Expectancy, Exposure %)
+- Tide Signal Accuracy (Hit Rate, IC, Directional IC, Expectancy, PnL Proxy, Calmar Proxy)
+- Wave Regime Accuracy (Regime Hit Rate, Regime IC, Transition Matrix, Regime Stability, Regime × Bias Confusion)
+- Regime & Bias Breakdown tables
+- Parameters (Tide and Wave)

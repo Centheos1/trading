@@ -1,0 +1,38 @@
+BTCUSDT Tide-Overlay Backtest
+==============================================================================
+Period      : 2024-01-01 00:00:00  →  2024-08-01 00:00:00  (5,113 bars @ 1h)
+Capital     : $10,000.00 → $10,120.38   (1.20%)
+CAGR        : 2.07%
+Sharpe      : 0.217 (Sortino 0.333, Calmar 0.156, Omega 1.021)
+Max DD      : -13.25%  (duration 3,576 bars, trough 2024-07-27 23:00:00)
+Ann Vol     : 13.80%    Downside Vol: 9.01%
+VaR 95 / 99 : 0.038% / 0.481%
+ES  95 / 99 : 0.320% / 0.771%
+Ulcer       : 6.455%    Skew: 1.688    Kurt(excess): 56.759
+
+Activity / Trades
+------------------------------------------------------------------------------
+  Rebalances    :        589    Round-trips   :         74
+  Turnover/yr   :     1009.1    Exposure      :     10.09%
+  Win rate      :     32.43%    Profit factor :       1.12
+  Avg win       :      $135.70  Avg loss      :      $-57.95
+  Largest win   :    $1,200.02  Largest loss  :     $-171.94
+  Expectancy    :        $4.86  Fees paid     :      $544.82
+
+Regime breakdown
+------------------------------------------------------------------------------
+category  bars  time%  net_pnl   fees  hit%  sharpe
+     LOW  1874  36.65   104.43 173.62  2.51    0.50
+    HIGH   444   8.68    18.38  16.06  2.70    0.22
+  NORMAL  2795  54.66    -2.43 355.14  6.33    0.08
+Bias breakdown
+------------------------------------------------------------------------------
+category  bars  time%  net_pnl   fees  hit%  sharpe
+    LONG   398   7.78   504.22 220.77 45.23    2.80
+   SHORT   120   2.35  -146.27  86.47 46.67   -1.81
+ NEUTRAL  4595  89.87  -237.57 237.57  0.00  -11.63
+Monthly returns
+------------------------------------------------------------------------------  Best month     : 16.35%
+  Worst month    : -4.03%
+  % positive     : 14.29%
+  Months sampled : 7

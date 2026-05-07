@@ -56,6 +56,8 @@ from ui.heatmap_widget import (
     DEPTH_GAMMA,
     DEPTH_PRICE_BUCKETS,
     DEPTH_MIN_INTENSITY,
+    DEPTH_FADE_WINDOW,
+    DEPTH_MIN_FADE,
     _HEAT_LUT,
     _HEAT_LUT_BID,
     _HEAT_LUT_ASK,
@@ -168,6 +170,7 @@ class OrderFlowViewModel:
         # --- Depth image cache ---
         self._cached_intensity: np.ndarray | None = None
         self._cached_intensity_shape: tuple = (0, 0)
+        self._depth_fade: np.ndarray | None = None
         self._depth_img_data: bytes | None = None
 
         # --- Bubble diagnostics ---
@@ -726,7 +729,11 @@ class OrderFlowViewModel:
             prev_data_id = data_id
             prev_col = col
 
-        self._forward_fill_intensity(intensity)
+        if (self._depth_fade is None
+                or self._depth_fade.shape[0] != n_img_cols):
+            self._depth_fade = np.ones(n_img_cols, dtype=np.float32)
+        fade = self._depth_fade
+        self._forward_fill_intensity(intensity, fade_out=fade)
 
         mid_row = max(0, min(nrm1, mid_row_latest))
         idx = np.clip((intensity * 255).astype(np.int32), 0, 255)
@@ -735,6 +742,13 @@ class OrderFlowViewModel:
             rgba[:mid_row, :] = _HEAT_LUT_ASK[idx[:mid_row, :]]
         if mid_row < n_rows:
             rgba[mid_row:, :] = _HEAT_LUT_BID[idx[mid_row:, :]]
+
+        # Apply per-column alpha fade for forward-filled depth (alpha-only,
+        # post-LUT — intensity values used by tests are untouched).
+        if (fade < 1.0).any():
+            faded = rgba[:, :, 3].astype(np.float32) * fade[np.newaxis, :]
+            np.clip(faded, 0.0, 255.0, out=faded)
+            rgba[:, :, 3] = faded.astype(np.uint8)
 
         buf = np.ascontiguousarray(rgba)
         self._depth_img_data = buf.tobytes()
@@ -751,8 +765,21 @@ class OrderFlowViewModel:
         frame.depth_shift_px = shift
 
     @staticmethod
-    def _forward_fill_intensity(intensity):
+    def _forward_fill_intensity(intensity, fade_out=None,
+                                fade_window=DEPTH_FADE_WINDOW,
+                                min_fade=DEPTH_MIN_FADE):
+        """Fill empty intensity columns from the previous column.
+
+        If ``fade_out`` is supplied (1-D array of size n_cols, dtype float32),
+        it is populated with per-column alpha multipliers in
+        ``[min_fade, 1.0]``: 1.0 for real-data columns, decaying linearly
+        toward ``min_fade`` for forward-filled columns based on distance to
+        the source column. The intensity values themselves are unchanged
+        from previous behaviour — only the optional fade buffer is new.
+        """
         n_cols = intensity.shape[1]
+        if fade_out is not None:
+            fade_out[:] = 1.0
         if n_cols < 2:
             return 0
         has_data = np.any(intensity > 0, axis=0)
@@ -760,17 +787,26 @@ class OrderFlowViewModel:
             return 0
         filled = 0
         last_src = -1
+        inv_window = 1.0 / fade_window if fade_window > 0 else 0.0
         for c in range(n_cols):
             if has_data[c]:
                 last_src = c
             elif last_src >= 0:
                 intensity[:, c] = intensity[:, last_src]
                 filled += 1
+                if fade_out is not None:
+                    age = c - last_src
+                    f = 1.0 - age * inv_window
+                    fade_out[c] = f if f > min_fade else min_fade
         if not has_data[0] and last_src >= 0:
             first_src = int(np.argmax(has_data))
             for c in range(first_src):
                 intensity[:, c] = intensity[:, first_src]
                 filled += 1
+                if fade_out is not None:
+                    age = first_src - c
+                    f = 1.0 - age * inv_window
+                    fade_out[c] = f if f > min_fade else min_fade
         return filled
 
     # --------------------------------------------------------- bubbles

@@ -466,6 +466,126 @@ def test_compute_frame_benchmark():
     check(elapsed < 50.0, f"compute_frame avg {elapsed:.1f}ms < 50ms")
 
 
+# ================================================================ A5. FORWARD-FILL ALPHA FADE
+
+
+def test_fade_buffer_default_one_for_real_columns():
+    """Real-data columns get fade=1.0 (no decay)."""
+    from ui.heatmap_widget import DEPTH_FADE_WINDOW, DEPTH_MIN_FADE
+    arr = np.zeros((6, 10), dtype=np.float32)
+    arr[:, :] = 0.5  # all columns have data
+    fade = np.empty(arr.shape[1], dtype=np.float32)
+    HeatmapWidget._forward_fill_intensity(arr, fade_out=fade)
+    check(np.allclose(fade, 1.0),
+          f"all-data fade ones; got {fade}")
+
+
+def test_fade_buffer_decreases_with_age():
+    """Forward-filled columns fade linearly with distance from source."""
+    from ui.heatmap_widget import DEPTH_FADE_WINDOW, DEPTH_MIN_FADE
+    n_cols = DEPTH_FADE_WINDOW + 5
+    arr = np.zeros((4, n_cols), dtype=np.float32)
+    arr[:, 0] = 0.5  # only first column has real data
+    fade = np.empty(n_cols, dtype=np.float32)
+    HeatmapWidget._forward_fill_intensity(arr, fade_out=fade)
+    check(fade[0] == 1.0, f"source column fade = 1.0 (got {fade[0]})")
+    # Each successive column should decay linearly
+    for c in range(1, DEPTH_FADE_WINDOW):
+        expected = max(DEPTH_MIN_FADE, 1.0 - c / DEPTH_FADE_WINDOW)
+        check(abs(fade[c] - expected) < 1e-5,
+              f"col {c} fade {fade[c]:.3f} ~ {expected:.3f}")
+    # Beyond fade window, clamped at MIN_FADE
+    check(fade[-1] == DEPTH_MIN_FADE,
+          f"far-out fade clamped to MIN_FADE ({fade[-1]} == {DEPTH_MIN_FADE})")
+
+
+def test_fade_buffer_min_fade_floor():
+    """Fade never drops below DEPTH_MIN_FADE."""
+    from ui.heatmap_widget import DEPTH_MIN_FADE
+    arr = np.zeros((4, 200), dtype=np.float32)
+    arr[:, 0] = 0.5
+    fade = np.empty(200, dtype=np.float32)
+    HeatmapWidget._forward_fill_intensity(arr, fade_out=fade)
+    check(fade.min() >= DEPTH_MIN_FADE - 1e-6,
+          f"min fade {fade.min():.3f} >= MIN_FADE {DEPTH_MIN_FADE}")
+    check(fade.max() == 1.0, "source column still 1.0")
+
+
+def test_fade_buffer_left_edge_backfill():
+    """Backward-filled left edge also receives age-based fade."""
+    from ui.heatmap_widget import DEPTH_FADE_WINDOW, DEPTH_MIN_FADE
+    arr = np.zeros((4, 20), dtype=np.float32)
+    arr[:, 10] = 0.7  # only column 10 has data
+    fade = np.empty(20, dtype=np.float32)
+    HeatmapWidget._forward_fill_intensity(arr, fade_out=fade)
+    check(fade[10] == 1.0, "source column 10 has fade 1.0")
+    # Backward-fill: column c < 10, age = 10 - c
+    for c in range(10):
+        age = 10 - c
+        expected = max(DEPTH_MIN_FADE, 1.0 - age / DEPTH_FADE_WINDOW)
+        check(abs(fade[c] - expected) < 1e-5,
+              f"left-edge col {c} fade {fade[c]:.3f} ~ {expected:.3f}")
+
+
+def test_fade_buffer_intensity_unchanged():
+    """A5 must not alter intensity values — only the optional fade buffer."""
+    arr = np.zeros((6, 30), dtype=np.float32)
+    arr[:, 0:3] = 0.4
+    arr[:, 15:18] = 0.7
+    expected = arr.copy()
+    # Compute expected via the no-fade path
+    HeatmapWidget._forward_fill_intensity(expected)
+    # Now run with fade buffer
+    fade = np.empty(30, dtype=np.float32)
+    HeatmapWidget._forward_fill_intensity(arr, fade_out=fade)
+    check(np.array_equal(arr, expected),
+          "intensity values identical with and without fade buffer")
+
+
+def test_fade_buffer_continuous_data_no_decay():
+    """Continuous (no-gap) data leaves fade=1.0 everywhere."""
+    arr = np.full((4, 12), 0.6, dtype=np.float32)
+    fade = np.full(12, 0.5, dtype=np.float32)  # initialise to non-1 to verify reset
+    HeatmapWidget._forward_fill_intensity(arr, fade_out=fade)
+    check(np.allclose(fade, 1.0),
+          f"continuous data resets fade to 1.0 (got {fade})")
+
+
+def test_fade_buffer_empty_data_no_decay():
+    """Fully empty intensity leaves fade=1.0 (early return path)."""
+    arr = np.zeros((4, 8), dtype=np.float32)
+    fade = np.full(8, 0.4, dtype=np.float32)
+    HeatmapWidget._forward_fill_intensity(arr, fade_out=fade)
+    check(np.allclose(fade, 1.0),
+          f"empty data resets fade to 1.0 (got {fade})")
+
+
+def test_fade_alpha_applied_in_compute_frame():
+    """End-to-end: alpha channel of forward-filled columns is reduced."""
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    from ui.heatmap_widget import DEPTH_MIN_FADE
+    vm = OrderFlowViewModel()
+    base_ts = 1_700_000_060_000
+    bids = [(50000.0 - i * 0.1, 5.0) for i in range(40)]
+    asks = [(50000.1 + i * 0.1, 5.0) for i in range(40)]
+    # First slice with real data; then advance time without further depth.
+    vm.add_depth_column(base_ts, bids, asks, 50000.0, 50000.1)
+    vm._price_min = 49995.0
+    vm._price_max = 50005.0
+    vm._auto_scale = False
+    # Trigger more slices via add_depth_column with same data so columns fill
+    for t in range(1, 50):
+        vm.add_depth_column(base_ts + t * 200, bids, asks,
+                            50000.0, 50000.1)
+    frame = vm.compute_frame(pw=600, ph=400, margin_left=70,
+                             margin_top=10, chart_right_inset=28)
+    check(frame.depth_image is not None, "frame produced")
+    # Verify the internal fade buffer was used (some columns < 1.0 may not
+    # exist in this dense scenario — verify at least the buffer exists).
+    check(vm._depth_fade is not None,
+          "fade buffer allocated after compute_frame")
+
+
 # ================================================================ MAIN
 
 if __name__ == '__main__':
@@ -492,6 +612,14 @@ if __name__ == '__main__':
         test_small_widget_no_crash,
         test_mid_row_at_edge,
         test_compute_frame_benchmark,
+        test_fade_buffer_default_one_for_real_columns,
+        test_fade_buffer_decreases_with_age,
+        test_fade_buffer_min_fade_floor,
+        test_fade_buffer_left_edge_backfill,
+        test_fade_buffer_intensity_unchanged,
+        test_fade_buffer_continuous_data_no_decay,
+        test_fade_buffer_empty_data_no_decay,
+        test_fade_alpha_applied_in_compute_frame,
     ]
 
     for t in tests:

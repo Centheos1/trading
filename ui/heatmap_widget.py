@@ -46,6 +46,8 @@ DEPTH_NORM_PCTILE = 95            # normalize intensity to this percentile (orde
 DEPTH_GAMMA = 0.55                # gamma < 1 expands contrast in the moderate-liquidity zone
 DEPTH_PRICE_BUCKETS = 150         # coarsen depth into this many price bands across the visible range
 DEPTH_MIN_INTENSITY = 0.12        # buckets below this threshold render as background (noise floor)
+DEPTH_FADE_WINDOW = 30            # columns over which forward-filled depth fades to MIN_FADE
+DEPTH_MIN_FADE = 0.30             # minimum alpha multiplier for forward-filled depth columns
 
 HEAT_GRADIENT_BID = [
     (0.00, (8, 12, 30)),
@@ -369,10 +371,11 @@ class HeatmapWidget(QWidget):
         return self._vm._MAX_DEPTH_LEAD_MS if self._vm else 5000
 
     @staticmethod
-    def _forward_fill_intensity(intensity):
+    def _forward_fill_intensity(intensity, *args, **kwargs):
         """Delegate to ViewModel's static method for backward compat."""
         from ui.orderflow_viewmodel import OrderFlowViewModel
-        return OrderFlowViewModel._forward_fill_intensity(intensity)
+        return OrderFlowViewModel._forward_fill_intensity(
+            intensity, *args, **kwargs)
 
     def _draw_bubbles(self, painter, px, py, pw, ph, pr, t_start, now,
                       *, pmin_override=None):
@@ -606,23 +609,6 @@ class HeatmapWidget(QWidget):
         if event.type() == event.Type.NativeGesture:
             return self._native_gesture_event(event)
         return super().event(event)
-
-    def _native_gesture_event(self, event):
-        """Handle macOS trackpad pinch (ZoomNativeGesture)."""
-        if not self._vm:
-            return False
-        if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
-            # value() is the incremental scale factor delta (e.g. +0.05 or -0.05)
-            delta = event.value()
-            scale = 1.0 + delta
-            if scale <= 0:
-                return True
-            new_frac = self._vm.zoom_fraction / scale
-            self._vm.set_zoom_fraction(new_frac)
-            self._vm._auto_scale = False
-            self.update()
-            return True
-        return False
 
     def _gesture_event(self, event):
         pinch = event.gesture(Qt.PinchGesture)

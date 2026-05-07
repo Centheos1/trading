@@ -94,6 +94,23 @@ def compute_trend_efficiency(prices: list[float] | deque) -> float:
     return abs(net) / gross
 
 
+def compute_trend_direction(prices: list[float] | deque) -> float:
+    """Sign of the net price change over the price window.
+
+    Returns +1.0 if price ended higher, -1.0 if lower, 0.0 if flat or
+    insufficient data.  Used alongside η to distinguish BREAKOUT (up) from
+    BREAKDOWN (down) — η itself discards direction (it takes abs(net)).
+    """
+    if len(prices) < 2:
+        return 0.0
+    net = list(prices)[-1] - list(prices)[0]
+    if net > 1e-10:
+        return 1.0
+    if net < -1e-10:
+        return -1.0
+    return 0.0
+
+
 def compute_distance_to_structure(
     price: float,
     *,
@@ -148,6 +165,7 @@ class WaveEngine:
 
         # Cached features
         self._trend_efficiency: float = 0.5
+        self._trend_direction: float = 0.0   # +1 up, -1 down, 0 flat/unknown
         self._distance_to_structure: Dict[str, float] = {}
 
         # Session structure levels (set externally or derived)
@@ -267,6 +285,10 @@ class WaveEngine:
         return self._trend_efficiency
 
     @property
+    def trend_direction(self) -> float:
+        return self._trend_direction
+
+    @property
     def dispersion(self) -> float:
         return self._dispersion
 
@@ -309,6 +331,7 @@ class WaveEngine:
         self._cv_lead_lag = 0.0
         self._cv_available = False
         self._trend_efficiency = 0.5
+        self._trend_direction = 0.0
         self._distance_to_structure = {}
         self._session_vwap = 0.0
         self._session_high = 0.0
@@ -330,6 +353,7 @@ class WaveEngine:
     def _compute_features(self) -> None:
         prices = [p for _, p in self._prices]
         self._trend_efficiency = compute_trend_efficiency(prices)
+        self._trend_direction = compute_trend_direction(prices)
 
         if self._last_price > 0.0:
             self._distance_to_structure = compute_distance_to_structure(
@@ -342,15 +366,29 @@ class WaveEngine:
     def _classify_regime(self) -> None:
         """§8.8 state machine — deterministic threshold-based transitions.
 
+        Direction-aware design
+        ──────────────────────
+        η = |Σ ΔPᵢ| / Σ|ΔPᵢ| measures trend *strength* but discards sign.
+        `_trend_direction` (sign of net price change) is used alongside η so
+        the engine can distinguish BREAKOUT (up-trending) from BREAKDOWN
+        (down-trending).
+
+        Regime semantics:
+          BREAKOUT    — strong trend, price direction UP
+          BREAKDOWN   — strong trend, price direction DOWN  OR  extreme stress
+                        (both AR stress-proxy and dispersion are critical)
+          MEAN_REVERSION — low efficiency, low dispersion (choppy/oscillating)
+          NEUTRAL     — everything else
+
         Phase 8: when cross-venue data is available, low correlation boosts
-        the effective absorption ratio (instability signal), and large
-        absolute divergence boosts effective dispersion. This makes the
-        state machine more likely to transition into BREAKDOWN when
-        venues disagree.
+        the effective AR (instability signal) and large absolute divergence
+        boosts effective dispersion.  Extreme combined stress can trigger
+        BREAKDOWN even when price direction is up (genuine dislocation).
         """
         eta = self._trend_efficiency
         d = self._dispersion
         ar = self._absorption_ratio
+        direction = self._trend_direction   # +1 up / -1 down / 0 unknown
 
         if self._cv_available:
             corr_deficit = max(0.0, 0.5 - self._cv_correlation)
@@ -359,28 +397,47 @@ class WaveEngine:
 
         cfg = self._cfg
 
+        # ── Derived conditions ────────────────────────────────────────────
+        trending_up   = eta > cfg.eta_bo_threshold and direction > 0
+        trending_down = eta > cfg.eta_bo_threshold and direction < 0
+
+        # Extreme combined stress (dislocation): BOTH AR and dispersion must
+        # be elevated so AR alone (which can sit ~0.9 in normal markets) does
+        # not trigger BREAKDOWN during an orderly bull run.
+        extreme_stress = ar > cfg.ar_critical and d > cfg.dispersion_threshold
+        # Independently, a critical dispersion spike overrides direction.
+        dispersion_crisis = d > cfg.dispersion_critical
+
+        stress = extreme_stress or dispersion_crisis
+
+        # ── State transitions ─────────────────────────────────────────────
         if self._regime == WaveRegime.NEUTRAL:
-            if ar > cfg.ar_critical or d > cfg.dispersion_critical:
-                self._regime = WaveRegime.BREAKDOWN
-            elif eta > cfg.eta_bo_threshold:
+            if trending_up:
                 self._regime = WaveRegime.BREAKOUT
+            elif trending_down or stress:
+                self._regime = WaveRegime.BREAKDOWN
             elif eta < cfg.eta_mr_threshold and d < cfg.dispersion_threshold:
                 self._regime = WaveRegime.MEAN_REVERSION
 
         elif self._regime == WaveRegime.MEAN_REVERSION:
-            if ar > cfg.ar_critical:
-                self._regime = WaveRegime.BREAKDOWN
-            elif eta > cfg.eta_bo_threshold:
+            if trending_up:
                 self._regime = WaveRegime.BREAKOUT
+            elif trending_down or stress:
+                self._regime = WaveRegime.BREAKDOWN
             elif eta > cfg.eta_neutral_threshold:
                 self._regime = WaveRegime.NEUTRAL
 
         elif self._regime == WaveRegime.BREAKOUT:
-            if ar > cfg.ar_critical:
+            if trending_down or stress:
+                # Direction reversed or extreme dislocation
                 self._regime = WaveRegime.BREAKDOWN
             elif eta < cfg.eta_neutral_threshold:
                 self._regime = WaveRegime.NEUTRAL
 
         elif self._regime == WaveRegime.BREAKDOWN:
-            if ar < cfg.ar_recover and d < cfg.dispersion_threshold:
+            if trending_up and ar < cfg.ar_recover:
+                # Price recovered AND stress normalised → BREAKOUT
+                self._regime = WaveRegime.BREAKOUT
+            elif not trending_down and ar < cfg.ar_recover and d < cfg.dispersion_threshold:
+                # Momentum faded AND stress cleared → NEUTRAL
                 self._regime = WaveRegime.NEUTRAL
