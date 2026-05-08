@@ -42,7 +42,14 @@ data_service.py                  Tick data collection (Python WebSocket → C++ 
 backtester.py                    Strategy dispatcher (obv, sma, orderflow, …)
 optimiser.py                     Legacy NSGA-II (for legacy strategies)
 strategies/orderflow.py          Python wrapper for C++ order flow backtest
-ui/                              PySide6 Bookmap-style trading UI
+ui/                              PySide6 multi-view trading dashboard (heatmap + candle chart + strategy diagnostics)
+  ui/main_window.py              Tab wrapper, timer pipeline, MarketState orchestration
+  ui/heatmap_widget.py           Order-flow heatmap (depth + bubbles + CVD) — thin View
+  ui/orderflow_viewmodel.py      Heatmap viewmodel: depth image, bubbles, percentile normalisation, alpha-fade
+  ui/candle_chart_view.py        QPainter candlestick chart with overlay registration
+  ui/chart_overlays.py           SMA / EMA / VWAP / structural levels / volume-profile bar
+  ui/strategy_dashboard_view.py  Diagnostics + signal log + account + history mini-chart + ripple state table
+  ui/market_state.py             Shared model: candles, snapshots, snapshot_history, signals
 backtestingCpp/orderflow/        C++ order flow engine (L2 order book, signal generation, TickStore, …)
 ```
 
@@ -305,28 +312,523 @@ python main.py
 # Mode: ui
 ```
 
+The UI is a multi-view PySide6 dashboard with three tabs that share a single
+`MarketState` model (so candle data, snapshots, and signals are never duplicated):
+
+| Tab | What it shows |
+|---|---|
+| **Order Flow** | Depth heatmap with dual bid/ask LUTs, gamma-curved intensity, 95th-percentile normalisation, forward-fill alpha fade for stale columns; trade bubbles with volume-cap and dynamic coarsening; CVD overlay |
+| **Chart** | QPainter candlestick chart with auto-registered overlays: SMA-20, EMA-50, session VWAP, session H/L + ATH/ATL structural levels, right-edge volume-profile bar with POC highlight |
+| **Strategy** | Strategy diagnostics panel, trade blotter (signal log), account panel, rolling history mini-chart (Wave regime + Tide bias band, ES% + uPnL line chart over the last ~5 minutes), and a current Ripple state table (lifecycle, archetype, entry/stop/target, hold time, uPnL, ES used) |
+
+Only the active tab repaints each tick. See [`UI_STRATEGY_INTEGRATION_PLAN.md`](UI_STRATEGY_INTEGRATION_PLAN.md)
+for the full architectural breakdown (Phases A–E + 6 + 7).
+
 ---
 
 ## Remaining Work
 
-### Ripple Layer (Phase Next)
-Microstructure execution layer using L2 order book data. Ingests `PermissionSet`
-from Wave and `TideBias` + risk multiplier from Tide. Triggers actual trades via
-bounce / breakout archetypes.
+### Live Execute Path (Phase 12 — Hardened)
 
-### Wave Parameter Tuning
-Default thresholds (`eta_bo_threshold=0.7`, `dispersion_critical=1.2`, etc.) are
-V1 defaults. Run the Wave optimiser on your dataset to calibrate them.
+The outbound order-routing layer mirrors the Phase 10 inbound-feed
+hardening. Ripple decisions flow through the same code path whether
+the user is paper-trading or routed at a real broker, and Phase 12
+adds the unit-test scaffolding that path was missing.
+
+```
+RippleEngine (C++)
+  → RippleDecision
+    → main_window._on_ripple_received
+      → ripple_decision_to_intent (execution/models.py)
+        ├─ paper:  PaperEngine.on_intent
+        │            → _handle_entry / _handle_exit
+        │            → order_callback → TradeBlotter / AccountPanel
+        └─ live:   ExecutionManager.on_signal (cooldown + side gate)
+                     → asyncio worker loop
+                       → BinanceBroker.place_order (REST)
+                         → _poll_order_fill until FILLED
+```
+
+Phase 12 added ≈ 83 new offline tests across four suites (no real
+network, no real `binance.AsyncClient`, no Qt):
+
+- [`tests/test_paper_engine.py`](tests/test_paper_engine.py) — 26
+  checks for `PaperEngine`: construction defaults, every `on_intent`
+  branch (entry / exit / cancel / rearm / unknown), suppression rules
+  (`INVENTORY` for missing side / missing price / zero-rounded
+  quantity / same-side re-entry; `NO_POSITION` for stray exits),
+  realized-PnL signing on long and short flips, all three
+  `SizingMode`s, `unrealized_pnl()`, `update_sizing()` mid-flight,
+  `reset()`, and order-callback safety.
+- [`tests/test_execution_manager.py`](tests/test_execution_manager.py)
+  — 25 checks for `ExecutionManager` driven through a
+  `StubBroker(BrokerInterface)`: lifecycle (start/stop/idempotent),
+  arm/disarm with optional close, cooldown + disarmed + same-side
+  gates on `on_signal`, `_execute_signal` happy-path / reverse /
+  close-not-filled, `_compute_quantity` for every `SizingMode`
+  including `MIN_NOTIONAL` floor, `step_size` rounding, and
+  `max_position` clamp, and `_periodic_refresh` resilience to
+  consecutive `get_account_info` failures.
+- [`tests/test_binance_broker.py`](tests/test_binance_broker.py) —
+  19 checks for `BinanceBroker` with `binance.AsyncClient.create`
+  patched and `load_dotenv` neutered: connect (testnet vs. live vs.
+  failure), `disconnect`, `get_account_info` parsing + filtering,
+  `place_order` rounding-zero rejection / happy path / `SUBMITTED`
+  + 0-fill polling / exchange-exception rejection, `cancel_order`,
+  `get_open_orders`, `get_position`, `close_position` flip,
+  `_round_quantity` precision, and `_map_status` over all six Binance
+  statuses.
+- [`tests/test_execution_models.py`](tests/test_execution_models.py)
+  — 13 checks pinning `_parse_intent_name`, every
+  `_RIPPLE_INTENT_MAP` entry's round-trip through
+  `ripple_decision_to_entry` / `_to_intent`, `NO_ACTION` and
+  unknown-intent short-circuits, the explicit-`intent_name` argument
+  override, and the dataclass defaults the rest of the execution layer
+  depends on.
+
+Combined runtime of the four new suites is under 1 second, well below
+the 5-second budget. No production-code patches were required — the
+audit pass during test writing did not surface any defect.
+
+Deferred to a separate phase:
+- Live-broker integration soak / paper-trade reconciliation runs
+  (Phase 14 candidate).
+- LIMIT / OCO order support and partial-fill bookkeeping
+  enhancements.
+
+### Wave Parameter Tuning & Calibration (Phase 9 — Backtest Hardening)
+Wave thresholds (`eta_bo_threshold`, `dispersion_critical`, etc.) are calibrated
+against the **bar-count distribution** of the chosen timeframe. A parameter set
+tuned for 1h bars sees windows ~12× narrower (in wall-clock terms) when applied
+at 5m, which shifts every feature distribution and breaks the calibration.
+
+Phase 9 ships three CLI flags to address this on the backtester:
+
+- `--rescale-windows` — opt into automatic scaling of `eta_window`,
+  `vwap_window`, `structure_window`, `disp_window`, `ar_window` whenever
+  `--timeframe` is changed. Recommended whenever a parameter set tuned at one
+  timeframe is applied at another.
+- `--liquidation-equity-frac F` — equity floor as a fraction of
+  `initial_capital`; once equity drops to or below the floor, position is
+  forced to 0 and trading halts (mirrors a margin-call event). Defaults to
+  `0.0` (disabled) so existing parameter sets reproduce V1 behaviour.
+- `--slippage-bps B` (and `--slippage-per-unit-bps`) — linear plus quadratic
+  slippage charged alongside fees. Use `~1-2 bps` for liquid majors as a
+  realistic starting point. Defaults to `0.0`.
+
+A validated 5m run with `--liquidation-equity-frac 0.5 --slippage-bps 2.0` is
+saved at [`reports/wave_BTCUSDT_5m_hardened.md`](reports/wave_BTCUSDT_5m_hardened.md)
+(Sharpe ≈ 5.87, MaxDD −4.4%, monthly returns bounded in [+0.6%, +22.4%], no
+liquidation triggered).
+
+The compute path also fixes the monthly-return math: when a prior month's
+equity drops below 10% of `initial_capital`, returns are normalised by initial
+capital instead of `pct_change` (which previously produced `+13717%` months on
+runs that crossed zero). The report flags `monthly_returns_normalised` whenever
+the fallback was used.
+
+New per-regime trade aggregates (`trades`, `fees_paid`, `turnover_usd`), a
+`flips_per_bar` chop diagnostic, and a regime run-length histogram are surfaced
+in the markdown report so you can spot churn at a glance.
 
 ### Multi-Asset Dispersion & Absorption Ratio (V2/V3)
 V1 uses single-symbol proxies for dispersion (rolling return std) and absorption
 ratio (vol-of-vol ratio). True cross-sectional metrics require a panel of
 correlated assets — planned for V2/V3 per `strategy.md` roadmap.
 
-### UI Live Mode
-The `ui/main_window.py` `_on_connect()` method uses the C++ `BinanceWsFeed`
-which has a known crash with Boost 1.90 on macOS. Port to the Python WebSocket
-approach used by `TickDataCollector`.
+### UI Live Path (Phase 10 — Hardened)
+The UI live path is fully Python-based and now has regression coverage:
+
+```
+main_window._on_connect()
+  → LiveTradingSession.start_live()
+    → threading.Thread(_run_ws_feed)
+      → run_binance_usdm_futures_ws_feed (asyncio)
+        → _run_trade_stream / _run_depth_stream / _watchdog
+    → fetch_and_build_depth_snapshot (REST)
+  → LiveTradingSession.on_timer_tick → _resync_depth_snapshot
+    after _BOOK_EMPTY_RESYNC_THRESHOLD empty ticks
+```
+
+Phase 10 added 40 new tests across three suites:
+- [`tests/test_stream_health.py`](tests/test_stream_health.py) — 19 tests for the
+  `FeedStreamHealth` state machine (`DISCONNECTED → CONNECTING → LIVE → STALE
+  → RECONNECTING → FAILED` transitions, `consecutive_failures` threshold,
+  `short_status` rendering).
+- [`tests/test_binance_futures_ws.py`](tests/test_binance_futures_ws.py) — 11
+  mocked-WS integration tests for `run_binance_usdm_futures_ws_feed`
+  covering trade/depth parse + dispatch, dedupe, parse-error tolerance,
+  `ConnectionClosed` reconnect, `FEED_MAX_CONSECUTIVE_FAILURES` promotion,
+  watchdog stale detection, exponential backoff cap, and `stop_event` shutdown
+  within 3 seconds.
+- [`tests/test_live_trading_session.py`](tests/test_live_trading_session.py) —
+  10 orchestration tests for `LiveTradingSession` (engine construction, WS
+  thread lifecycle, buffer drain, depth resync error handling).
+
+### Phase 10B — `run_live` CLI Migration & C++ Feed Removal `[COMPLETED]`
+
+`strategies/orderflow.py::run_live()` now uses the same
+`run_binance_usdm_futures_ws_feed` runner as the UI and returns a
+`LiveSession` handle (`engine`, `stop()`, per-stream
+`FeedStreamHealth`, context-manager support). The legacy C++
+`BinanceWsFeed` class has been removed end-to-end — header,
+implementation, pybind11 binding, and CMake source-list entry — so
+the only remaining C++ feed is `ReplayFeed` (deterministic backtest
+path). 14 new checks in
+[`tests/test_run_live.py`](tests/test_run_live.py) cover the new
+function: missing-`ofe` / missing-`websockets` errors, lifecycle,
+trade/depth dispatch, signal-callback wiring, REST-snapshot success /
+failure / disabled, tick-store registration, and dispatch-exception
+isolation.
+
+### Phase 10C — `main.py:execute` Mode Migration `[COMPLETED]`
+
+The `execute` CLI mode (live broker submission via
+`ExecutionManager` + `BinanceBroker`) was the third Binance USD-M
+consumer in the codebase still rolling its own ad-hoc asyncio WS
+plumbing — no `FeedStreamHealth`, no watchdog, no exponential
+reconnect, no trade-ID dedupe. Phase 10C extracts the live-trading
+loop into a testable
+[`execution/live_runner.py`](execution/live_runner.py) module
+(`run_live_execute(...)`) routed through the shared
+`run_binance_usdm_futures_ws_feed` runner, and trims the
+`main.py:execute` block from ~170 lines to ~70 (just user-input
+prompts + broker / `ExecutionManager` construction + delegation to
+`run_live_execute`). 9 new checks in
+[`tests/test_live_runner.py`](tests/test_live_runner.py) cover engine
+configuration, signal-callback wiring, WS trade/depth dispatch, REST
+snapshot success / failure, status-loop cadence + exception
+isolation, the shutdown disarm contract, and the default status
+printer. The shutdown sequence
+(`disarm(close_position=True)` → grace → `exec_mgr.stop()` →
+`engine.stop()`) is preserved bit-for-bit; the live status log line
+now reports `trade` and `depth` `FeedStreamHealth` short-status
+alongside the existing position / order count.
+
+### Deterministic Replay Harness (Phase 13 — Hardened)
+
+Every captured live session can now be replayed through a fresh
+`OrderFlowEngine` + `PaperEngine` and verified to produce
+**byte-identical** Tide / Wave / Ripple decisions and paper-engine
+fills. The C++ engine and `PaperEngine` are deterministic state
+machines (no wall-clock, no randomness) — Phase 13 adds the missing
+**capture sidecar** + **replay verifier** around them.
+
+```
+LIVE   ──► run_live / run_live_execute (recorder=…)
+            ├─ TickStore.h5  (trades + depth — already there)
+            └─ session.jsonl (signals + ripples + paper orders + EngineConfig)
+                                                │
+                                                ▼
+REPLAY ──► python main.py replay
+            ├─ load EngineConfig + SizingConfig from sidecar
+            ├─ fresh OrderFlowEngine
+            ├─ fresh PaperEngine (RippleDecision → ExecutionIntent → fill)
+            ├─ replay events from TickStore (trade + depth, sorted)
+            └─ diff captured stream vs. sidecar → ReplayReport
+                                                  ↳ PASS  (exit 0)
+                                                  ↳ FAIL  (exit 2 + first divergences)
+```
+
+`tools/session_recorder.py` writes a schema-versioned JSONL trace
+(header / signal / ripple / order / footer). `NO_ACTION` ripple
+decisions are filtered by default to keep traces small; flip
+`record_no_action=True` for full-fidelity captures. The
+`SessionRecorder` chains onto a paper-engine `order_callback` via
+`wrap_paper_callback(...)` and attaches signal + ripple callbacks via
+`attach_to_engine(engine)`. `apply_engine_config` and
+`apply_sizing_config` rebuild the configs at replay time, including
+the full `RippleConfig` + `LifecycleConfig` parameter set.
+
+`tools/replay_harness.py::replay_session(...)` returns a
+`ReplayReport` with expected/actual counts and a list of `Divergence`
+records pinpointing the first mismatched event. The harness
+intentionally **bypasses** `ExecutionManager` (its cooldown gate uses
+`time.time()`, breaking determinism) and routes
+`RippleDecision → ExecutionIntent → PaperEngine.on_intent` directly
+through `execution.models.ripple_decision_to_intent`.
+
+Notes uncovered while building Phase 13:
+- The harness loads events directly via
+  `TickStore.load_trades` / `load_depth_snapshots` /
+  `load_depth_updates` rather than driving `ReplayFeed.run_sync()`.
+  The existing path in `strategies/orderflow.py:backtest()` calls
+  `engine.start()` (which spawns a background `ReplayFeed`
+  thread) **and** `replay.run_sync()` (which runs the same loop on
+  the main thread), producing 2× event output. Documented as a
+  known limitation; the harness sidesteps it.
+- pybind11's default vector binding for `DepthUpdate.bids` /
+  `DepthUpdate.asks` returns a copy on read, so per-element
+  `.append()` is a no-op. End-to-end tests use whole-list assignment
+  (`d.bids = [...]`).
+- Phase 13 also fixes a one-arg `engine.set_tick_store(store)` bug
+  in Phase 10B's `run_live` — the C++ binding requires
+  `(store, symbol)`. The Phase 10B test stub had a matching one-arg
+  method, masking the bug.
+
+`tests/test_replay_harness.py` exercises 34 checks across schema,
+serialization round-trips, sidecar load error paths, divergence
+detection (length / field / extra-event), and end-to-end
+capture-then-replay with the real C++ engine + HDF5 `TickStore` +
+`PaperEngine` — including a corrupted-sidecar regression that
+verifies divergence is reported. Combined runtime ≈ 0.09 s.
+
+Deferred to a separate phase:
+- `LiveTradingSession` orchestration replay (UI timer-tick
+  scheduling + candle aggregation). Phase 13B candidate.
+- `BinanceBroker` round-trip — paper-only is the verification target
+  here; real-broker reconciliation belongs in Phase 14.
+
+### Phase 13X — Backtest Double-Fire Fix `[COMPLETED]`
+
+**⚠ Behaviour change:** All backtest reports generated before this
+fix processed every trade and depth update **twice** (a Phase 13X
+probe measured an exact 2× volume profile / CVD count). Absolute
+values from prior `reports/wave_optimise_*` and
+`reports/tide_optimise_*` outputs cannot be directly compared to
+post-fix runs. Re-run optimisations to get correct absolute numbers.
+
+`strategies/orderflow.py:backtest()` was calling
+`engine.start(symbol)` (which spawned a `ReplayFeed` worker thread)
+**and** `replay.run_sync()` (which ran the same loop synchronously
+on the main thread). Phase 13 surfaced the bug while building the
+deterministic-replay harness; the harness already side-stepped it by
+loading events directly from `TickStore`. Phase 13X applies the
+proper fix to the production `backtest()` path.
+
+The corrected pattern is:
+
+```python
+ofe.connect_feed(engine, replay)
+engine.start(symbol)              # spawns the replay worker thread
+while not replay.is_complete():    # main thread waits, no double-fire
+    time.sleep(0.05)
+```
+
+A 10-minute safety timeout prevents an indefinite hang if the worker
+thread wedges.
+
+Phase 13X also fixed
+[`tests/test_replay_determinism.py`](tests/test_replay_determinism.py)`::_make_depth`
+which used `d.bids.append(...)` / `d.asks.append(...)`. Under
+pybind11's default vector binding `DepthUpdate.bids` returns a copy
+on read, so per-element `.append()` modifies a temporary list — the
+helper was producing empty depth updates and the suite was silently
+asserting "two empty engines produce identical empty snapshots."
+Production paths (`data_feed/binance_futures_ws.py`,
+`data_feed/binance_depth_rest.py`, `data_service.py`) all use
+whole-list assignment (`u.bids = bids_list`) and were never
+affected.
+
+New regression coverage:
+- [`tests/test_orderflow_backtest.py`](tests/test_orderflow_backtest.py)
+  — 4 checks: volume profile total matches expected, CVD history
+  count matches trade count, repeated runs are independent, and a
+  full `strategies.orderflow.backtest()` smoke test against a
+  chdir-staged synthetic tick store.
+- [`tests/test_replay_determinism.py`](tests/test_replay_determinism.py)
+  — added `test_depth_helper_actually_populates_levels` (pins
+  populated-list shape) and `test_engine_actually_observes_depth`
+  (drives 50 events and asserts the OrderBook ends with non-zero
+  `best_bid` / `best_ask` and a positive spread).
+
+Validation:
+- Direct probe: 10 trades × 1.0 qty → VolumeProfile total = **10.0**
+  (was 20.0 pre-fix); CVD history len = **10** (was 20).
+- Targeted regression sweep across Phase 7 / 9 / 10 / 10B / 10C /
+  11 / 11B / 11C / 12 / 13 suites: **377/378 OK**. The single
+  remaining failure (`test_crossvenue_wave::test_low_correlation_boosts_breakdown`)
+  is a pre-existing `WaveRegime.BREAKDOWN` issue confirmed identical
+  on a clean checkout.
+
+Out of scope (deferred):
+- Re-running historical optimisation reports under the corrected
+  pipeline.
+- A proper pybind11 fix for the `DepthUpdate.bids` / `.asks`
+  by-copy footgun (would require `PYBIND11_MAKE_OPAQUE` +
+  `py::bind_vector`; documented in the codebase as a known trap).
+- Pre-existing `WaveRegime.BREAKDOWN` regime cleanup
+  (`test_wave_engine` and `test_crossvenue_wave` together: ~7
+  failures).
+
+### Phase 13Y — Orderflow Binding Drift Fix `[COMPLETED]`
+
+`python main.py backtest` (or `optimise`) with strategy `orderflow`
+crashed mid-config with
+`AttributeError: 'orderflow_engine.RippleConfig' object has no
+attribute 'idle_exit_threshold'`. The parameter was advertised as
+tunable in `STRAT_PARAMS["orderflow"]` (`utils.py:57`) and mapped via
+`_RIPPLE_MAP` in `strategies/orderflow.py`, but the underlying C++
+field (`RippleConfig.h:130`, used by `ScoreBasedInference.cpp:54` to
+gate leaving the IDLE state) was never exposed in
+`backtestingCpp/orderflow/bindings.cpp`.
+
+Fix:
+1. Added the missing `def_readwrite("idle_exit_threshold",
+   &RippleConfig::idle_exit_threshold)` in `bindings.cpp` and rebuilt
+   via `bash backtestingCpp/orderflow/build.sh`.
+2. Promoted `_RIPPLE_MAP` and `_LIFECYCLE_KEYS` from local-vars-inside-
+   `_build_config` to module-level constants so the contract is
+   testable.
+3. Wrapped both setter loops in `hasattr(...)` guards: a missing C++
+   attribute now logs `WARNING` and skips, rather than crashing the
+   entire backtest.
+
+New regression coverage in
+[`tests/test_orderflow_backtest.py`](tests/test_orderflow_backtest.py)
+(`TestBuildConfigBindingDrift`, 5 checks):
+- `test_every_ripple_map_key_exists_on_RippleConfig` — pins every
+  value in `_RIPPLE_MAP` to a real `RippleConfig` attribute.
+- `test_every_lifecycle_key_exists_on_LifecycleConfig` — same for
+  the lifecycle keys.
+- `test_strat_params_orderflow_keys_round_trip_through_build` —
+  feeds every `STRAT_PARAMS["orderflow"]` tunable through
+  `_build_config` to confirm none raise.
+- `test_idle_exit_threshold_round_trips` — explicitly verifies the
+  previously-broken param is applied end-to-end.
+- `test_unknown_param_does_not_crash` — phantom `_RIPPLE_MAP` entry
+  triggers the defensive guard without raising.
+
+Validation:
+- `RippleConfig().idle_exit_threshold` reads back the C++ default
+  (`0.30`); set + get round-trips correctly.
+- The user's exact failing CLI prompt sequence (`backtest → binance
+  → BTCUSDT → orderflow → 1h → ` + all 22 param values) now returns
+  `(pnl=3.236, max_dd=0.00679, num_trades=17, sharpe=0.269,
+  cagr=0.0565)` instead of `AttributeError`.
+- `tests/test_orderflow_backtest.py`: 9/9 OK (4 Phase 13X + 5 new
+  Phase 13Y).
+
+### Phase 13Z — `DepthUpdate.bids`/`.asks` Opaque-Vector Decision `[DOCUMENTED]`
+
+The Phase 13X "known limitation" about pybind11's by-copy semantics
+for `DepthUpdate.bids` / `.asks` was reviewed and **deliberately
+deferred**. Rationale captured in
+[`backtestingCpp/orderflow/bindings.cpp`](backtestingCpp/orderflow/bindings.cpp)
+above the `DepthUpdate` class binding:
+
+1. The "fix" — `PYBIND11_MAKE_OPAQUE(std::vector<DepthLevel>)` plus
+   `py::bind_vector` — removes pybind11's implicit conversion from
+   Python `list` to `std::vector<DepthLevel>`. Every existing
+   assignment of the form `update.bids = python_list` would break
+   without a hand-written `py::implicitly_convertible` shim, and the
+   wrapped vector type leaks into Python repr / error messages.
+2. Every production caller (`data_feed/binance_futures_ws.py`,
+   `data_feed/binance_depth_rest.py`, `data_service.py`) and every
+   test already uses the safe whole-list-assignment pattern.
+3. Two regression test suites pin the safe pattern:
+   `test_replay_determinism.py::test_*_actually_*` (Phase 13X) and
+   `test_orderflow_backtest.py::TestBuildConfigBindingDrift`
+   (Phase 13Y).
+4. Reverting the decision later is mechanical (one C++ change + one
+   Python migration sweep) — no schema change.
+
+The comment block in `bindings.cpp` warns future contributors before
+they reach for `.append()`.
+
+### Phase 13W — Wave BREAKDOWN Regime Test Cleanup `[COMPLETED]`
+
+Resolved the 7 long-standing `WaveRegime.BREAKDOWN` test failures
+explicitly punted from Phase 13X. Root cause: the tests pre-date a
+deliberate hardening of `WaveEngine._classify_regime`
+([`wave/wave_engine.py:407`](wave/wave_engine.py)) that requires
+**multi-factor stress** (`extreme_stress = ar > ar_critical AND
+d > dispersion_threshold`) to trigger BREAKDOWN. The tests set only
+AR and left dispersion at 0.0, so the predicate evaluated to
+`True AND False = False` and the state machine never left NEUTRAL.
+
+The hardening is correct as-shipped — its docstring explicitly
+states the design intent: *"BOTH AR and dispersion must be elevated
+so AR alone (which can sit ~0.9 in normal markets) does not trigger
+BREAKDOWN during an orderly bull run."* The tests were out-of-sync.
+
+Fix:
+- Added `set_dispersion(...)` calls alongside `set_absorption_ratio(...)`
+  in 6 tests in [`tests/test_wave_engine.py`](tests/test_wave_engine.py)
+  (`test_neutral_to_breakdown_via_ar`, `test_breakdown_recovery`,
+  `test_breakdown_stays_if_ar_still_high`, `test_breakout_to_breakdown`,
+  `test_mean_reversion_to_breakdown`, `test_ar_just_above_critical`)
+  and 1 test in [`tests/test_crossvenue_wave.py`](tests/test_crossvenue_wave.py)
+  (`test_low_correlation_boosts_breakdown`).
+- Inline comments reference `wave_engine.py:_classify_regime` so the
+  same drift cannot recur silently.
+- **No engine code change** — `wave/wave_engine.py` is untouched.
+
+Validation:
+- `tests/test_wave_engine.py`: 65/65 OK (was 60/65).
+- `tests/test_crossvenue_wave.py`: 16/16 OK (was 15/16).
+- Aggregate non-Qt regression sweep: 546/546 OK.
+
+### Phase 13B — `LiveTradingSession` Orchestration Replay (MVP) `[COMPLETED]`
+
+Extended the Phase 13 deterministic-replay harness to cover
+`LiveTradingSession.on_timer_tick` orchestration state — drained-trade
+counts, book-empty / book-crossed flags, depth-resync triggers,
+trade-buffer backlog. Until this phase, the sidecar trace captured
+what the C++ engine did but not what the Python UI orchestration
+loop did with it.
+
+New schema event:
+
+```jsonc
+{"event":"session_tick", "tick_n":42, "drained":17,
+ "best_bid":42000.5, "best_ask":42001.0,
+ "bid_count":20, "ask_count":20,
+ "book_empty":false, "book_crossed":false,
+ "book_empty_ticks":0, "book_resync_pending":false,
+ "book_resync_count":0, "trade_buf_remaining":3}
+```
+
+Recording API (in [`tools/session_recorder.py`](tools/session_recorder.py)):
+
+```python
+recorder = SessionRecorder("session.jsonl")
+recorder.write_header(symbol="BTCUSDT", engine_config=cfg)
+recorder.record_session_tick(tick_n=42, drained=17,
+                             best_bid=42000.5, best_ask=42001.0)
+```
+
+`LiveTradingSession.attach_recorder(recorder)` wires it onto the live
+UI (call after `start_live(...)`, detach with `attach_recorder(None)`
+before `stop_live(...)`). The recorder hook is wrapped in
+`try/except` so a faulty recorder cannot break the live tick loop.
+
+Verification API (in [`tools/replay_harness.py`](tools/replay_harness.py)):
+
+```python
+from tools.session_recorder import load_sidecar
+from tools.replay_harness import verify_session_ticks
+trace_a = load_sidecar("captured.jsonl")
+trace_b = load_sidecar("replayed.jsonl")
+report = verify_session_ticks(trace_a.session_ticks,
+                              trace_b.session_ticks)
+print(report.summary())
+```
+
+`SessionTickReport` reuses the same `Divergence` structure as
+`replay_session`, so length, field, and book-state mismatches all
+surface with the same diff semantics.
+
+Test coverage in
+[`tests/test_session_tick_replay.py`](tests/test_session_tick_replay.py)
+— 18 offline tests across 4 classes (no Qt, no real C++ engine):
+- `TestRecordSessionTickSchema` (5) — emitted-line shape, defaults,
+  pre-header drop, counter increment, footer round-trip.
+- `TestLoadSidecarSessionTicks` (1) — `SidecarTrace.session_ticks`
+  populates correctly and preserves field types.
+- `TestVerifySessionTicks` (6) — identical / length-mismatch /
+  field-mismatch / book-state-flip / max-divergences cap /
+  float-tolerance pass-through.
+- `TestLiveTradingSessionRecorderHook` (6) — no-recorder, every-tick
+  call, book state propagation, book-empty flag, recorder-exception
+  isolation, attach-then-detach.
+
+Deferred to Phase 13C:
+- A full Qt-mocked replay-against-recorded-tick driver. The MVP
+  captures the deterministic scalars sufficient to detect timer-cadence
+  / drain / book-state regressions at the per-tick boundary — drift
+  *inside* a single `on_timer_tick` invocation (e.g. reordering of
+  heatmap vs. CVD updates) is out of scope.
 
 ---
 

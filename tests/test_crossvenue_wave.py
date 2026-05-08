@@ -54,11 +54,18 @@ class TestCrossVenueWaveIntegration(unittest.TestCase):
         self.assertNotEqual(snap.regime, WaveRegime.BREAKDOWN)
 
     def test_low_correlation_boosts_breakdown(self):
-        """Low cross-venue correlation should boost effective AR toward BREAKDOWN."""
-        engine = self._make_engine(ar_critical=0.7)
+        """Low cross-venue correlation should boost effective AR toward BREAKDOWN.
+
+        Engine contract: extreme_stress requires BOTH effective_AR >
+        ar_critical AND effective_d > dispersion_threshold. Low
+        correlation boosts effective AR (wave_engine.py:396); a small
+        dispersion is set so the multi-factor stress predicate fires.
+        """
+        engine = self._make_engine(ar_critical=0.7, dispersion_threshold=0.02)
         ts = self._feed_neutral_prices(engine, n=30)
 
         engine.set_absorption_ratio(0.55)
+        engine.set_dispersion(0.03)
         engine.set_crossvenue_snapshot(
             correlation=-0.3, divergence=0.0, lead_lag=0.0
         )

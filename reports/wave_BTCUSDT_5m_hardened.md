@@ -4,64 +4,64 @@
 
 ## Equity Curve
 
-![Equity Curve vs Buy & Hold](wave_optimise_BTCUSDT_best05_equity.png)
+![Equity Curve vs Buy & Hold](wave_BTCUSDT_5m_hardened_equity.png)
 
 ## Returns & Growth
 | Metric | Formula | Value |
 |---|---|---|
-| Total Return | $\frac{E_N - E_0}{E_0}$ | 570.99% |
-| CAGR | $(E_N/E_0)^{P/N} - 1$ | 223.60% |
+| Total Return | $\frac{E_N - E_0}{E_0}$ | 360.42% |
+| CAGR | $(E_N/E_0)^{P/N} - 1$ | 156.51% |
 | Initial Capital | $E_0$ | $10,000.00 |
-| Final Equity | $E_N$ | $67,099.49 |
+| Final Equity | $E_N$ | $46,042.06 |
 
 ## Risk
 | Metric | Formula | Value |
 |---|---|---|
-| Ann. Volatility | $\sigma(r) \times \sqrt{P}$ | 56.74% |
-| Ann. Downside Vol | $\sigma(\min(r,0)) \times \sqrt{P}$ | 37.09% |
-| Max Drawdown | $\min_t (E_t - \text{peak}_t)/\text{peak}_t$ | -5.44% |
-| Max DD Duration (bars) | 992 |
-| VaR 95% | $-Q_{0.05}(r)$ | 0.03% |
-| CVaR 95% (ES) | $-\mathbb{E}[r \mid r < \text{VaR}_{95}]$ | 0.33% |
-| VaR 99% | $-Q_{0.01}(r)$ | 0.49% |
-| CVaR 99% (ES) | $-\mathbb{E}[r \mid r < \text{VaR}_{99}]$ | 0.93% |
-| Ulcer Index | $\sqrt{N^{-1}\sum D_t^2}$ | 0.0159 |
-| Skewness | $\frac{1}{N}\sum((r_t-\bar r)/\sigma)^3$ | 1.6743 |
-| Excess Kurtosis | $\frac{1}{N}\sum((r_t-\bar r)/\sigma)^4 - 3$ | 130.6723 |
+| Ann. Volatility | $\sigma(r) \times \sqrt{P}$ | 37.91% |
+| Ann. Downside Vol | $\sigma(\min(r,0)) \times \sqrt{P}$ | 24.88% |
+| Max Drawdown | $\min_t (E_t - \text{peak}_t)/\text{peak}_t$ | -4.44% |
+| Max DD Duration (bars) | 2,746 |
+| VaR 95% | $-Q_{0.05}(r)$ | 0.02% |
+| CVaR 95% (ES) | $-\mathbb{E}[r \mid r < \text{VaR}_{95}]$ | 0.22% |
+| VaR 99% | $-Q_{0.01}(r)$ | 0.33% |
+| CVaR 99% (ES) | $-\mathbb{E}[r \mid r < \text{VaR}_{99}]$ | 0.62% |
+| Ulcer Index | $\sqrt{N^{-1}\sum D_t^2}$ | 0.0136 |
+| Skewness | $\frac{1}{N}\sum((r_t-\bar r)/\sigma)^3$ | 1.5946 |
+| Excess Kurtosis | $\frac{1}{N}\sum((r_t-\bar r)/\sigma)^4 - 3$ | 130.1377 |
 
 ## Risk-Adjusted
 | Metric | Formula | Value |
 |---|---|---|
-| Sharpe Ratio | $(\bar{r} \cdot P - R_f)\,/\,(\sigma\sqrt{P})$ | 6.2076 |
-| Sortino Ratio | $(\text{CAGR} - \text{MAR})\,/\,(\sigma_d\sqrt{P})$ | 9.4966 |
-| Calmar Ratio | $\text{CAGR}\,/\,\lvert\text{MDD}\rvert$ | 41.0767 |
+| Sharpe Ratio | $(\bar{r} \cdot P - R_f)\,/\,(\sigma\sqrt{P})$ | 5.8657 |
+| Sortino Ratio | $(\text{CAGR} - \text{MAR})\,/\,(\sigma_d\sqrt{P})$ | 8.9377 |
+| Calmar Ratio | $\text{CAGR}\,/\,\lvert\text{MDD}\rvert$ | 35.2506 |
 
 ## Activity & Trades
 | Metric | Value |
 |---|---|
-| Num Trades | 636 |
+| Num Trades | 688 |
 | Exposure % | 11.5% |
-| Win Rate | 80.63% |
-| Profit Factor | 13.8790 |
-| Avg Win | $416.43 |
-| Avg Loss | $-124.88 |
-| Expectancy / Bar | 0.0034% |
+| Win Rate | 79.58% |
+| Profit Factor | 12.6675 |
+| Avg Win | $274.66 |
+| Avg Loss | $-84.50 |
+| Expectancy / Bar | 0.0021% |
 
 ## Per-Regime Breakdown
 | Regime | Time % | PnL Contribution | Sharpe | N Bars | Trades | Fees Paid | Turnover |
 |---|---|---|---|---|---|---|---|
-| BREAKOUT | 0.2% | $1,092.84 | 24.16 | 304 | 11 | $46.12 | $115,310.19 |
-| MEAN_REVERSION | 91.4% | $47,148.76 | 6.11 | 155,698 | 484 | $4,544.07 | $11,360,177.65 |
-| BREAKDOWN | 0.1% | $-8.28 | -24.79 | 171 | 1 | $8.28 | $20,708.27 |
-| NEUTRAL | 8.3% | $8,866.17 | 7.17 | 14,228 | 140 | $837.81 | $2,094,523.10 |
+| BREAKOUT | 0.1% | $-358.68 | -28.57 | 88 | 6 | $46.65 | $77,742.26 |
+| MEAN_REVERSION | 99.5% | $35,130.60 | 5.82 | 169,625 | 656 | $5,281.16 | $8,801,930.09 |
+| BREAKDOWN | 0.1% | $-8.28 | -24.30 | 178 | 1 | $8.28 | $13,805.51 |
+| NEUTRAL | 0.3% | $1,278.41 | 25.32 | 510 | 25 | $149.21 | $248,683.64 |
 
 ## Chop / Turnover Diagnostics
 | Metric | Value |
 |---|---|
-| Total Regime Flips | 1,567 |
-| Flips per Bar | 0.0092 |
-| Total Trades | 636 |
-| Trades per 100 Bars | 0.37 |
+| Total Regime Flips | 150 |
+| Flips per Bar | 0.0009 |
+| Total Trades | 688 |
+| Trades per 100 Bars | 0.40 |
 
 ### Regime Run-Length Histogram
 
@@ -69,40 +69,40 @@ Counts of consecutive-bar runs per regime, bucketed by run length.  Frequent sho
 
 | Regime | 1 | 2-5 | 6-20 | 21-100 | 100+ |
 |---|---|---|---|---|---|
-| MEAN_REVERSION | 1 | 21 | 78 | 220 | 453 |
-| BREAKDOWN | 0 | 0 | 4 | 0 | 1 |
-| NEUTRAL | 33 | 187 | 325 | 236 | 1 |
-| BREAKOUT | 0 | 1 | 1 | 6 | 0 |
+| MEAN_REVERSION | 1 | 3 | 2 | 4 | 58 |
+| BREAKDOWN | 0 | 0 | 3 | 0 | 1 |
+| NEUTRAL | 19 | 23 | 24 | 7 | 0 |
+| BREAKOUT | 0 | 1 | 4 | 1 | 0 |
 
 ## Monthly Returns
-Best month: 26.30%  |  Worst month: 1.17%  |  Positive months: 100.0%
+Best month: 22.39%  |  Worst month: 0.62%  |  Positive months: 100.0%
 
 | Month | Return |
 |---|---|
-| 2023-01 | 17.36% |
-| 2023-02 | 5.47% |
-| 2023-03 | 13.49% |
-| 2023-04 | 13.15% |
-| 2023-05 | 10.31% |
-| 2023-06 | 8.95% |
-| 2023-07 | 1.17% |
-| 2023-08 | 4.26% |
-| 2023-09 | 2.31% |
-| 2023-10 | 14.03% |
-| 2023-11 | 4.45% |
-| 2023-12 | 17.79% |
-| 2024-01 | 11.39% |
-| 2024-02 | 26.30% |
-| 2024-03 | 12.72% |
-| 2024-04 | 4.52% |
-| 2024-05 | 11.48% |
-| 2024-06 | 2.57% |
-| 2024-07 | 15.26% |
-| 2024-08 | 6.19% |
+| 2023-01 | 10.48% |
+| 2023-02 | 3.28% |
+| 2023-03 | 9.24% |
+| 2023-04 | 9.53% |
+| 2023-05 | 7.39% |
+| 2023-06 | 6.86% |
+| 2023-07 | 0.62% |
+| 2023-08 | 3.03% |
+| 2023-09 | 1.57% |
+| 2023-10 | 11.01% |
+| 2023-11 | 3.59% |
+| 2023-12 | 14.92% |
+| 2024-01 | 9.65% |
+| 2024-02 | 22.39% |
+| 2024-03 | 11.43% |
+| 2024-04 | 4.00% |
+| 2024-05 | 10.25% |
+| 2024-06 | 2.18% |
+| 2024-07 | 13.82% |
+| 2024-08 | 5.91% |
 
 ## Regime Timeline
 
-![Wave Regime Timeline](wave_optimise_BTCUSDT_best05_wave_timeline.png)
+![Wave Regime Timeline](wave_BTCUSDT_5m_hardened_wave_timeline.png)
 
 ## Wave Regime Accuracy
 
@@ -112,19 +112,19 @@ $$\text{Hit Rate} = \frac{|\{t \in \mathcal{D} : g(\rho_t) \cdot f_t^{(h)} > 0\}
 
 where $f_t^{(h)} = \log(c_{t+h}/c_t)$ and $\mathcal{D} = \{t : g(\rho_t) \neq 0\}$ (BREAKOUT + BREAKDOWN bars).
 
-![Regime Hit Rate vs Horizon](wave_optimise_BTCUSDT_best05_wave_hit_rate.png)
+![Regime Hit Rate vs Horizon](wave_BTCUSDT_5m_hardened_wave_hit_rate.png)
 
 ### Overall Hit Rate & IC
 | Horizon $h$ | Bars | Hit Rate | IC |
 |---|---|---|---|
-| 5min | 1 | 49.26% | -0.0110 |
-| 15min | 3 | 47.58% | -0.0093 |
-| 30min | 6 | 48.21% | -0.0046 |
-| 1h | 12 | 48.63% | -0.0014 |
-| 2h | 24 | 56.84% | 0.0080 |
-| 4h | 48 | 50.74% | 0.0089 |
+| 5min | 1 | 45.11% | -0.0173 |
+| 15min | 3 | 44.74% | -0.0179 |
+| 30min | 6 | 41.73% | -0.0137 |
+| 1h | 12 | 46.99% | -0.0107 |
+| 2h | 24 | 53.76% | 0.0022 |
+| 4h | 48 | 52.26% | 0.0097 |
 
-![Per-Regime Mean Forward Return vs Horizon](wave_optimise_BTCUSDT_best05_wave_fwd_return.png)
+![Per-Regime Mean Forward Return vs Horizon](wave_BTCUSDT_5m_hardened_wave_fwd_return.png)
 
 
 ### Per-Regime Forward Return
@@ -134,52 +134,52 @@ Mean forward log-return $\mathbb{E}[f_t^{(h)} \mid \rho_t = R]$ and regime hit r
 **Horizon $h=1$ bars (5min)**
 | Regime | $N$ | Mean $f^{(h)}$ | Median $f^{(h)}$ | Hit Rate |
 |---|---|---|---|---|
-| MEAN_REVERSION | 155697 | 0.001% | 0.000% | 0.00% |
-| BREAKOUT | 304 | 0.003% | 0.008% | 51.64% |
-| BREAKDOWN | 171 | 0.094% | 0.002% | 45.03% |
-| NEUTRAL | 14228 | 0.002% | 0.001% | 0.00% |
+| MEAN_REVERSION | 169624 | 0.001% | 0.000% | 0.00% |
+| BREAKOUT | 88 | -0.038% | -0.018% | 45.45% |
+| BREAKDOWN | 178 | 0.082% | 0.003% | 44.94% |
+| NEUTRAL | 510 | 0.010% | 0.016% | 0.00% |
 
 **Horizon $h=3$ bars (15min)**
 | Regime | $N$ | Mean $f^{(h)}$ | Median $f^{(h)}$ | Hit Rate |
 |---|---|---|---|---|
-| MEAN_REVERSION | 155695 | 0.002% | 0.001% | 0.00% |
-| BREAKOUT | 304 | 0.017% | 0.024% | 52.96% |
-| BREAKDOWN | 171 | 0.155% | 0.024% | 38.01% |
-| NEUTRAL | 14228 | 0.007% | 0.001% | 0.00% |
+| MEAN_REVERSION | 169622 | 0.002% | 0.001% | 0.00% |
+| BREAKOUT | 88 | -0.098% | 0.026% | 53.41% |
+| BREAKDOWN | 178 | 0.128% | 0.019% | 40.45% |
+| NEUTRAL | 510 | 0.044% | 0.023% | 0.00% |
 
 **Horizon $h=6$ bars (30min)**
 | Regime | $N$ | Mean $f^{(h)}$ | Median $f^{(h)}$ | Hit Rate |
 |---|---|---|---|---|
-| MEAN_REVERSION | 155692 | 0.003% | 0.002% | 0.00% |
-| BREAKOUT | 304 | 0.071% | 0.061% | 56.91% |
-| BREAKDOWN | 171 | 0.210% | 0.043% | 32.75% |
-| NEUTRAL | 14228 | 0.015% | 0.002% | 0.00% |
+| MEAN_REVERSION | 169619 | 0.004% | 0.002% | 0.00% |
+| BREAKOUT | 88 | -0.025% | 0.071% | 55.68% |
+| BREAKDOWN | 178 | 0.177% | 0.024% | 34.83% |
+| NEUTRAL | 510 | 0.058% | 0.024% | 0.00% |
 
 **Horizon $h=12$ bars (1h)**
 | Regime | $N$ | Mean $f^{(h)}$ | Median $f^{(h)}$ | Hit Rate |
 |---|---|---|---|---|
-| MEAN_REVERSION | 155686 | 0.007% | 0.004% | 0.00% |
-| BREAKOUT | 304 | 0.183% | 0.081% | 58.55% |
-| BREAKDOWN | 171 | 0.357% | 0.063% | 30.99% |
-| NEUTRAL | 14228 | 0.021% | 0.003% | 0.00% |
+| MEAN_REVERSION | 169613 | 0.008% | 0.004% | 0.00% |
+| BREAKOUT | 88 | 0.176% | 0.126% | 64.77% |
+| BREAKDOWN | 178 | 0.297% | 0.043% | 38.20% |
+| NEUTRAL | 510 | 0.106% | 0.052% | 0.00% |
 
 **Horizon $h=24$ bars (2h)**
 | Regime | $N$ | Mean $f^{(h)}$ | Median $f^{(h)}$ | Hit Rate |
 |---|---|---|---|---|
-| MEAN_REVERSION | 155674 | 0.015% | 0.010% | 0.00% |
-| BREAKOUT | 304 | 0.370% | 0.337% | 70.72% |
-| BREAKDOWN | 171 | 0.346% | 0.075% | 32.16% |
-| NEUTRAL | 14228 | 0.040% | 0.012% | 0.00% |
+| MEAN_REVERSION | 169601 | 0.017% | 0.010% | 0.00% |
+| BREAKOUT | 88 | 0.730% | 0.688% | 86.36% |
+| BREAKDOWN | 178 | 0.311% | 0.056% | 37.64% |
+| NEUTRAL | 510 | 0.247% | 0.144% | 0.00% |
 
 **Horizon $h=48$ bars (4h)**
 | Regime | $N$ | Mean $f^{(h)}$ | Median $f^{(h)}$ | Hit Rate |
 |---|---|---|---|---|
-| MEAN_REVERSION | 155665 | 0.032% | 0.016% | 0.00% |
-| BREAKOUT | 304 | 0.492% | 0.335% | 64.14% |
-| BREAKDOWN | 171 | 0.377% | 0.134% | 26.90% |
-| NEUTRAL | 14213 | 0.074% | 0.022% | 0.00% |
+| MEAN_REVERSION | 169577 | 0.035% | 0.016% | 0.00% |
+| BREAKOUT | 88 | 1.415% | 1.866% | 88.64% |
+| BREAKDOWN | 178 | 0.348% | 0.118% | 34.27% |
+| NEUTRAL | 510 | 0.219% | 0.185% | 0.00% |
 
-![Regime Transition Matrix](wave_optimise_BTCUSDT_best05_wave_transition.png)
+![Regime Transition Matrix](wave_BTCUSDT_5m_hardened_wave_transition.png)
 
 ### Regime Transition Matrix
 
@@ -187,10 +187,10 @@ Row-normalised probabilities $T_{ij} = P(\rho_{t+1}=j \mid \rho_t=i)$:
 
 | From \ To | MEAN_REVERSION | BREAKOUT | BREAKDOWN | NEUTRAL |
 |---|---|---|---|---|
-| MEAN_REVERSION | 0.995 | 0.000 | 0.000 | 0.005 |
-| BREAKOUT | 0.000 | 0.974 | 0.000 | 0.026 |
-| BREAKDOWN | 0.000 | 0.000 | 0.971 | 0.029 |
-| NEUTRAL | 0.054 | 0.000 | 0.000 | 0.945 |
+| MEAN_REVERSION | 1.000 | 0.000 | 0.000 | 0.000 |
+| BREAKOUT | 0.000 | 0.932 | 0.000 | 0.068 |
+| BREAKDOWN | 0.000 | 0.000 | 0.978 | 0.022 |
+| NEUTRAL | 0.131 | 0.010 | 0.002 | 0.857 |
 
 ### Regime Stability
 
@@ -198,12 +198,12 @@ Mean consecutive-bar run length per regime ($\approx 1/(1-T_{ii})$ from transiti
 
 | Regime | Mean Run (bars) |
 |---|---|
-| MEAN_REVERSION | 201.4 |
-| BREAKOUT | 38.0 |
-| BREAKDOWN | 34.2 |
-| NEUTRAL | 18.2 |
+| MEAN_REVERSION | 2494.5 |
+| BREAKOUT | 14.7 |
+| BREAKDOWN | 44.5 |
+| NEUTRAL | 7.0 |
 
-![Regime × Tide Bias Confusion](wave_optimise_BTCUSDT_best05_wave_confusion.png)
+![Regime × Tide Bias Confusion](wave_BTCUSDT_5m_hardened_wave_confusion.png)
 
 ### Regime × Tide Bias Confusion
 
@@ -211,10 +211,10 @@ Mean forward log-return at $h=1$ for each $(\rho_t, b_t)$ combination (stacked m
 
 | Wave Regime \ Tide Bias | LONG | NEUTRAL | SHORT |
 |---|---|---|---|
-| BREAKDOWN | 0.000% | 0.050% | 0.392% |
-| BREAKOUT | 0.005% | -0.002% | 0.000% |
-| MEAN_REVERSION | 0.012% | 0.000% | -0.015% |
-| NEUTRAL | 0.025% | -0.001% | -0.020% |
+| BREAKDOWN | 0.000% | 0.037% | 0.386% |
+| BREAKOUT | -0.044% | -0.000% | 0.000% |
+| MEAN_REVERSION | 0.014% | 0.000% | -0.016% |
+| NEUTRAL | 0.043% | -0.002% | -0.041% |
 
 ## Parameters
 | Parameter | Value |
@@ -231,22 +231,22 @@ Mean forward log-return at $h=1$ for each $(\rho_t, b_t)$ combination (stacked m
 | taker_fee_bps | 4.0 |
 | eta_window | 29 |
 | vwap_window | 8 |
-| disp_window | 77 |
+| disp_window | 37 |
 | ar_window | 34 |
-| disp_scale | 0.056 |
-| eta_mr_threshold | 0.21 |
-| eta_bo_threshold | 0.61 |
-| eta_neutral_threshold | 0.3 |
-| dispersion_threshold | 1.028 |
-| dispersion_critical | 1.263 |
-| ar_critical | 0.62 |
-| ar_recover | 0.48 |
-| reduced_size_fraction | 0.9 |
+| disp_scale | 0.099 |
+| eta_mr_threshold | 0.43 |
+| eta_bo_threshold | 0.63 |
+| eta_neutral_threshold | 0.49 |
+| dispersion_threshold | 1.288 |
+| dispersion_critical | 3.0 |
+| ar_critical | 0.6 |
+| ar_recover | 0.41 |
+| reduced_size_fraction | 0.6 |
 | update_interval_ms | 0 |
 | accuracy_horizons | [1, 3, 6, 12, 24, 48] |
 | bar_seconds | 300.0 |
-| liquidation_equity_frac | 0.0 |
-| slippage_bps | 0.0 |
+| liquidation_equity_frac | 0.5 |
+| slippage_bps | 2.0 |
 | slippage_per_unit_bps | 0.0 |
 
 ---

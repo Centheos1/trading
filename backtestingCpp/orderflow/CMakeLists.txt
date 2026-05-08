@@ -28,7 +28,6 @@ set(ORDERFLOW_SOURCES
     FootprintChart.cpp
     SignalEngine.cpp
     OrderFlowEngine.cpp
-    BinanceWsFeed.cpp
     TickStore.cpp
     ReplayFeed.cpp
     ripple/RippleContext.cpp
@@ -57,7 +56,6 @@ set(ORDERFLOW_HEADERS
     FootprintChart.h
     SignalEngine.h
     OrderFlowEngine.h
-    BinanceWsFeed.h
     TickStore.h
     ReplayFeed.h
     ripple/RippleTypes.h

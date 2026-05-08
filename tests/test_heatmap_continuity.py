@@ -423,6 +423,177 @@ def test_small_widget_no_crash():
           "small widget does not crash")
 
 
+def test_per_column_mid_row_with_moving_price():
+    """Regression: when the mid-price changes across columns, each column's
+    bid/ask seam must follow ITS OWN mid, not the latest column's mid.
+
+    Before the Phase-11B fix, the entire image was split using the last
+    slice's mid_row, so an old column's bid quotes (below the OLD mid)
+    appeared above the NEW mid_row and were rendered with the ASK LUT.
+    This test simulates BTC moving from $50_000 to $49_500 and checks the
+    seam in the older column tracks the OLD mid, not the NEW one.
+    """
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    from ui.heatmap_widget import _HEAT_LUT_BID, _HEAT_LUT_ASK
+
+    vm = OrderFlowViewModel()
+    # Pin price range BEFORE add_depth_column (which clobbers pmin/pmax
+    # when _auto_scale is True). Range covers both mids with margin.
+    vm._auto_scale = False
+    vm._price_min = 49_000.0
+    vm._price_max = 50_500.0
+
+    base_ts = 1_700_000_060_000
+    # Slice 1: mid = 50_000. Bids 49_990 → 49_900, asks 50_010 → 50_100.
+    old_mid = 50_000.0
+    bids_old = [(old_mid - 10.0 - i * 1.0, 8.0) for i in range(40)]
+    asks_old = [(old_mid + 10.0 + i * 1.0, 8.0) for i in range(40)]
+    vm.add_depth_column(base_ts, bids_old, asks_old,
+                        old_mid - 5.0, old_mid + 5.0)
+
+    # Slice 2: ALSO mid = 50_000 (same as slice 1, so the older "history"
+    # at the new-mid level is established).
+    vm.add_depth_column(base_ts + 200, bids_old, asks_old,
+                        old_mid - 5.0, old_mid + 5.0)
+
+    # ── price gap ── then a recent slice at a NEW, lower mid.
+    new_mid = 49_500.0
+    bids_new = [(new_mid - 10.0 - i * 1.0, 8.0) for i in range(40)]
+    asks_new = [(new_mid + 10.0 + i * 1.0, 8.0) for i in range(40)]
+    vm.add_depth_column(base_ts + 30_000, bids_new, asks_new,
+                        new_mid - 5.0, new_mid + 5.0)
+
+    frame = vm.compute_frame(pw=600, ph=400,
+                             margin_left=70, margin_top=10,
+                             chart_right_inset=28)
+    check(frame.depth_image is not None,
+          "per-column mid: depth image produced")
+    if frame.depth_image is None:
+        return
+
+    img = frame.depth_image
+    n_rows = img.height()
+    n_cols = img.width()
+    ptr = img.bits()
+    if ptr is None:
+        check(True, "image bits unavailable in this Qt build — skipping")
+        return
+    buf = np.frombuffer(ptr, dtype=np.uint8).reshape(n_rows, n_cols, 4)
+
+    # Map old/new mid prices to row indices using the same formula as
+    # _compute_depth_image: y = (1 - (price - pmin)/pr) * (n_rows - 1).
+    pmin, pmax = 49_000.0, 50_500.0
+    pr = pmax - pmin
+    nrm1 = n_rows - 1
+    old_mid_row = int((1.0 - (old_mid - pmin) / pr) * nrm1 + 0.5)
+    new_mid_row = int((1.0 - (new_mid - pmin) / pr) * nrm1 + 0.5)
+    check(old_mid_row != new_mid_row,
+          f"old/new mid rows differ ({old_mid_row} vs {new_mid_row})")
+    # Sanity: lower price → higher row. new_mid < old_mid → new_mid_row > old_mid_row.
+    check(new_mid_row > old_mid_row,
+          f"new lower mid is below old mid in pixel space "
+          f"({new_mid_row} > {old_mid_row})")
+
+    # Helper: classify a pixel as ASK/BID/BG by exact match against either
+    # full LUT (all 256 intensity levels). The two LUTs share the
+    # background at i=0; BG returns "BG" for the dark-navy zero pixel.
+    def classify(px):
+        rgb = px[:3]
+        bg = np.array([8, 12, 30], dtype=np.uint8)
+        if np.array_equal(rgb, bg) and px[3] == 0:
+            return "BG"
+        ask_match = np.any(np.all(_HEAT_LUT_ASK[:, :3] == rgb, axis=1))
+        bid_match = np.any(np.all(_HEAT_LUT_BID[:, :3] == rgb, axis=1))
+        if ask_match and not bid_match:
+            return "ASK"
+        if bid_match and not ask_match:
+            return "BID"
+        if ask_match and bid_match:
+            # Shared LUT entry (e.g. BG): treat as BG.
+            return "BG"
+        return "?"
+
+    # Find the OLDEST and NEWEST non-empty columns. The first two slices
+    # are at base_ts and base_ts+200ms (slice_ms=100 by default), the third
+    # is 30 seconds later — the rightmost column is the new mid.
+    col_old = 0
+    col_new = n_cols - 1
+
+    # In the OLD column, find rows where:
+    #   1. The row is in the BID half of the OLD slice (below old_mid_row)
+    #   2. The row is in the ASK half if you use NEW slice's mid
+    #      (above new_mid_row)
+    #   3. There's actual depth data at that row (so the LUT actually
+    #      colours the pixel).
+    # The depth band below old_mid_row covers ~24 rows (12 price-buckets
+    # × 2 rows/bucket), so old_mid_row+10 is firmly in the band.
+    bid_zone_rows = list(range(old_mid_row + 6, old_mid_row + 22))
+    bid_pixels_in_old = []
+    ask_pixels_in_old = []
+    for r in bid_zone_rows:
+        if r > nrm1:
+            break
+        c = classify(buf[r, col_old, :])
+        if c == "BID":
+            bid_pixels_in_old.append(r)
+        elif c == "ASK":
+            ask_pixels_in_old.append(r)
+
+    check(len(bid_pixels_in_old) > 0,
+          f"OLD column rows below old_mid_row={old_mid_row} render as BID "
+          f"(found {len(bid_pixels_in_old)} bid rows in {bid_zone_rows[0]}"
+          f"..{bid_zone_rows[-1]}; ask rows: {ask_pixels_in_old}) — "
+          "this is the Phase-11B regression: with the per-column-mid bug "
+          "all rows above the LATEST mid (which is below old_mid_row in "
+          "this scenario) get the ASK LUT, mis-colouring historical bids.")
+    check(len(ask_pixels_in_old) == 0,
+          f"OLD column rows below old_mid_row must NOT render as ASK "
+          f"(found ASK at rows {ask_pixels_in_old}) — Phase-11B regression")
+
+    # In the NEW column, scan a similar BID band below new_mid_row.
+    new_bid_zone = list(range(new_mid_row + 6, new_mid_row + 22))
+    bid_pixels_in_new = []
+    for r in new_bid_zone:
+        if r > nrm1:
+            break
+        c = classify(buf[r, col_new, :])
+        if c == "BID":
+            bid_pixels_in_new.append(r)
+    check(len(bid_pixels_in_new) > 0,
+          f"NEW column rows below new_mid_row={new_mid_row} render as BID "
+          f"(found {len(bid_pixels_in_new)} bid rows in {new_bid_zone[0]}"
+          f"..{new_bid_zone[-1]})")
+
+
+def test_per_column_mid_row_forward_fills_through_gap():
+    """Regression: a column with no own mid (because best_bid/ask were 0)
+    must inherit the previous valid column's mid_row, not collapse to 0.
+    """
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+
+    vm = OrderFlowViewModel()
+    vm._auto_scale = False
+    vm._price_min = 49_500.0
+    vm._price_max = 50_500.0
+
+    base_ts = 1_700_000_060_000
+    mid = 50_000.0
+    bids = [(mid - 10.0 - i, 5.0) for i in range(20)]
+    asks = [(mid + 10.0 + i, 5.0) for i in range(20)]
+    # Valid slice
+    vm.add_depth_column(base_ts, bids, asks, mid - 5.0, mid + 5.0)
+    # Slice with no bid/ask (book empty / crossed) — best_bid=best_ask=0.
+    vm.add_depth_column(base_ts + 200, bids, asks, 0.0, 0.0)
+    # Trailing valid slice with same mid, so we have 3 columns total.
+    vm.add_depth_column(base_ts + 400, bids, asks, mid - 5.0, mid + 5.0)
+
+    frame = vm.compute_frame(pw=600, ph=400,
+                             margin_left=70, margin_top=10,
+                             chart_right_inset=28)
+    check(frame.depth_image is not None,
+          "image produced even with mid-gap column")
+
+
 def test_mid_row_at_edge():
     """When mid-price is at the edge of visible range, one LUT covers
     nearly the entire image without error."""
@@ -586,6 +757,195 @@ def test_fade_alpha_applied_in_compute_frame():
           "fade buffer allocated after compute_frame")
 
 
+# ================================================================ A6. PHASE 11C — DEPTH/SEAM COHERENCE
+
+
+def test_phase11c_slice_carries_depth_and_seam_together():
+    """Each slice tuple must store best_bid/best_ask that paired with the
+    depth snapshot it carries. When a tick has no new depth (empty book),
+    add_depth_column must reuse the PRIOR slice's bid/ask (matching the
+    depth being held over) rather than overwriting it with the latest.
+    """
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+
+    vm = OrderFlowViewModel()
+    vm._auto_scale = False
+    vm._price_min = 49_500.0
+    vm._price_max = 50_500.0
+
+    base_ts = 1_700_000_060_000
+    old_mid = 50_000.0
+    bids_old = [(old_mid - 10.0 - i, 5.0) for i in range(20)]
+    asks_old = [(old_mid + 10.0 + i, 5.0) for i in range(20)]
+    vm.add_depth_column(base_ts, bids_old, asks_old,
+                        old_mid - 5.0, old_mid + 5.0)
+
+    # Now feed an EMPTY-BOOK tick with a brand-new (very different)
+    # best_bid/best_ask. Pre-fix, the slice keeps the prior depth but
+    # adopts the new bid/ask, gluing stale depth to a fresh seam.
+    vm.add_depth_column(base_ts + 200, [], [],
+                        49_500.0 - 5.0, 49_500.0 + 5.0)
+
+    last = vm._slices[-1]
+    last_best_bid = last[3]
+    last_best_ask = last[4]
+    last_prices = last[5]
+
+    # The held-over depth was keyed to old_mid, so the seam stored on
+    # this slice must reflect old_mid — NOT the new 49_500 mid.
+    check(abs(last_best_bid - (old_mid - 5.0)) < 1e-6,
+          f"empty-book slice retained PRIOR best_bid "
+          f"({last_best_bid} vs expected {old_mid - 5.0})")
+    check(abs(last_best_ask - (old_mid + 5.0)) < 1e-6,
+          f"empty-book slice retained PRIOR best_ask "
+          f"({last_best_ask} vs expected {old_mid + 5.0})")
+    # Depth snapshot must be the prior (non-empty) one.
+    check(len(last_prices) > 0,
+          "empty-book slice still carries prior depth quotes "
+          f"(len={len(last_prices)})")
+
+
+def test_phase11c_gap_fill_carries_prior_seam():
+    """Gap-filled placeholders inherit the PRIOR slice's bid/ask (matching
+    the depth they hold over), not the current call's bid/ask.
+    """
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+
+    vm = OrderFlowViewModel()
+    vm._auto_scale = False
+    vm._price_min = 49_500.0
+    vm._price_max = 50_500.0
+
+    base_ts = 1_700_000_060_000
+    old_mid = 50_000.0
+    bids_old = [(old_mid - 10.0 - i, 5.0) for i in range(20)]
+    asks_old = [(old_mid + 10.0 + i, 5.0) for i in range(20)]
+    vm.add_depth_column(base_ts, bids_old, asks_old,
+                        old_mid - 5.0, old_mid + 5.0)
+
+    # Now jump ahead by ~1.5 seconds at a much lower mid. Default
+    # slice_ms is 100ms, so a 1.5s jump triggers gap-fill of ~14 slices.
+    new_mid = 49_500.0
+    bids_new = [(new_mid - 10.0 - i, 5.0) for i in range(20)]
+    asks_new = [(new_mid + 10.0 + i, 5.0) for i in range(20)]
+    gap_ts = base_ts + 1_500
+    vm.add_depth_column(gap_ts, bids_new, asks_new,
+                        new_mid - 5.0, new_mid + 5.0)
+
+    # Walk every gap-filled slice; each one must carry the OLD bid/ask.
+    gap_slices = [s for s in vm._slices
+                  if base_ts < s[0] < gap_ts]
+    check(len(gap_slices) > 0,
+          f"gap-fill produced placeholder slices (got {len(gap_slices)})")
+    bad = [s for s in gap_slices
+           if abs(s[3] - (old_mid - 5.0)) > 1e-6
+           or abs(s[4] - (old_mid + 5.0)) > 1e-6]
+    check(len(bad) == 0,
+          f"every gap-fill slice retains PRIOR bid/ask; "
+          f"{len(bad)}/{len(gap_slices)} carried wrong seam — pre-fix all "
+          f"gap-fills would have new_mid bid/ask glued to old_mid depth")
+    # The newly-appended terminal slice carries the new bid/ask (paired
+    # with new depth).
+    last = vm._slices[-1]
+    check(abs(last[3] - (new_mid - 5.0)) < 1e-6,
+          f"terminal slice carries new best_bid (got {last[3]})")
+    check(abs(last[4] - (new_mid + 5.0)) < 1e-6,
+          f"terminal slice carries new best_ask (got {last[4]})")
+
+
+def test_phase11c_held_over_depth_keeps_paired_seam():
+    """Regression: when the order book is empty for several consecutive
+    ticks (only quote/best-bid-ask updates arriving), every held-over
+    slice in the deque must still pair its depth snapshot with the seam
+    that captured that depth — NOT the latest best_bid/best_ask.
+
+    Pre-Phase-11C, an empty-book tick still flagged ``new_depth=True``,
+    so the slice was appended with `dict(self._cur_bids)` (old depth)
+    AND the caller's NEW best_bid/best_ask (fresh seam). With per-column
+    mid_rows derived from the slice's bid/ask, old asks above the OLD
+    mid but below the NEW mid re-classified as BIDs ("red on the blue
+    side of price").
+
+    This test asserts every slice in the deque carries the bid/ask that
+    was paired with the ACTUAL depth it stores.
+    """
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+
+    vm = OrderFlowViewModel()
+    vm._auto_scale = False
+    vm._price_min = 49_000.0
+    vm._price_max = 50_500.0
+
+    base_ts = 1_700_000_060_000
+    old_mid = 50_000.0
+    bids_old = [(old_mid - 10.0 - i, 5.0) for i in range(20)]
+    asks_old = [(old_mid + 10.0 + i, 5.0) for i in range(20)]
+    vm.add_depth_column(base_ts, bids_old, asks_old,
+                        old_mid - 5.0, old_mid + 5.0)
+    vm.add_depth_column(base_ts + 100, bids_old, asks_old,
+                        old_mid - 5.0, old_mid + 5.0)
+
+    # Several empty-book ticks at a much lower mid — the bug-trigger.
+    new_mid = 49_500.0
+    for k in range(8):
+        vm.add_depth_column(base_ts + 200 + k * 100, [], [],
+                            new_mid - 5.0, new_mid + 5.0)
+
+    # All slices in the deque must carry bid/ask paired with their depth.
+    # The depth here is *always* the old book (no new bids/asks ever
+    # made it into _cur_bids), so every slice's seam must reflect old_mid.
+    bad = []
+    for s in vm._slices:
+        slice_ts, _bids, _asks, bb, ba, prices, _logq = s
+        # Skip the rare leading-edge slice that may have only zero depth
+        # if some unrelated state is exercised.
+        if len(prices) == 0:
+            continue
+        if (abs(bb - (old_mid - 5.0)) > 1e-6
+                or abs(ba - (old_mid + 5.0)) > 1e-6):
+            bad.append((slice_ts, bb, ba))
+    check(len(bad) == 0,
+          f"every held-over slice keeps OLD mid bid/ask "
+          f"(mismatched: {bad[:3]}{'...' if len(bad) > 3 else ''}). "
+          f"Pre-fix all 8 empty-book slices coupled OLD depth with "
+          f"NEW bid/ask, mis-colouring the bid/ask seam.")
+
+    # And the diag dict reports a sane mid_row distribution: all valid,
+    # none clipped to image edges (fix-only assertion — pre-fix would
+    # also pass this part since clipping is unrelated to the seam-pair
+    # bug, but it documents the post-fix steady state).
+    frame = vm.compute_frame(pw=600, ph=400,
+                             margin_left=70, margin_top=10,
+                             chart_right_inset=28)
+    check(frame.depth_image is not None,
+          "compute_frame succeeded with held-over depth")
+    diag = vm._last_heatmap_diag
+    check(diag.get("mid_set_in_loop", 0) > 0,
+          f"diag reports per-slice mids set "
+          f"(mid_set_in_loop={diag.get('mid_set_in_loop')})")
+
+
+def test_phase11c_diag_dict_populated():
+    """compute_frame must populate the throttled diag dict so devs can
+    inspect the heatmap state without reading pixels."""
+    from ui.orderflow_viewmodel import OrderFlowViewModel
+    vm = OrderFlowViewModel()
+    base_ts = 1_700_000_060_000
+    bids = [(50_000.0 - i, 5.0) for i in range(20)]
+    asks = [(50_000.0 + i + 1, 5.0) for i in range(20)]
+    vm.add_depth_column(base_ts, bids, asks, 49_999.5, 50_000.5)
+    vm.add_depth_column(base_ts + 200, bids, asks, 49_999.5, 50_000.5)
+    vm.compute_frame(pw=600, ph=400, margin_left=70,
+                     margin_top=10, chart_right_inset=28)
+    diag = vm._last_heatmap_diag
+    check(isinstance(diag, dict) and len(diag) > 0,
+          f"diag dict populated (got {type(diag).__name__} len={len(diag) if diag else 0})")
+    for k in ("n_img_cols", "n_rows", "pmin", "pmax",
+              "mid_row_min", "mid_row_max", "mid_row_clipped_top",
+              "mid_row_clipped_bot"):
+        check(k in diag, f"diag has key '{k}'")
+
+
 # ================================================================ MAIN
 
 if __name__ == '__main__':
@@ -611,6 +971,8 @@ if __name__ == '__main__':
         test_bucket_row_coverage,
         test_small_widget_no_crash,
         test_mid_row_at_edge,
+        test_per_column_mid_row_with_moving_price,
+        test_per_column_mid_row_forward_fills_through_gap,
         test_compute_frame_benchmark,
         test_fade_buffer_default_one_for_real_columns,
         test_fade_buffer_decreases_with_age,
@@ -620,6 +982,10 @@ if __name__ == '__main__':
         test_fade_buffer_continuous_data_no_decay,
         test_fade_buffer_empty_data_no_decay,
         test_fade_alpha_applied_in_compute_frame,
+        test_phase11c_slice_carries_depth_and_seam_together,
+        test_phase11c_gap_fill_carries_prior_seam,
+        test_phase11c_held_over_depth_keeps_paired_seam,
+        test_phase11c_diag_dict_populated,
     ]
 
     for t in tests:

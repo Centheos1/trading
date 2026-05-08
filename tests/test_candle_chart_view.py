@@ -44,7 +44,8 @@ def test_construction():
     v = CandleChartView(ms)
     check(v._ms is ms, "market state reference stored")
     check(v._auto_scale is True, "auto-scale on by default")
-    check(len(v._overlays) == 0, "no overlays initially")
+    # CandleChartView pre-registers default overlays (SMA/EMA/VWAP/structural/VP)
+    check(len(v._overlays) >= 1, "default overlays installed")
     check(v._bucket_ms == 60_000, "default bucket 1m")
     check(len(v._candles) == 0, "no candles initially")
 
@@ -169,8 +170,9 @@ def test_overlay_registration():
     def my_overlay(painter, px, py, pw, ph, pmin, pmax, visible):
         overlay_called[0] = True
 
+    initial_count = len(v._overlays)
     v.register_overlay(my_overlay)
-    check(len(v._overlays) == 1, "overlay registered")
+    check(len(v._overlays) == initial_count + 1, "overlay registered (appended)")
 
     from PySide6.QtGui import QPixmap
     pixmap = QPixmap(800, 600)

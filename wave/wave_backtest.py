@@ -135,6 +135,20 @@ class WaveStrategyParams:
     use_taker_fees: bool = True
     rebalance_threshold: float = 0.0
 
+    # ── Backtest hardening (Phase 9) ──────────────────────────────────────
+    # Equity floor as a fraction of initial_capital.  When > 0 and equity
+    # drops to or below initial_capital * liquidation_equity_frac the
+    # backtester forces position to 0 and stops rebalancing for the rest of
+    # the run (mirrors a real margin-call / liquidation event).  Default 0.0
+    # disables the floor and preserves V1 behaviour.
+    liquidation_equity_frac: float = 0.0
+    # Linear slippage in basis points charged on |delta| * px alongside fees.
+    # Use ~1-2 bps for liquid majors as a starting point.  Default 0.0.
+    slippage_bps: float = 0.0
+    # Quadratic / market-impact term: extra bps per unit of |delta| relative
+    # to max_position_base.  Default 0.0 disables the term.
+    slippage_per_unit_bps: float = 0.0
+
     # ── Run metadata ──────────────────────────────────────────────────────
     symbol: str = "BTCUSDT"
     exchange: str = "binance"
@@ -151,10 +165,42 @@ class WaveStrategyParams:
     # Use horizon_labels() to get human-readable strings.
     accuracy_horizons: tuple[int, ...] = (1, 3, 6, 12, 24, 48)
 
-    def with_timeframe(self, tf: str) -> "WaveStrategyParams":
+    def with_timeframe(
+        self,
+        tf: str,
+        *,
+        rescale_windows: bool = False,
+    ) -> "WaveStrategyParams":
+        """Return a copy with the timeframe (and bar_seconds) swapped.
+
+        When ``rescale_windows`` is True, the feature-window lengths
+        (``eta_window``, ``vwap_window``, ``structure_window``,
+        ``disp_window``, ``ar_window``) are rescaled so their wall-clock
+        coverage stays constant.  Without this flag a parameter set tuned
+        for 1h bars sees windows ~12x narrower (in wall-clock terms) when
+        applied at 5m, which produces materially different feature
+        distributions and breaks the threshold calibration.
+
+        Default ``rescale_windows=False`` preserves V1 behaviour for
+        existing tests / pre-existing optimised parameter sets.
+        """
         if tf not in _TF_SECONDS:
             raise ValueError(f"unknown timeframe '{tf}'")
-        return replace(self, timeframe=tf, bar_seconds=_TF_SECONDS[tf])
+        new_bar_s = _TF_SECONDS[tf]
+        if not rescale_windows or self.bar_seconds == new_bar_s:
+            return replace(self, timeframe=tf, bar_seconds=new_bar_s)
+        # Rescale by the wall-clock ratio.  E.g. 1h -> 5m: 3600/300 = 12x.
+        ratio = self.bar_seconds / new_bar_s
+        return replace(
+            self,
+            timeframe=tf,
+            bar_seconds=new_bar_s,
+            eta_window=max(4, int(round(self.eta_window * ratio))),
+            vwap_window=max(4, int(round(self.vwap_window * ratio))),
+            structure_window=max(4, int(round(self.structure_window * ratio))),
+            disp_window=max(4, int(round(self.disp_window * ratio))),
+            ar_window=max(4, int(round(self.ar_window * ratio))),
+        )
 
     def horizon_labels(self) -> list[str]:
         """Return human-readable time labels for each accuracy horizon."""
@@ -222,6 +268,10 @@ class WaveBacktestResult:
     initial_capital: float
     final_equity: float
     mode: str
+    # Bar index at which the liquidation floor was breached, or None if
+    # liquidation never triggered.  Always None when
+    # params.liquidation_equity_frac == 0.
+    liquidated_at_bar: Optional[int] = None
 
     @property
     def equity_curve(self) -> pd.Series:
@@ -397,6 +447,17 @@ class WaveBacktester:
         cur_equity = float(p.initial_capital)
         fee_rate = (p.taker_fee_bps if p.use_taker_fees else p.maker_fee_bps) / 10_000.0
         trade_records: list[dict] = []
+        # Phase 9: backtest hardening — liquidation floor and slippage.
+        liq_threshold = (
+            float(p.initial_capital) * float(p.liquidation_equity_frac)
+            if p.liquidation_equity_frac > 0.0 else None
+        )
+        liquidated_at: Optional[int] = None
+        slip_bps = float(p.slippage_bps)
+        slip_per_unit_bps = float(p.slippage_per_unit_bps)
+        # Avoid div-by-zero in market-impact term; default to 1.0 if a
+        # non-base sizing config left max_position_base at 0.
+        max_pos_base_safe = float(p.max_position_base) if p.max_position_base > 0 else 1.0
 
         for i in range(n):
             ts = int(ts_ms[i])
@@ -450,6 +511,9 @@ class WaveBacktester:
                 )
                 tgt = tgt_notional / px if px > 0.0 else 0.0
 
+            # Once liquidated, force position to 0 for the rest of the run.
+            if liquidated_at is not None:
+                tgt = 0.0
             target_units[i] = tgt
 
             # ── Rebalance ─────────────────────────────────────────────
@@ -459,8 +523,19 @@ class WaveBacktester:
             else:
                 min_delta = abs(p.rebalance_threshold) * cur_equity / px if px > 0.0 else 0.0
 
+            # After liquidation we still allow the single forced flatten
+            # (delta = -cur_units) to clear residual exposure, but never
+            # take new positions.
             if abs(delta) > min_delta and abs(delta) > 0.0:
                 bar_fee = abs(delta) * px * fee_rate
+                # Phase 9 slippage: linear bps on notional plus an optional
+                # quadratic market-impact term proportional to |delta| /
+                # max_position_base.
+                if slip_bps > 0.0 or slip_per_unit_bps > 0.0:
+                    impact_bps = slip_bps + slip_per_unit_bps * (
+                        abs(delta) / max_pos_base_safe
+                    )
+                    bar_fee += abs(delta) * px * impact_bps / 10_000.0
                 old_units = cur_units
                 cur_units = tgt
                 fee_arr[i] = bar_fee
@@ -489,6 +564,15 @@ class WaveBacktester:
             cur_equity += net_pnl[i]
             equity_arr[i] = cur_equity
             bar_return[i] = net_pnl[i] / p.initial_capital
+
+            # ── Liquidation check ──────────────────────────────────────
+            # Trigger once the running equity drops to or below the floor.
+            # This sets a flag; on the *next* bar `tgt` is forced to 0 so
+            # the position is flattened with one final rebalance (which
+            # still pays fees / slippage — realistic for a liquidation).
+            if liq_threshold is not None and liquidated_at is None:
+                if cur_equity <= liq_threshold:
+                    liquidated_at = i
 
         # ── Drawdown ──────────────────────────────────────────────────
         equity_s = pd.Series(equity_arr, index=feats.index)
@@ -523,4 +607,5 @@ class WaveBacktester:
             initial_capital=p.initial_capital,
             final_equity=float(cur_equity),
             mode=p.mode,
+            liquidated_at_bar=liquidated_at,
         )

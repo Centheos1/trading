@@ -206,8 +206,14 @@ class TestRegimeStateMachine(unittest.TestCase):
         self.assertEqual(e.regime, WaveRegime.BREAKOUT)
 
     def test_neutral_to_breakdown_via_ar(self):
-        e = self._make_engine(ar_critical=0.85)
+        # Engine contract (wave_engine.py:_classify_regime): BREAKDOWN
+        # via the AR pathway requires extreme_stress = (ar > ar_critical
+        # AND d > dispersion_threshold). AR alone is not sufficient
+        # because AR can sit ~0.9 in normal markets — see the docstring
+        # warning about "orderly bull runs". Set both.
+        e = self._make_engine(ar_critical=0.85, dispersion_threshold=0.02)
         e.set_absorption_ratio(0.90)
+        e.set_dispersion(0.03)
         e.update(1000)
         self.assertEqual(e.regime, WaveRegime.BREAKDOWN)
 
@@ -219,21 +225,31 @@ class TestRegimeStateMachine(unittest.TestCase):
 
     def test_breakdown_recovery(self):
         e = self._make_engine(ar_critical=0.85, ar_recover=0.70, dispersion_threshold=0.02)
+        # Multi-factor stress required to enter BREAKDOWN.
         e.set_absorption_ratio(0.90)
+        e.set_dispersion(0.03)
         e.update(1000)
         self.assertEqual(e.regime, WaveRegime.BREAKDOWN)
-        # Recover: AR below recover, D below threshold
+        # Recover: AR below recover AND D below threshold (BREAKDOWN exit
+        # rule, wave_engine.py:441).
         e.set_absorption_ratio(0.65)
         e.set_dispersion(0.01)
         e.update(6000)
         self.assertEqual(e.regime, WaveRegime.NEUTRAL)
 
     def test_breakdown_stays_if_ar_still_high(self):
-        e = self._make_engine(ar_critical=0.85, ar_recover=0.70)
+        e = self._make_engine(ar_critical=0.85, ar_recover=0.70,
+                              dispersion_threshold=0.02)
+        # Enter BREAKDOWN with both AR and dispersion elevated.
         e.set_absorption_ratio(0.90)
+        e.set_dispersion(0.03)
         e.update(1000)
         self.assertEqual(e.regime, WaveRegime.BREAKDOWN)
-        e.set_absorption_ratio(0.75)  # above ar_recover
+        # AR drops below ar_recover threshold but dispersion stays
+        # elevated → BREAKDOWN exit predicate (wave_engine.py:441) is
+        # NOT satisfied, so we stay in BREAKDOWN.
+        e.set_absorption_ratio(0.75)
+        e.set_dispersion(0.03)
         e.update(6000)
         self.assertEqual(e.regime, WaveRegime.BREAKDOWN)
 
@@ -303,16 +319,18 @@ class TestRegimeStateMachine(unittest.TestCase):
         self.assertEqual(e.regime, WaveRegime.NEUTRAL)
 
     def test_breakout_to_breakdown(self):
-        e = self._make_engine(ar_critical=0.85)
-        # Get to BREAKOUT
+        e = self._make_engine(ar_critical=0.85, dispersion_threshold=0.02)
         ts = 1000
         for i in range(30):
             e.on_price(100.0 + i * 1.0, ts)
             ts += 2000
         e.update(ts)
         self.assertEqual(e.regime, WaveRegime.BREAKOUT)
-        # AR spike → BREAKDOWN
+        # AR + dispersion spike together → extreme_stress fires → BREAKDOWN.
+        # AR alone is insufficient (engine docstring: "BOTH AR and
+        # dispersion must be elevated").
         e.set_absorption_ratio(0.90)
+        e.set_dispersion(0.03)
         e.update(ts + 5000)
         self.assertEqual(e.regime, WaveRegime.BREAKDOWN)
 
@@ -325,7 +343,9 @@ class TestRegimeStateMachine(unittest.TestCase):
             ts += 2000
         e.update(ts)
         self.assertEqual(e.regime, WaveRegime.MEAN_REVERSION)
+        # Multi-factor stress required.
         e.set_absorption_ratio(0.90)
+        e.set_dispersion(0.03)
         e.update(ts + 5000)
         self.assertEqual(e.regime, WaveRegime.BREAKDOWN)
 
@@ -535,8 +555,12 @@ class TestBoundaryEdgeCases(unittest.TestCase):
         self.assertNotEqual(e.regime, WaveRegime.BREAKDOWN)
 
     def test_ar_just_above_critical(self):
-        e = WaveEngine(WaveConfig(ar_critical=0.85))
+        # AR just above critical AND dispersion just above threshold →
+        # extreme_stress fires → BREAKDOWN. AR-alone-with-zero-dispersion
+        # would NOT trigger BREAKDOWN by design.
+        e = WaveEngine(WaveConfig(ar_critical=0.85, dispersion_threshold=0.02))
         e.set_absorption_ratio(0.851)
+        e.set_dispersion(0.021)
         e.update(1000)
         self.assertEqual(e.regime, WaveRegime.BREAKDOWN)
 

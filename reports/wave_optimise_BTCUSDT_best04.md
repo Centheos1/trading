@@ -48,12 +48,31 @@
 | Expectancy / Bar | 0.0033% |
 
 ## Per-Regime Breakdown
-| Regime | Time % | PnL Contribution | Sharpe | N Bars |
-|---|---|---|---|---|
-| BREAKOUT | 0.0% | $27.94 | 34.89 | 14 |
-| MEAN_REVERSION | 99.6% | $56,102.37 | 6.16 | 169,776 |
-| BREAKDOWN | 0.1% | $-8.28 | -24.79 | 171 |
-| NEUTRAL | 0.3% | $873.78 | 16.82 | 440 |
+| Regime | Time % | PnL Contribution | Sharpe | N Bars | Trades | Fees Paid | Turnover |
+|---|---|---|---|---|---|---|---|
+| BREAKOUT | 0.0% | $27.94 | 34.89 | 14 | 1 | $1.63 | $4,078.01 |
+| MEAN_REVERSION | 99.6% | $56,102.37 | 6.16 | 169,776 | 617 | $5,344.64 | $13,361,597.70 |
+| BREAKDOWN | 0.1% | $-8.28 | -24.79 | 171 | 1 | $8.28 | $20,708.27 |
+| NEUTRAL | 0.3% | $873.78 | 16.82 | 440 | 14 | $74.90 | $187,261.24 |
+
+## Chop / Turnover Diagnostics
+| Metric | Value |
+|---|---|
+| Total Regime Flips | 45 |
+| Flips per Bar | 0.0003 |
+| Total Trades | 633 |
+| Trades per 100 Bars | 0.37 |
+
+### Regime Run-Length Histogram
+
+Counts of consecutive-bar runs per regime, bucketed by run length.  Frequent short runs (`1` and `2-5`) signal chop; long runs (`21-100` and `100+`) signal sustained regime expression.
+
+| Regime | 1 | 2-5 | 6-20 | 21-100 | 100+ |
+|---|---|---|---|---|---|
+| MEAN_REVERSION | 1 | 0 | 0 | 1 | 12 |
+| BREAKDOWN | 0 | 0 | 4 | 0 | 1 |
+| NEUTRAL | 3 | 2 | 2 | 9 | 0 |
+| BREAKOUT | 10 | 1 | 0 | 0 | 0 |
 
 ## Monthly Returns
 Best month: 26.21%  |  Worst month: 1.17%  |  Positive months: 100.0%
@@ -226,6 +245,9 @@ Mean forward log-return at $h=1$ for each $(\rho_t, b_t)$ combination (stacked m
 | update_interval_ms | 0 |
 | accuracy_horizons | [1, 3, 6, 12, 24, 48] |
 | bar_seconds | 300.0 |
+| liquidation_equity_frac | 0.0 |
+| slippage_bps | 0.0 |
+| slippage_per_unit_bps | 0.0 |
 
 ---
 

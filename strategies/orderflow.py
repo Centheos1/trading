@@ -1,7 +1,10 @@
 import sys
 import os
 import logging
-from typing import Tuple, Dict, List
+import threading
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Tuple, Dict, List, Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,24 @@ except ImportError:
     ofe = None
 
 
+_RIPPLE_MAP: Dict[str, str] = {
+    "wall_min_relative_size": "wall_min_relative_size",
+    "absorption_entry": "absorption_entry",
+    "exhaustion_entry": "exhaustion_entry",
+    "breakout_entry": "breakout_entry",
+    "idle_exit_threshold": "idle_exit_threshold",
+    "bounce_max_break_risk": "bounce_max_break_risk",
+    "feature_window_ms": "feature_window_ms",
+}
+
+_LIFECYCLE_KEYS: Tuple[str, ...] = (
+    "confirmation_window_ms",
+    "max_hold_time_ms",
+    "trailing_stop_sigma",
+    "target_distance_sigma",
+)
+
+
 def _build_config(params: Dict) -> "ofe.EngineConfig":
     config = ofe.EngineConfig()
     config.tick_size = params.get("tick_size", 0.01)
@@ -32,33 +53,37 @@ def _build_config(params: Dict) -> "ofe.EngineConfig":
     sp.signal_strength_min = params.get("signal_strength_min", 0.3)
     config.signal_params = sp
 
-    # Ripple parameters (Phase 6)
     rcfg = config.ripple
     rcfg.tick_size = config.tick_size
     rcfg.paper_fills = params.get("paper_fills", False)
-    _RIPPLE_MAP = {
-        "wall_min_relative_size": "wall_min_relative_size",
-        "absorption_entry": "absorption_entry",
-        "exhaustion_entry": "exhaustion_entry",
-        "breakout_entry": "breakout_entry",
-        "idle_exit_threshold": "idle_exit_threshold",
-        "bounce_max_break_risk": "bounce_max_break_risk",
-        "feature_window_ms": "feature_window_ms",
-    }
+    # Phase 13Y: keys in ``_RIPPLE_MAP`` must exist as attributes on the C++
+    # ``RippleConfig`` (set by pybind11 ``def_readwrite``). If a key is
+    # declared in ``STRAT_PARAMS["orderflow"]`` but the C++ binding is
+    # missing or stale, ``setattr`` would raise ``AttributeError`` and
+    # crash the whole backtest. Skip + warn instead so the run still
+    # completes and the missing binding is surfaced clearly.
     for param_key, attr_name in _RIPPLE_MAP.items():
-        if param_key in params:
-            setattr(rcfg, attr_name, params[param_key])
+        if param_key not in params:
+            continue
+        if not hasattr(rcfg, attr_name):
+            logger.warning(
+                "RippleConfig has no attribute %r (param %r); "
+                "skipping. Likely a missing pybind11 binding in "
+                "backtestingCpp/orderflow/bindings.cpp.",
+                attr_name, param_key,
+            )
+            continue
+        setattr(rcfg, attr_name, params[param_key])
 
-    # Lifecycle sub-parameters
     lc = rcfg.lifecycle
-    if "confirmation_window_ms" in params:
-        lc.confirmation_window_ms = params["confirmation_window_ms"]
-    if "max_hold_time_ms" in params:
-        lc.max_hold_time_ms = params["max_hold_time_ms"]
-    if "trailing_stop_sigma" in params:
-        lc.trailing_stop_sigma = params["trailing_stop_sigma"]
-    if "target_distance_sigma" in params:
-        lc.target_distance_sigma = params["target_distance_sigma"]
+    for k in _LIFECYCLE_KEYS:
+        if k not in params:
+            continue
+        if not hasattr(lc, k):
+            logger.warning(
+                "LifecycleConfig has no attribute %r; skipping.", k)
+            continue
+        setattr(lc, k, params[k])
     rcfg.lifecycle = lc
 
     config.ripple = rcfg
@@ -95,9 +120,25 @@ def backtest(exchange: str, symbol: str, from_time: int, to_time: int,
     replay.set_time_range(from_time, to_time)
 
     ofe.connect_feed(engine, replay)
+    # ``engine.start(symbol)`` wires the trade/depth callbacks onto the
+    # feed, calls ``replay.subscribe_trades/_depth(symbol)``, and then
+    # spawns a worker thread that runs ``replay_thread_func()``. The
+    # legacy code below this point ALSO called ``replay.run_sync()``,
+    # which executed the same loop synchronously on the main thread —
+    # so every trade/depth event was processed twice (Phase 13X regression
+    # probe confirmed an exact 2× volume profile / CVD count). Drop the
+    # redundant ``run_sync()`` and wait for the background thread to
+    # complete instead.
     engine.start(symbol)
-
-    replay.run_sync()
+    import time as _time  # noqa: PLC0415
+    _deadline = _time.monotonic() + 600.0  # 10-minute safety stop
+    while not replay.is_complete():
+        if _time.monotonic() > _deadline:
+            logger.warning(
+                "backtest replay did not complete within 600 s; "
+                "forcing engine.stop()")
+            break
+        _time.sleep(0.05)
 
     ripple = engine.get_ripple()
     ripple_trades = ripple.completed_trades()
@@ -152,28 +193,228 @@ def _compute_cagr(returns: List[float], from_time: int, to_time: int,
     return float((final_value / initial) ** (1.0 / years) - 1.0) * 100.0
 
 
-def run_live(symbol: str, exchange: str = "binance", futures: bool = True,
-             params: Dict = None, tick_store_path: str = None):
-    if ofe is None:
-        raise RuntimeError("orderflow_engine C++ module not built.")
+@dataclass
+class LiveSession:
+    """Handle for a running ``run_live`` session.
+
+    Wraps the engine, the WS feed thread, and a ``stop_event`` so the
+    caller can shut everything down deterministically. Returned by
+    :func:`run_live`.
+    """
+
+    engine: Any
+    stop_event: threading.Event
+    thread: threading.Thread
+    trade_health: Any
+    depth_health: Any
+    _stopped: bool = field(default=False, init=False)
+
+    def stop(self, *, join_timeout_s: float = 5.0) -> None:
+        """Signal the WS thread to stop, join it, and stop the engine.
+
+        Idempotent — safe to call multiple times.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
+        self.stop_event.set()
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=join_timeout_s)
+        try:
+            self.engine.stop()
+        except BaseException:
+            pass
+
+    def __enter__(self) -> "LiveSession":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.stop()
+
+
+def _default_signal_logger(signal) -> None:
+    logger.info(
+        "SIGNAL: %s @ %.2f strength=%.2f - %s",
+        signal.type_name(), signal.price, signal.strength, signal.description,
+    )
+
+
+def run_live(
+    symbol: str,
+    exchange: str = "binance",
+    futures: bool = True,
+    params: Dict = None,
+    tick_store_path: str = None,
+    *,
+    websockets_module: Any = None,
+    ofe_module: Any = None,
+    rest_session: Any = None,
+    apply_rest_snapshot: bool = True,
+    signal_callback: Optional[Callable[[Any], None]] = _default_signal_logger,
+    rest_depth_url: Optional[str] = None,
+    recorder: Any = None,
+) -> LiveSession:
+    """Start a live Binance USD-M futures session driving the C++ engine.
+
+    Replaces the legacy C++ ``BinanceWsFeed`` path with the same
+    Python WS adapter used by ``LiveTradingSession`` (Phase 10):
+    ``data_feed.run_binance_usdm_futures_ws_feed``. The engine itself
+    is unchanged — trades and depth updates land via
+    ``engine.process_trade`` / ``engine.process_depth`` from a worker
+    thread, with `FeedStreamHealth` tracking reconnects and stale
+    streams.
+
+    Parameters
+    ----------
+    symbol : str
+        Trading symbol (e.g. ``"BTCUSDT"``).
+    exchange : str, optional
+        Reserved for future multi-exchange support; only Binance is
+        wired today.
+    futures : bool, optional
+        Reserved. The Python WS path is USD-M futures only; ``False``
+        triggers a warning and the call still uses USD-M futures.
+    params : dict, optional
+        ``EngineConfig`` overrides forwarded to ``_build_config``.
+    tick_store_path : str, optional
+        If provided, opens a ``TickStore`` and registers it on the
+        engine via ``engine.set_tick_store``. Pass ``None`` to skip.
+    websockets_module, ofe_module, rest_session : optional
+        Test-only injection points. ``ofe_module`` defaults to the
+        module-level ``ofe``; ``websockets_module`` defaults to a
+        runtime ``import websockets``; ``rest_session`` is forwarded
+        to the depth-snapshot fetch.
+    apply_rest_snapshot : bool, optional
+        When ``True`` (default) fetches a 1000-level depth snapshot
+        via REST and applies it before the WS thread starts. Disable
+        for tests that don't have network access.
+    signal_callback : callable, optional
+        Forwarded to ``engine.set_signal_callback``. Defaults to a
+        log-only callback. Pass ``None`` to leave the existing
+        callback untouched.
+    rest_depth_url : str, optional
+        Override for the REST depth endpoint (defaults to the
+        Binance USD-M futures URL from ``data_feed``).
+    recorder : SessionRecorder, optional
+        Phase 13 hook. When provided, the recorder is wired onto the
+        engine to capture signals + ripple decisions for later
+        deterministic replay. The caller is responsible for opening the
+        recorder, calling ``write_header`` (the runner does this if the
+        header has not yet been written), and closing it on shutdown.
+
+    Returns
+    -------
+    LiveSession
+        Handle exposing ``engine``, ``stop()``, and the per-stream
+        ``FeedStreamHealth`` references.
+    """
+    ofe_mod = ofe_module if ofe_module is not None else ofe
+    if ofe_mod is None:
+        raise RuntimeError(
+            "orderflow_engine C++ module not built. "
+            "Run: cd backtestingCpp/orderflow && ./build.sh")
+
+    if not futures:
+        logger.warning(
+            "run_live: 'futures=False' is no longer supported by the "
+            "Python WS path; using USD-M futures stream regardless.")
+
+    if exchange != "binance":
+        logger.warning(
+            "run_live: exchange=%r is unsupported; using Binance.",
+            exchange)
+
+    if websockets_module is None:
+        try:
+            import websockets as _ws_module  # noqa: PLC0415
+        except ImportError:
+            _ws_module = None
+        websockets_module = _ws_module
+    if websockets_module is None:
+        raise RuntimeError(
+            "Python `websockets` package is required by run_live. "
+            "Install it with `pip install websockets`.")
 
     params = params or {}
     config = _build_config(params)
-    engine = ofe.OrderFlowEngine(config)
+    engine = ofe_mod.OrderFlowEngine(config)
 
-    feed = ofe.BinanceWsFeed(futures)
-    ofe.connect_feed(engine, feed)
+    if signal_callback is not None:
+        engine.set_signal_callback(signal_callback)
 
     if tick_store_path:
-        store = ofe.TickStore(tick_store_path)
+        store = ofe_mod.TickStore(tick_store_path)
+        engine.set_tick_store(store, symbol)
 
-        def on_signal(signal):
-            logger.info(
-                f"SIGNAL: {signal.type_name()} @ {signal.price:.2f} "
-                f"strength={signal.strength:.2f} - {signal.description}"
+    if recorder is not None:
+        if not getattr(recorder, "_header_written", False):
+            try:
+                recorder.write_header(symbol=symbol, engine_config=config)
+            except Exception:
+                logger.exception("recorder.write_header failed")
+        try:
+            recorder.attach_to_engine(engine)
+        except Exception:
+            logger.exception("recorder.attach_to_engine failed")
+
+    if apply_rest_snapshot:
+        try:
+            from data_feed import (  # noqa: PLC0415
+                BINANCE_FUTURES_USDM_DEPTH_URL,
+                fetch_and_build_depth_snapshot,
             )
+            url = rest_depth_url or BINANCE_FUTURES_USDM_DEPTH_URL
+            snap = fetch_and_build_depth_snapshot(
+                ofe_mod, url, symbol, session=rest_session)
+            engine.process_depth(snap)
+            logger.info(
+                "Depth snapshot primed: %d bids, %d asks",
+                len(snap.bids), len(snap.asks))
+        except Exception as exc:
+            logger.warning("REST depth snapshot failed: %s", exc)
 
-        engine.set_signal_callback(on_signal)
+    from data_feed import run_binance_usdm_futures_ws_feed  # noqa: PLC0415
+    from data_feed.stream_health import FeedStreamHealth  # noqa: PLC0415
 
-    engine.start(symbol)
-    return engine
+    trade_health = FeedStreamHealth()
+    depth_health = FeedStreamHealth()
+    recent_trade_ids: deque = deque(maxlen=4096)
+    stop_event = threading.Event()
+
+    def on_ws_trade(t: Any, _is_buy_aggressor: bool) -> None:
+        try:
+            engine.process_trade(t)
+        except BaseException as exc:
+            logger.warning("process_trade failed: %s", exc)
+
+    def on_ws_depth(u: Any) -> None:
+        try:
+            engine.process_depth(u)
+        except BaseException as exc:
+            logger.warning("process_depth failed: %s", exc)
+
+    def _ws_target() -> None:
+        run_binance_usdm_futures_ws_feed(
+            symbol_lower=symbol.lower(),
+            stop_event=stop_event,
+            ofe=ofe_mod,
+            trade_health=trade_health,
+            depth_health=depth_health,
+            recent_trade_ids=recent_trade_ids,
+            on_ws_trade=on_ws_trade,
+            on_ws_depth=on_ws_depth,
+            websockets_module=websockets_module,
+        )
+
+    thread = threading.Thread(target=_ws_target, daemon=True,
+                              name=f"run_live-ws-{symbol}")
+    engine.start(symbol)  # No data_feed_ wired; engine.start just flips running_
+    thread.start()
+
+    return LiveSession(
+        engine=engine,
+        stop_event=stop_event,
+        thread=thread,
+        trade_health=trade_health,
+        depth_health=depth_health,
+    )

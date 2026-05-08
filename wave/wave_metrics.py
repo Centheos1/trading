@@ -99,9 +99,70 @@ class WavePerformanceReport:
     best_month: float = 0.0
     worst_month: float = 0.0
     pct_positive_months: float = 0.0
+    # When True, monthly_returns are absolute PnL changes normalised by
+    # initial_capital — used whenever the prior month's equity crosses
+    # zero or drops near it (where pct_change() produces nonsense values).
+    monthly_returns_normalised: bool = False
+
+    # Liquidation (Phase 9 backtest hardening)
+    liquidated_at_bar: Optional[int] = None
+    liquidation_equity_pct: float = 0.0
+
+    # Chop / turnover diagnostics (Phase 9 backtest hardening)
+    regime_flips: int = 0
+    flips_per_bar: float = 0.0
+    regime_run_lengths: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     # Params echo
     params_echo: Dict = field(default_factory=dict)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Run-length histogram helper
+# ────────────────────────────────────────────────────────────────────────
+
+# Bucket boundaries for regime run-length histogram (Phase 9 chop diagnostics).
+# Buckets are: 1 bar, 2-5, 6-20, 21-100, 100+.  Tuned so a typical 5m chop
+# session (regime flips every 1-3 bars) shows up clearly in the lowest two
+# buckets, while genuinely sustained runs land in 21-100 / 100+.
+_RUN_LENGTH_BUCKETS: List[tuple[str, int, int]] = [
+    ("1",     1, 1),
+    ("2-5",   2, 5),
+    ("6-20",  6, 20),
+    ("21-100", 21, 100),
+    ("100+",  101, 10**9),
+]
+
+
+def _compute_regime_run_lengths(regimes: np.ndarray) -> Dict[str, Dict[str, int]]:
+    """Compute a per-regime run-length histogram bucketed by length.
+
+    Returns a dict keyed by regime name; each value is a dict mapping the
+    bucket label (matches `_RUN_LENGTH_BUCKETS`) to the count of runs whose
+    length fell in that bucket.  Regimes with no runs do not appear.
+    """
+    out: Dict[str, Dict[str, int]] = {}
+    if len(regimes) == 0:
+        return out
+    cur = regimes[0]
+    run_len = 1
+    runs: list[tuple[str, int]] = []
+    for i in range(1, len(regimes)):
+        if regimes[i] == cur:
+            run_len += 1
+        else:
+            runs.append((str(cur), run_len))
+            cur = regimes[i]
+            run_len = 1
+    runs.append((str(cur), run_len))
+    for reg, length in runs:
+        bucket = next(
+            (label for label, lo, hi in _RUN_LENGTH_BUCKETS if lo <= length <= hi),
+            "100+",
+        )
+        out.setdefault(reg, {label: 0 for label, _, _ in _RUN_LENGTH_BUCKETS})
+        out[reg][bucket] += 1
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -133,6 +194,13 @@ def compute_wave_report(
     rpt.end = bars.index[-1] if len(bars) > 0 else None
     rpt.initial_capital = result.initial_capital
     rpt.final_equity = result.final_equity
+
+    # Phase 9 — liquidation passthrough.
+    rpt.liquidated_at_bar = getattr(result, "liquidated_at_bar", None)
+    if rpt.liquidated_at_bar is not None and result.initial_capital > 0:
+        rpt.liquidation_equity_pct = float(
+            p.liquidation_equity_frac * 100.0
+        )
 
     ret_arr = returns.dropna().to_numpy(dtype=np.float64)
 
@@ -184,6 +252,19 @@ def compute_wave_report(
     # Per-regime breakdown
     if "wave_regime" in bars.columns:
         regime_col = "wave_regime"
+        # Per-regime trade aggregates (Phase 9): join the trades frame to the
+        # regime label to get trades / fees / turnover per regime.  Trades
+        # already record their `wave_regime` at execution time so this is a
+        # simple groupby, no additional bookkeeping required in the loop.
+        if not result.trades.empty and "wave_regime" in result.trades.columns:
+            trades_by_regime = result.trades.groupby("wave_regime").agg(
+                trades=("notional", "count"),
+                fees_paid=("fee", "sum"),
+                turnover_usd=("notional", "sum"),
+            ).to_dict("index")
+        else:
+            trades_by_regime = {}
+
         for reg in ["BREAKOUT", "MEAN_REVERSION", "BREAKDOWN", "NEUTRAL"]:
             mask = bars[regime_col] == reg
             if not mask.any():
@@ -194,6 +275,7 @@ def compute_wave_report(
             reg_cagr = annualized_return(
                 equity[mask].reset_index(drop=True), bar_seconds=bar_sec
             ) if mask.sum() > 1 else 0.0
+            tag = trades_by_regime.get(reg, {})
             rpt.per_regime.append({
                 "regime": reg,
                 "time_pct": time_pct,
@@ -201,14 +283,41 @@ def compute_wave_report(
                 "ann_return": reg_cagr,
                 "sharpe": sharpe_ratio(reg_returns, bar_seconds=bar_sec),
                 "n_bars": int(mask.sum()),
+                "trades": int(tag.get("trades", 0) or 0),
+                "fees_paid": float(tag.get("fees_paid", 0.0) or 0.0),
+                "turnover_usd": float(tag.get("turnover_usd", 0.0) or 0.0),
             })
 
+        # Chop diagnostics: regime flips and run-length distribution.
+        regimes = bars[regime_col].to_numpy()
+        if len(regimes) > 1:
+            flips = int((regimes[1:] != regimes[:-1]).sum())
+            rpt.regime_flips = flips
+            rpt.flips_per_bar = float(flips) / float(len(regimes))
+            rpt.regime_run_lengths = _compute_regime_run_lengths(regimes)
+
     # Monthly returns
-    if not equity.empty:
-        monthly = (
-            equity.resample("ME").last().pct_change().dropna()
-            if isinstance(equity.index, pd.DatetimeIndex) else pd.Series(dtype=float)
-        )
+    #
+    # The classic `equity.resample("ME").last().pct_change()` formula breaks
+    # whenever equity crosses zero or goes deeply negative — the denominator
+    # becomes tiny / negative and `pct_change()` produces meaningless values
+    # (e.g. +13717% / -601% months on a path that ends with negative equity).
+    # When the prior-month equity is near zero or below 10% of initial capital
+    # we fall back to an "absolute PnL change normalised by initial capital"
+    # formula, which is bounded and interpretable in the same units.
+    if (not equity.empty
+            and isinstance(equity.index, pd.DatetimeIndex)):
+        m_last = equity.resample("ME").last()
+        m_prev = m_last.shift(1)
+        init_cap = float(result.initial_capital) or 1.0
+        threshold = 0.1 * init_cap
+        # Use prior-month equity as denominator only when it is comfortably
+        # positive; otherwise normalise by initial_capital.
+        denom = m_prev.where(m_prev > threshold, init_cap)
+        monthly = ((m_last - m_prev) / denom).dropna()
+        # If any month had to use the initial-capital fallback, flag it
+        # so the report renderer can label the column appropriately.
+        rpt.monthly_returns_normalised = bool((m_prev <= threshold).any())
         if not monthly.empty:
             rpt.monthly_returns = monthly
             rpt.best_month = float(monthly.max())
@@ -251,6 +360,10 @@ def compute_wave_report(
         "update_interval_ms": p.update_interval_ms,
         "accuracy_horizons": list(p.accuracy_horizons),
         "bar_seconds": p.bar_seconds,
+        # Phase 9 — backtest hardening flags
+        "liquidation_equity_frac": p.liquidation_equity_frac,
+        "slippage_bps": p.slippage_bps,
+        "slippage_per_unit_bps": p.slippage_per_unit_bps,
     }
 
     return rpt

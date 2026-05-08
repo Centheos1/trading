@@ -2098,6 +2098,17 @@ These assumptions scope V1 and should be stated in code as compile-time or confi
 10. Replay determinism tests.
 11. Backtest validation on historical data.
 12. Live execution path (Binance Futures) with full risk checks.
+13. **Backtester hardening** (Phase 9): equity-floor / liquidation modelling
+    (`liquidation_equity_frac`), linear + quadratic slippage on rebalances
+    (`slippage_bps`, `slippage_per_unit_bps`), robust monthly-return math
+    that survives equity zero-crossings, timeframe-aware feature-window
+    rescaling (`with_timeframe(rescale_windows=True)`), and per-regime
+    chop / turnover diagnostics (`regime_flips`, `flips_per_bar`,
+    per-regime `trades` / `fees_paid` / `turnover_usd`,
+    `regime_run_lengths` histogram). Defaults preserve V1 behaviour for
+    existing parameter sets — these knobs are opt-in for realistic
+    transaction-cost / catastrophe modelling. See
+    `implementation_plan.md` §7 Phase 9 for full delivery details.
 
 ### 22.3 What V1 Must NOT Include
 

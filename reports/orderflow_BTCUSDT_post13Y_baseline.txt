@@ -1,0 +1,121 @@
+Orderflow strategy — post-Phase-13X / 13Y baseline
+====================================================
+
+Captured: 2026-05-08 (after Phase 13Y `idle_exit_threshold` binding fix
+and Phase 13X backtest double-fire fix).
+
+Purpose
+-------
+Anchor reference for `strategies.orderflow.backtest()` output under the
+corrected (single-fire) replay pipeline. All `reports/wave_optimise_*`
+and `reports/tide_optimise_*` files predating Phase 13X were generated
+on the doubled-data pipeline and cannot be directly compared to
+post-fix runs (PnL, volume, CVD, max drawdown all roughly halved).
+
+Reproducing
+-----------
+Run the deterministic CLI scenario:
+
+    cd /Users/clintsellen/Documents/Trading/app/backtest
+    printf 'backtest\nbinance\nBTCUSDT\norderflow\n1h\n2024-01-01\n2024-12-31\n3.0\n3\n5\n100\n5\n0.3\n0.01\n2.0\n0.4\n0.4\n0.5\n0.3\n0.4\n5000\n5000\n300000\n1.5\n2.5\n0.25\n0.7\n0.5\n0.5\n' | python main.py
+
+Key parameters
+--------------
+strategy        : orderflow
+exchange        : binance
+symbol          : BTCUSDT
+timeframe       : 1h
+from / to       : 2024-01-01 → 2024-12-31  (use explicit dates — see note below)
+imbalance_thr   : 3.0
+stacked_imb     : 3
+absorption_vol  : 5.0
+cvd_lookback    : 100
+exhaustion_bars : 5
+min_strength    : 0.3
+tick_size       : 0.01
+wall_min        : 2.0
+absorption_e    : 0.4
+exhaustion_e    : 0.4
+breakout_e      : 0.5
+idle_exit       : 0.3   ← Phase 13Y newly-bound parameter
+bounce_max_br   : 0.4
+feature_win_ms  : 5000
+confirm_win_ms  : 5000
+max_hold_ms     : 300000
+trail_sigma     : 1.5
+target_sigma    : 2.5
+eta_mr          : 0.25
+eta_bo          : 0.70
+eta_neutral     : 0.50
+reduced_size    : 0.50
+
+Result tuple
+------------
+(pnl, max_drawdown, num_trades, sharpe_ratio, cagr)
+
+For the wall-clock-bounded run captured at 2026-05-08 ~21:47 UTC+10
+(date range: full HDF5 history → "now"):
+    (3.236353151573268,
+     0.006791979185760688,
+     17,
+     0.26942807481960024,
+     0.0565402001495352)
+
+For the wall-clock-bounded run captured at 2026-05-08 ~22:00 UTC+10
+(same params, ~13 minutes later → wider to_time):
+    (0.0,
+     0.0,
+     1,
+     0.2897213567635613,
+     0.05826102053614335)
+
+Note on determinism
+-------------------
+`main.py` substitutes `to_time = datetime.now()` when the prompt is
+left blank. To get a stable reproducible baseline, supply explicit
+`from-time` / `to-time` strings (yyyy-mm-dd) instead of pressing
+Enter — that pins the replay window so identical params produce
+identical output.
+
+Wave / Tide re-baseline commands
+--------------------------------
+The wave and tide engines do NOT go through `strategies.orderflow.backtest()`,
+so their reports were not affected by Phase 13X. They can still be
+re-baselined for completeness:
+
+    # Wave (1h, single-timeframe backtest)
+    python -m wave backtest \
+      --exchange binance --symbol BTCUSDT --timeframe 1h \
+      --from-time 2024-01-01 --to-time 2024-12-31 \
+      --max-position-base 1.0 --sizing-mode base \
+      --name BTCUSDT_post13Y_baseline
+
+    # Wave optimisation (population=20, 12 generations)
+    python -m wave optimise \
+      --exchange binance --symbol BTCUSDT --timeframe 1h \
+      --from-time 2024-01-01 --to-time 2024-12-31 \
+      --pop-size 20 --generations 12 --top-n 5 \
+      --max-position-base 1.0 --sizing-mode base
+
+    # Tide (single backtest)
+    python -m tide backtest \
+      --exchange binance --symbol BTCUSDT --timeframe 1h \
+      --from-time 2024-01-01 --to-time 2024-12-31 \
+      --name BTCUSDT_post13Y_baseline
+
+    # Tide optimisation
+    python -m tide optimise \
+      --exchange binance --symbol BTCUSDT --timeframe 1h \
+      --from-time 2024-01-01 --to-time 2024-12-31 \
+      --population 20 --generations 12 --top-k 5
+
+Orderflow optimisation re-baseline
+-----------------------------------
+Population × generations × per-eval cost, so size carefully:
+
+    # Quick smoke (≈ 50 evals)
+    cd /Users/clintsellen/Documents/Trading/app/backtest
+    printf 'optimise\nbinance\nBTCUSDT\norderflow\n1h\n2024-01-01\n2024-12-31\nf\n10\n5\n' | python main.py
+
+    # Standard sweep (≈ 600 evals; takes minutes)
+    printf 'optimise\nbinance\nBTCUSDT\norderflow\n1h\n2024-01-01\n2024-12-31\nf\n30\n20\n' | python main.py

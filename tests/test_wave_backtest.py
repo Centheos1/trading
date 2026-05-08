@@ -434,5 +434,61 @@ class TestPnLSanity(unittest.TestCase):
                                    params.initial_capital, places=2)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 9 backwards-compat regression block
+#
+# These tests assert that the new backtest-hardening fields default to values
+# that preserve V1 behaviour, so legacy parameter sets and downstream
+# tooling (optimised reports, persisted dataclasses) keep working without
+# any code changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPhase9BackwardCompat(unittest.TestCase):
+
+    def test_liquidation_default_is_zero(self):
+        p = WaveStrategyParams()
+        self.assertEqual(p.liquidation_equity_frac, 0.0)
+
+    def test_slippage_defaults_are_zero(self):
+        p = WaveStrategyParams()
+        self.assertEqual(p.slippage_bps, 0.0)
+        self.assertEqual(p.slippage_per_unit_bps, 0.0)
+
+    def test_with_timeframe_default_does_not_rescale(self):
+        """The plan's regression-safety rule: existing call sites
+        (which use the original `with_timeframe(tf)` signature) must
+        continue to leave window lengths unchanged."""
+        p = WaveStrategyParams(timeframe="1h", bar_seconds=3600.0,
+                                eta_window=24, vwap_window=24,
+                                structure_window=24,
+                                disp_window=24, ar_window=48)
+        q = p.with_timeframe("5m")
+        self.assertEqual(q.eta_window, p.eta_window)
+        self.assertEqual(q.ar_window, p.ar_window)
+
+    def test_result_liquidated_at_bar_default_none(self):
+        ohlcv = _make_ohlcv(150)
+        params = _default_params()
+        result = WaveBacktester(params).run(ohlcv)
+        self.assertIsNone(result.liquidated_at_bar)
+
+    def test_report_phase9_fields_default(self):
+        """Healthy run: monthly_returns_normalised flag is False; chop
+        diagnostics are populated and finite."""
+        ohlcv = _make_ohlcv(300)
+        params = _default_params()
+        result = WaveBacktester(params).run(ohlcv)
+        rpt = compute_wave_report(result, compute_accuracy=False)
+        self.assertIsInstance(rpt.monthly_returns_normalised, bool)
+        self.assertGreaterEqual(rpt.regime_flips, 0)
+        self.assertIsInstance(rpt.regime_run_lengths, dict)
+        # Per-regime rows now also carry trade aggregates.
+        for row in rpt.per_regime:
+            self.assertIn("trades", row)
+            self.assertIn("fees_paid", row)
+            self.assertIn("turnover_usd", row)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

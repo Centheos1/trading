@@ -11,7 +11,6 @@
 #include "FootprintChart.h"
 #include "SignalEngine.h"
 #include "OrderFlowEngine.h"
-#include "BinanceWsFeed.h"
 #include "TickStore.h"
 #include "ReplayFeed.h"
 #include "ripple/RippleTypes.h"
@@ -48,6 +47,31 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def_readwrite("quantity", &DepthLevel::quantity);
 
     // --- DepthUpdate ---
+    //
+    // KNOWN LIMITATION (Phase 13X / 13Z documented design choice):
+    // ``bids`` and ``asks`` are exposed via ``def_readwrite`` over a
+    // ``std::vector<DepthLevel>``. Pybind11's default vector binding
+    // copies the vector in both directions, so per-element mutation
+    // from Python (``update.bids.append(level)``) DOES NOT mutate the
+    // C++ object — it modifies a temporary list that is immediately
+    // discarded. ALWAYS assign a complete list:
+    //     bids = [DepthLevel(...) for ...]
+    //     update.bids = bids   # whole-list assignment is safe
+    // All production callers (data_feed/binance_futures_ws.py,
+    // data_feed/binance_depth_rest.py, data_service.py) and all tests
+    // use the safe whole-list-assignment pattern.
+    //
+    // The "proper" fix is ``PYBIND11_MAKE_OPAQUE(std::vector<DepthLevel>)``
+    // + ``py::bind_vector``. Deliberately deferred because:
+    //   (a) it removes the implicit Python-list-to-vector conversion,
+    //       breaking ``update.bids = python_list`` everywhere unless
+    //       paired with a custom ``py::implicitly_convertible``;
+    //   (b) the wrapped vector type leaks into Python error messages /
+    //       repr (cosmetic but visible);
+    //   (c) every caller and every test already uses the safe pattern,
+    //       and ``tests/test_orderflow_backtest.py::TestBuildConfigBindingDrift``
+    //       (Phase 13Y) plus ``tests/test_replay_determinism.py::test_*_actually_*``
+    //       (Phase 13X) prevent silent regressions.
     py::class_<DepthUpdate>(m, "DepthUpdate")
         .def(py::init<>())
         .def_readwrite("timestamp", &DepthUpdate::timestamp)
@@ -247,7 +271,7 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def("set_params", &SignalEngine::set_params)
         .def("get_params", &SignalEngine::get_params);
 
-    // --- IDataFeed (base for BinanceWsFeed, ReplayFeed) ---
+    // --- IDataFeed (base for ReplayFeed) ---
     py::class_<IDataFeed, std::shared_ptr<IDataFeed>>(m, "IDataFeed");
 
     // --- OrderFlowEngine ---
@@ -291,28 +315,6 @@ PYBIND11_MODULE(orderflow_engine, m) {
                 cb(d);
             });
         });
-
-    // --- BinanceWsFeed ---
-    py::class_<BinanceWsFeed, IDataFeed, std::shared_ptr<BinanceWsFeed>>(m, "BinanceWsFeed")
-        .def(py::init<bool>(), py::arg("futures") = true)
-        .def("subscribe_trades", &BinanceWsFeed::subscribe_trades)
-        .def("subscribe_depth", &BinanceWsFeed::subscribe_depth,
-             py::arg("symbol"), py::arg("levels") = 20)
-        .def("set_trade_callback", [](BinanceWsFeed& f, py::function cb) {
-            f.set_trade_callback([cb](const Trade& t) {
-                py::gil_scoped_acquire acquire;
-                cb(t);
-            });
-        })
-        .def("set_noop_trade_callback", [](BinanceWsFeed& f) {
-            f.set_trade_callback([](const Trade&) {});
-        })
-        .def("set_noop_depth_callback", [](BinanceWsFeed& f) {
-            f.set_depth_callback([](const DepthUpdate&) {});
-        })
-        .def("start", &BinanceWsFeed::start)
-        .def("stop", &BinanceWsFeed::stop)
-        .def("is_running", &BinanceWsFeed::is_running);
 
     // --- TickStore ---
     py::class_<TickStore, std::shared_ptr<TickStore>>(m, "TickStore")
@@ -491,6 +493,7 @@ PYBIND11_MODULE(orderflow_engine, m) {
         .def_readwrite("exhaustion_entry", &RippleConfig::exhaustion_entry)
         .def_readwrite("withdrawal_entry", &RippleConfig::withdrawal_entry)
         .def_readwrite("breakout_entry", &RippleConfig::breakout_entry)
+        .def_readwrite("idle_exit_threshold", &RippleConfig::idle_exit_threshold)
         .def_readwrite("max_position", &RippleConfig::max_position)
         .def_readwrite("bounce_max_break_risk", &RippleConfig::bounce_max_break_risk)
         .def_readwrite("bounce_max_withdrawal_risk", &RippleConfig::bounce_max_withdrawal_risk)

@@ -125,6 +125,17 @@ class LiveTradingSession:
         self._health = _HealthSnapshot()
         self._vp_cache_key: tuple | None = None
         self._bubble_dead_ticks = 0
+        # Phase 13B — optional SessionRecorder for orchestration replay.
+        # When set, ``on_timer_tick`` calls ``recorder.record_session_tick``
+        # at end-of-tick with deterministic state scalars.
+        self._recorder: Any = None
+
+    def attach_recorder(self, recorder: Any) -> None:
+        """Phase 13B — attach a ``SessionRecorder`` so each timer tick
+        emits a ``session_tick`` event capturing the orchestration state
+        (drained count, book state, resync flags). Pass ``None`` to
+        detach."""
+        self._recorder = recorder
 
     @property
     def engine(self) -> Any:
@@ -227,6 +238,28 @@ class LiveTradingSession:
         self._engine = None
         self._trade_buffer.clear()
         self._vp_cache_key = None
+
+    @staticmethod
+    def _should_repaint_strategy_dashboard(
+        strat_visible: bool,
+        prev_visible: bool,
+        strat_refreshed: bool,
+    ) -> bool:
+        """Decide whether to repaint the strategy dashboard this tick.
+
+        The dashboard's `_StrategyHistoryPanel.paintEvent` is O(N) in
+        `MarketState.snapshot_history` length (capped at 600). Calling it
+        every 100 ms timer tick — when the underlying snapshot only
+        changes every 500 ms (the 5-tick strategy cadence) — drove the
+        live tick avg from ~11 ms to ~145 ms (Phase 7 regression).
+        Repaint only when:
+        - the window is visible AND
+        - either the snapshot just refreshed, OR the window just became
+          visible (rising edge — the prior state is stale).
+        """
+        if not strat_visible:
+            return False
+        return strat_refreshed or not prev_visible
 
     def set_volume_profile_window(self, window_ms: int) -> None:
         if self._engine:
@@ -498,6 +531,7 @@ class LiveTradingSession:
         except Exception as e:
             logger.error("Diagnostics error: %s", e)
 
+        strat_refreshed = False
         try:
             self._strat_tick_counter = getattr(self, "_strat_tick_counter", 0) + 1
             if self._strat_tick_counter >= 5:
@@ -507,10 +541,17 @@ class LiveTradingSession:
                     mw._last_strategy_snap = snap
                     mw._update_strategy_state_from_snapshot(snap)
                     mw._update_heatmap_overlay_from_snapshot(snap)
+                    # Append to MarketState rolling history for dashboard
+                    # mini-charts. We store (ts_ms, snap) tuples so the panel
+                    # can plot a true time series independent of tick cadence.
+                    if snap is not None:
+                        mw._market_state.snapshot_history.append(
+                            (int(time.time() * 1000), snap))
                     if (mw._strategy_store
                             and mw._strategy_ui_state.value.startswith("armed")):
                         mw._strategy_store.buffer_snapshot(
                             int(time.time() * 1000), snap)
+                    strat_refreshed = True
         except Exception as e:
             logger.error("Strategy panel error: %s", e)
 
@@ -546,9 +587,20 @@ class LiveTradingSession:
         mw._heatmap.update()
         if mw._candle_window.isVisible():
             mw._candle_view.update()
-        if mw._strategy_window.isVisible():
+
+        # Strategy dashboard: refresh+repaint only when the underlying
+        # snapshot actually changed (the 5-tick strategy cadence) or on the
+        # rising edge of window visibility. Repainting at the 100 ms timer
+        # cadence is wasted work because `_StrategyHistoryPanel.paintEvent`
+        # is O(N) in `snapshot_history` length (Phase 7 regression — see
+        # `implementation_plan.md` Phase 11).
+        strat_visible = mw._strategy_window.isVisible()
+        prev_visible = getattr(self, "_strat_was_visible", False)
+        if self._should_repaint_strategy_dashboard(
+                strat_visible, prev_visible, strat_refreshed):
             mw._strategy_dashboard.update_from_state()
             mw._strategy_dashboard.update()
+        self._strat_was_visible = strat_visible
 
         elapsed = (time.monotonic() - t0) * 1000.0
         self._health.record_tick(elapsed)
@@ -556,6 +608,29 @@ class LiveTradingSession:
         self._health.phase_trade_ms = (t1 - t0) * 1000.0
         self._health.phase_book_ms = (t2 - t1) * 1000.0
         self._health.phase_vp_cvd_ms = (t3 - t2) * 1000.0
+
+        # Phase 13B — emit a deterministic per-tick orchestration snapshot
+        # for replay verification. Called last so all post-tick scalars
+        # (book state, drained count, resync flags) are settled. Wrapped
+        # in try/except so a faulty recorder cannot break the live UI.
+        if self._recorder is not None:
+            try:
+                self._recorder.record_session_tick(
+                    self._health.tick_count,
+                    drained=drained,
+                    best_bid=self._last_valid_bid,
+                    best_ask=self._last_valid_ask,
+                    bid_count=self._last_valid_bid_count,
+                    ask_count=self._last_valid_ask_count,
+                    book_empty=(self._book_empty_ticks > 0),
+                    book_crossed=(self._book_crossed_ticks > 0),
+                    book_empty_ticks=self._book_empty_ticks,
+                    book_resync_pending=self._book_resync_pending,
+                    book_resync_count=self._book_resync_count,
+                    trade_buf_remaining=len(self._trade_buffer),
+                )
+            except Exception:
+                logger.exception("session_recorder.record_session_tick failed")
 
         if self._health.tick_count % 50 == 0:
             hm = mw._heatmap

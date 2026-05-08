@@ -61,6 +61,17 @@ def render_text(report: WavePerformanceReport) -> str:
         "=" * 65,
         f"  Period   : {r.start} → {r.end}",
         f"  Bars     : {_int(r.n_bars)}",
+    ]
+    if r.liquidated_at_bar is not None:
+        lines += [
+            f"  ** LIQUIDATED at bar {r.liquidated_at_bar} "
+            f"(< {r.liquidation_equity_pct:.0f}% of initial capital) **",
+        ]
+    if r.flips_per_bar > 0.10:
+        lines += [
+            f"  ** CHOP WARNING: flips/bar={r.flips_per_bar:.3f} (>0.10) **",
+        ]
+    lines += [
         "",
         "  ── RETURNS ──────────────────────────────────────────────",
         f"  Total return        : {_pct(r.total_return)}",
@@ -202,6 +213,33 @@ def render_markdown(
         f"**Period:** {r.start} → {r.end} | **Bars:** {_int(r.n_bars)}",
     ]
 
+    # Phase 9 — backtest hardening warnings (rendered at top of the report
+    # so reviewers don't miss them).
+    warnings: list[str] = []
+    if r.liquidated_at_bar is not None:
+        warnings.append(
+            f"⚠ **LIQUIDATED at bar {r.liquidated_at_bar}** "
+            f"(equity dropped below {r.liquidation_equity_pct:.0f}% of "
+            "initial capital — position was forced to 0 and trading was "
+            "halted for the rest of the run)."
+        )
+    if r.flips_per_bar > 0.10:
+        warnings.append(
+            f"⚠ **Chop warning**: regime flips per bar = "
+            f"{r.flips_per_bar:.3f} (> 0.10).  This run is dominated by "
+            "regime churn; consider widening thresholds, increasing the "
+            "rebalance threshold, or moving to a coarser timeframe."
+        )
+    if r.monthly_returns_normalised:
+        warnings.append(
+            "ℹ Monthly returns are reported as **% of initial capital** "
+            "for periods where prior-month equity dropped below 10% of "
+            "initial capital (the standard `pct_change` formula produces "
+            "meaningless values once equity crosses zero)."
+        )
+    if warnings:
+        lines += ["", *warnings]
+
     # ── Equity curve visualisation ────────────────────────────────────────
     eq_img = _img("_equity.png", "Equity Curve vs Buy & Hold")
     if eq_img:
@@ -254,15 +292,54 @@ def render_markdown(
         lines += [
             "",
             "## Per-Regime Breakdown",
-            "| Regime | Time % | PnL Contribution | Sharpe | N Bars |",
-            "|---|---|---|---|---|",
+            "| Regime | Time % | PnL Contribution | Sharpe | N Bars | Trades | Fees Paid | Turnover |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for row in r.per_regime:
             lines.append(
                 f"| {row['regime']} | {row['time_pct']:.1f}% | "
                 f"{_money(row['contribution_pnl'])} | {_num(row['sharpe'], 2)} | "
-                f"{_int(row['n_bars'])} |"
+                f"{_int(row['n_bars'])} | "
+                f"{_int(row.get('trades', 0))} | "
+                f"{_money(row.get('fees_paid', 0.0))} | "
+                f"{_money(row.get('turnover_usd', 0.0))} |"
             )
+
+        # Phase 9 — Chop / Turnover section.
+        lines += [
+            "",
+            "## Chop / Turnover Diagnostics",
+            "| Metric | Value |",
+            "|---|---|",
+            _row("Total Regime Flips", _int(r.regime_flips)),
+            _row("Flips per Bar", _num(r.flips_per_bar, 4)),
+            _row("Total Trades", _int(r.num_trades)),
+            _row("Trades per 100 Bars",
+                 _num(r.num_trades * 100.0 / max(r.n_bars, 1), 2)),
+        ]
+
+        # Run-length histogram per regime (bucketed: 1, 2-5, 6-20, 21-100, 100+).
+        if r.regime_run_lengths:
+            lines += [
+                "",
+                "### Regime Run-Length Histogram",
+                "",
+                "Counts of consecutive-bar runs per regime, bucketed by run "
+                "length.  Frequent short runs (`1` and `2-5`) signal chop; "
+                "long runs (`21-100` and `100+`) signal sustained regime "
+                "expression.",
+                "",
+                "| Regime | 1 | 2-5 | 6-20 | 21-100 | 100+ |",
+                "|---|---|---|---|---|---|",
+            ]
+            for reg, hist in r.regime_run_lengths.items():
+                lines.append(
+                    f"| {reg} | {_int(hist.get('1', 0))} | "
+                    f"{_int(hist.get('2-5', 0))} | "
+                    f"{_int(hist.get('6-20', 0))} | "
+                    f"{_int(hist.get('21-100', 0))} | "
+                    f"{_int(hist.get('100+', 0))} |"
+                )
 
     if r.monthly_returns is not None and not r.monthly_returns.empty:
         lines += [

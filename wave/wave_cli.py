@@ -98,8 +98,15 @@ def _params_from_args(args: argparse.Namespace) -> WaveStrategyParams:
         reduced_size_fraction=args.reduced_size_fraction,
         update_interval_ms=args.update_interval_ms,
         accuracy_horizons=horizons,
+        # Phase 9 — backtest hardening
+        liquidation_equity_frac=getattr(args, "liquidation_equity_frac", 0.0),
+        slippage_bps=getattr(args, "slippage_bps", 0.0),
+        slippage_per_unit_bps=getattr(args, "slippage_per_unit_bps", 0.0),
     )
-    return p.with_timeframe(args.timeframe)
+    return p.with_timeframe(
+        args.timeframe,
+        rescale_windows=getattr(args, "rescale_windows", False),
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -161,6 +168,35 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
                    default=list(_d.accuracy_horizons),
                    help="Forward-accuracy look-ahead in bars.  Use horizon_labels() "
                         "or the report to see equivalent clock times.")
+
+    # ── Phase 9: Backtest hardening ─────────────────────────────────────
+    # NOTE: Wave thresholds (η, dispersion, AR) are calibrated against the
+    # *bar-count* distributions of the chosen timeframe.  Default parameter
+    # ranges were tuned for 1h bars (see wave_optimiser.py docstring).  When
+    # switching to 5m without rescaling, the same window of e.g. 24 bars
+    # covers ~12x less wall-clock time, materially shifting feature
+    # distributions.  Use --rescale-windows to opt into automatic scaling.
+    p.add_argument("--liquidation-equity-frac", type=float,
+                   default=_d.liquidation_equity_frac,
+                   help="Equity floor as a fraction of initial_capital.  "
+                        "When > 0 the backtester forces position to 0 once "
+                        "equity drops to this level (mirrors a margin call).  "
+                        "Default 0.0 disables the floor.")
+    p.add_argument("--slippage-bps", type=float,
+                   default=_d.slippage_bps,
+                   help="Linear slippage charged on |delta|·px alongside "
+                        "fees, in basis points.  Use ~1-2 bps for liquid "
+                        "majors as a starting point.  Default 0.0.")
+    p.add_argument("--slippage-per-unit-bps", type=float,
+                   default=_d.slippage_per_unit_bps,
+                   help="Quadratic / market-impact term: extra bps per unit "
+                        "of |delta|/max_position_base.  Default 0.0 disables.")
+    p.add_argument("--rescale-windows", action="store_true",
+                   help="When changing --timeframe, rescale feature-window "
+                        "lengths (eta_window, vwap_window, structure_window, "
+                        "disp_window, ar_window) so wall-clock coverage stays "
+                        "constant.  Recommended whenever a parameter set "
+                        "tuned at one timeframe is applied at another.")
 
 
 def _add_optimise_args(p: argparse.ArgumentParser) -> None:
@@ -286,6 +322,7 @@ def cmd_optimise(args: argparse.Namespace) -> int:
         seed=args.seed,
         max_opt_bars=max_opt_bars,
         multi_timeframe=multi_tf,
+        rescale_windows=getattr(args, "rescale_windows", False),
         param_space=[
             ParamSpec("eta_window", "int", 10, 120),
             ParamSpec("vwap_window", "int", 8, 96),

@@ -40,7 +40,13 @@ class MarketState:
         'strategy_snapshot',
         'strategy_ui_state',
         'signals',
+        'snapshot_history',
     )
+
+    # Default rolling buffer length for snapshot_history.
+    # At the strategy-tick cadence of ~500 ms (every 5th 100 ms timer tick)
+    # 600 entries cover ~5 minutes — plenty for the dashboard mini-charts.
+    SNAPSHOT_HISTORY_MAXLEN = 600
 
     def __init__(
         self,
@@ -48,6 +54,7 @@ class MarketState:
         trade_slices: dict | None = None,
         bucket_duration_ms: int = 60_000,
         visible_window_ms: int = 60_000,
+        snapshot_history_maxlen: int | None = None,
     ):
         self.candles: deque = candles if candles is not None else deque(maxlen=200)
         self.trade_slices: dict = trade_slices if trade_slices is not None else {}
@@ -59,6 +66,10 @@ class MarketState:
         self.strategy_snapshot = None
         self.strategy_ui_state: StrategyUIState = StrategyUIState.DISARMED
         self.signals: deque = deque(maxlen=2000)
+        self.snapshot_history: deque = deque(
+            maxlen=snapshot_history_maxlen
+            if snapshot_history_maxlen is not None
+            else self.SNAPSHOT_HISTORY_MAXLEN)
 
     @property
     def mid_price(self) -> float:

@@ -1237,51 +1237,41 @@ In live mode, the timer tick (100ms) drives rendering. Bucket transitions are de
 
 ## Recommended Heatmap Improvements
 
-The following items were identified during diagnosis of the current rendering pipeline. They are not yet implemented but represent concrete opportunities to improve the heatmap's visual quality and usefulness.
+The following items were identified during diagnosis of the rendering pipeline. **All five recommendations are now implemented (items 1–4 during the multi-view refactor, item 5 in Phase 7).**
 
-### 1. Increase Depth Level Count (High Impact)
+### 1. Increase Depth Level Count [COMPLETED]
 
-**Current:** `main_window.py` line 1579-1580 truncates the C++ engine's book snapshot to `[:200]` per side (400 levels total). The REST snapshot fetches 1000 per side, but the live feed only passes 200.
+**Resolution:** Depth-level slicing was removed during the `OrderFlowViewModel` refactor. `ui/live_trading_session.py` now passes the full `snap.get_bids()` / `snap.get_asks()` arrays to the heatmap (no `[:N]` cap). All available REST/feed levels are rendered.
 
-**Recommendation:** Increase to `[:500]` or remove the cap entirely. More levels = wider depth coverage = denser heatmap. The bottleneck is not the number of levels (numpy vectorised ops scale linearly), it's the pixel resolution.
+**Location:** `ui/live_trading_session.py` lines 381–382.
 
-**Location:** `ui/main_window.py` lines 1579-1580.
+### 2. Increase Heatmap Pixel Resolution [COMPLETED]
 
-### 2. Increase Heatmap Pixel Resolution (Medium Impact)
+**Resolution:** Vertical resolution cap raised from 400 to 800 in the viewmodel (`n_rows = min(int(ph), 800)`). On a 1080p display with ~700px of chart height the heatmap image is now full-resolution.
 
-**Current:** `_draw_depth` caps vertical resolution at `n_rows = min(ph, 400)` (line 658). On a 1080p display with ~700px of chart height, this means the heatmap image is 400 rows regardless of screen space. Multiple depth levels at nearby prices collapse into the same pixel row.
+**Location:** `ui/orderflow_viewmodel.py` line 628.
 
-**Recommendation:** Increase the cap to 800 or remove it (use full `ph`). The cost scales linearly with `n_rows` — at 800 rows the `_draw_depth` loop adds ~0.2ms. The QImage scaling from `n_rows` to `ph` already handles the pixel mapping.
+### 3. Improve Color Gradient Contrast [COMPLETED]
 
-**Location:** `ui/heatmap_widget.py` line 658.
+**Resolution:** The single `HEAT_GRADIENT` was split into two complementary LUTs — `HEAT_GRADIENT_BID` (cool blues/greens for resting bids) and `HEAT_GRADIENT_ASK` (warm oranges/reds for resting asks) — and a gamma curve (`DEPTH_GAMMA = 0.55`) was added to expand contrast in the moderate-liquidity zone. Bid-side rendering is mirrored below the mid row; ask-side above.
 
-### 3. Improve Color Gradient Contrast (Medium Impact)
+**Location:** `ui/heatmap_widget.py` lines 50–74 (`HEAT_GRADIENT_BID`, `HEAT_GRADIENT_ASK`, `DEPTH_GAMMA`).
 
-**Current:** `HEAT_GRADIENT` (lines 32-44) uses 11 stops from dark blue to red. The 0-30% intensity range (where most resting liquidity falls) is compressed into dark blue/cyan shades that are hard to distinguish against the dark background. Only very large orders reach the green/orange/red range.
+### 4. Decouple Intensity Normalisation from Current Book [COMPLETED]
 
-**Recommendation:** Consider a gradient with more visual separation in the low-to-mid range:
-- Wider cyan-to-teal band for typical resting liquidity
-- Distinct green band for above-average levels
-- Orange/red reserved for significant walls
-- Alternative: offer a user-selectable gradient (Bookmap-style blue/yellow, or grayscale)
+**Resolution:** Normalisation now uses the **95th-percentile** of recent `log_qty` values across the slice deque (`np.percentile(lq, DEPTH_NORM_PCTILE)`), rather than the current-book max. A single oversized resting order no longer dims everything else, and intensity is stable as that order appears/disappears.
 
-**Location:** `ui/heatmap_widget.py` lines 32-44 (`HEAT_GRADIENT`).
+**Location:** `ui/orderflow_viewmodel.py` line 639 (`DEPTH_NORM_PCTILE = 95`).
 
-### 4. Decouple Intensity Normalisation from Current Book (Low-Medium Impact)
+### 5. Fading / Time-Weighted Depth Columns [COMPLETED — Phase 7]
 
-**Current:** Intensity is normalised by `_cur_log_max` — the maximum `log1p(qty)` in the current book snapshot. This means a single very large resting order makes everything else appear dim. When that order is removed, all levels suddenly brighten (visual instability).
+**Resolution:** `_forward_fill_intensity()` accepts an optional `fade_out` array which is populated with per-column alpha multipliers in `[DEPTH_MIN_FADE, 1.0]`. Real-data columns get `1.0`; forward-filled columns decay linearly with distance from the source over `DEPTH_FADE_WINDOW` columns (≈3 s at the 100 ms slice cadence) and clamp at `DEPTH_MIN_FADE` (0.30). The fade is applied **after** the LUT step (alpha-only), so position logic that reads `intensity` values is bit-identical to the pre-fade behaviour.
 
-**Recommendation:** Use a rolling or percentile-based normalisation (e.g., p99 of recent `log_max` values over the last N slices) to smooth out visual transitions. Alternatively, use a fixed reference value derived from the initial snapshot.
+**Constants:** `DEPTH_FADE_WINDOW = 30`, `DEPTH_MIN_FADE = 0.30` (`ui/heatmap_widget.py` lines 78–79).
 
-**Location:** `ui/heatmap_widget.py` lines 662-664 and 358-360.
+**Location:** `ui/orderflow_viewmodel.py` `_forward_fill_intensity()` and `_compute_depth_image()` (post-LUT alpha multiplication).
 
-### 5. Fading / Time-Weighted Depth Columns (Low Impact, Visual Polish)
-
-**Current:** Forward-filled columns are identical copies of the source column. Old depth that hasn't been updated for many seconds looks the same as fresh depth.
-
-**Recommendation:** Apply a subtle alpha fade to forward-filled columns based on their age relative to the source. For example, a column 5 seconds after the last real update could render at 80% intensity. This would give visual cues about depth freshness without introducing gaps.
-
-**Location:** `ui/heatmap_widget.py` `_forward_fill_intensity()` and `_draw_depth()`.
+**Tests:** `test_heatmap_continuity.py` adds 8 fade-specific tests (default-1 for real columns, linear decay, MIN_FADE clamp, left-edge backfill, intensity invariance, end-to-end alpha application).
 
 ### 6. Heatmap Data Pipeline Summary
 
@@ -1331,7 +1321,17 @@ Binance REST API (1000 levels)
 | `tests/test_bubble_pipeline.py` | Stale-trade chart_now fallback, trade_feed_stale property, updated skew thresholds | TFS |
 | `tests/test_bucket_model.py` | Updated chart_now_unchanged for sub-threshold skew | TFS |
 | `tests/test_bubble_aggregation.py` | Bubble aggregation correctness, determinism, performance, hard caps, coarsening, culling, trade-slice incremental insert/prune/rebuild/boundary tests, buy/sell imbalance | Opt, Stab, VP, PG, TS |
-| `tests/test_heatmap_continuity.py` | Forward-fill unit tests, left-edge backward-fill, sparse depth integration, determinism | HmC |
+| `tests/test_heatmap_continuity.py` | Forward-fill unit tests, left-edge backward-fill, sparse depth integration, determinism, **alpha-fade buffer tests (Phase 7)** | HmC, 7 |
+| `ui/orderflow_viewmodel.py` | Frame-computation viewmodel (depth image, bubbles); 95th-pctile percentile normalisation; 800-row resolution; **`fade_out` alpha buffer + post-LUT alpha multiplication (Phase 7)** | 6, 7 |
+| `ui/heatmap_widget.py` (Phase 7 follow-up) | Removed dead `_native_gesture_event`; added `DEPTH_FADE_WINDOW=30` / `DEPTH_MIN_FADE=0.30` constants; `_forward_fill_intensity` shim forwards `**kwargs` | 7 |
+| `ui/candle_chart_view.py` | Auto-registers default overlays in `__init__`; `clear_overlays()` helper | 6, 7 |
+| `ui/chart_overlays.py` | New: `SmaOverlay`, `EmaOverlay`, `VwapOverlay`, `StructuralLevelsOverlay`, `VolProfileOverlay` (B1–B4) | 7 |
+| `ui/market_state.py` | Shared model class; **+`snapshot_history` deque slot (Phase 7)** | 6, 7 |
+| `ui/live_trading_session.py` | Live data ingestion; **appends to `snapshot_history` on fresh snapshots (Phase 7)** | 6, 7 |
+| `ui/strategy_dashboard_view.py` | Composite dashboard; **`_StrategyHistoryPanel` + `_RippleStateTable` replace placeholder (Phase 7)** | 6, 7 |
+| `tests/test_chart_overlays.py` | New: SMA/EMA/VWAP math, structural levels, VP POC selection, default-overlay integration | 7 |
+| `tests/test_strategy_dashboard.py` | New: `snapshot_history` bounds, history-panel paint robustness, ripple-table updates and threshold colours | 7 |
+| `tests/test_market_state.py` | MarketState construction, candle sharing, **snapshot_history defaults (Phase 7)** | 6, 7 |
 
 | File | No Changes |
 |---|---|
@@ -1429,7 +1429,290 @@ MarketState
 
 ### Future Work (Phase 6+)
 
-- Candle chart overlays: SMA, EMA, Bollinger Bands, Volume Profile overlay, value area (80/90/95), structural levels (ATH/ATL, session H/L)
-- Strategy dashboard: correlation heatmaps (seaborn-style), state-variable time-series plots, Tide/Wave/Ripple state summary panels
+The candle-chart overlays and strategy-dashboard real content originally listed here have shipped in **Phase 7** — see the next section. The remaining items below are still open:
+
+- Candle overlays: Bollinger Bands, value area (80/90/95) on the volume-profile bar
+- Strategy dashboard: correlation heatmaps (seaborn-style), state-variable time-series plots beyond Tide / Wave / risk / uPnL
 - View synchronization: crosshair / time-cursor sync across tabs
 - Unified signal model: single signal model instance consumed by both blotters (reparenting)
+
+---
+
+## Phase 7: Visual Polish, Candle Overlays, and Strategy Dashboard [COMPLETED]
+
+### Overview
+
+Phase 7 closes out the remaining UI visual-quality items from "Recommended Heatmap Improvements" (item 5) and the open candle-chart / strategy-dashboard work from Phase 6. It also fixes a latent dead-code bug in `heatmap_widget.py`.
+
+Three independent tracks (A / B / C) share no internal coupling, so they can ship in any order.
+
+### Bug Fix — Dead `_native_gesture_event`
+
+`HeatmapWidget._native_gesture_event` was defined twice. Python's method resolution silently kept the second (cursor-anchored zoom) and discarded the first; the unused first definition has been removed. No behavioural change — gesture tests already exercised the live definition.
+
+**Location:** `ui/heatmap_widget.py`.
+
+### Track A — Heatmap Visual Polish
+
+#### A5. Forward-Fill Alpha Fade
+
+Forward-filled depth columns now fade their **alpha channel** with age, while leaving the underlying intensity values untouched. Implementation details in the "Recommended Heatmap Improvements" section above (item 5).
+
+### Track B — Candle Chart Overlays (`ui/chart_overlays.py`)
+
+`CandleChartView.register_overlay(fn)` accepts callables matching the signature
+`fn(painter, px, py, pw, ph, pmin, pmax, visible)`. All Phase-7 overlays are
+shipped as **callable classes** so they can be instantiated with config and
+registered/cleared at runtime. The view auto-registers a sensible default set
+in `__init__`; callers can call `clear_overlays()` followed by individual
+`register_overlay()` calls to customise.
+
+| Overlay | Class | Behaviour |
+|---|---|---|
+| **B1 — SMA** | `SmaOverlay(period, color)` | Rolling-sum simple moving average over `close`; warm-up = `period` candles |
+| **B1 — EMA** | `EmaOverlay(period, color)` | α = 2/(n+1); seed = SMA of first window so the line starts at the same index as SMA |
+| **B2 — VWAP** | `VwapOverlay(color)` | Cumulative `Σ(close·vol) / Σ(vol)` across visible candles. Close-price proxy — tick-level `Σ(price·qty)` is not exposed by candle data. Resets automatically on `set_bucket_duration()` because the candle deque clears. |
+| **B3 — Structural levels** | `StructuralLevelsOverlay(extra_candles=None)` | Dashed session high / low across the visible window. Optional `extra_candles` widens the search to the full in-memory deque so ATH / ATL can be drawn beyond the visible slice. |
+| **B4 — Volume Profile bar** | `VolProfileOverlay(n_bins, width_px)` | Right-edge horizontal histogram. Buckets visible candles into `n_bins` price bins (mid-price weighted by volume). POC bin highlighted; remaining bins use a translucent fill. Outline drawn at the inner edge. |
+
+**Robustness:** `_draw_overlays_fn` swallows overlay exceptions (`try / except`) — overlays still bail out early on degenerate inputs (`pmax <= pmin`, `pw <= 0`, empty `visible`, fewer candles than `period`) to keep paint time low.
+
+**Defaults registered in `CandleChartView.__init__`:**
+`SmaOverlay(20)`, `EmaOverlay(50)`, `VwapOverlay()`, `StructuralLevelsOverlay(extra_candles=self._candles)`, `VolProfileOverlay()`.
+
+### Track C — Strategy Dashboard Real Content
+
+#### C1. `MarketState.snapshot_history`
+
+Added a bounded rolling buffer to `MarketState`:
+
+```python
+self.snapshot_history: deque  # default maxlen = SNAPSHOT_HISTORY_MAXLEN (600)
+```
+
+Each entry is a `(ts_ms, snapshot)` tuple. The default buffer covers ≈5 minutes at the strategy-tick cadence of ~500 ms (every 5th 100 ms timer tick). The cap is configurable via the new `MarketState(snapshot_history_maxlen=…)` parameter.
+
+`ui/live_trading_session.py` appends to this deque whenever `_engine.get_strategy_snapshot()` returns a non-`None` snapshot — alongside the existing `mw._last_strategy_snap` write.
+
+#### C2. `_StrategyHistoryPanel` (replaces `_DiagnosticsPlaceholder`)
+
+A pure-`QPainter` mini-chart with two stacked rows:
+
+- **Row 1 — coloured-band step chart.** The Wave regime stripe (BREAKOUT=blue, BREAKDOWN=red, MEAN_REVERSION=green, NEUTRAL=grey) sits above the Tide bias stripe (LONG=green, SHORT=red, NEUTRAL=grey). Each visible band represents one snapshot in `snapshot_history`.
+- **Row 2 — line chart.** Risk budget (`risk.consumed_es / risk.es_budget * 100`) is drawn in orange against a dotted 100% reference line. Unrealized PnL is auto-scaled to fit the row, centred on a dotted zero line, coloured green when latest value > 0, red when < 0.
+
+The panel reads `MarketState.snapshot_history` live each `update()` — no caching, no external charting library.
+
+#### C3. `_RippleStateTable`
+
+A compact 4-column × 2-row `QGridLayout` showing the **current** trade state pulled from `MarketState.strategy_snapshot`:
+
+- Lifecycle, Archetype, Entry, Stop, Target, Hold time (MM:SS), unrealized PnL (signed, colour-coded), ES Used (% with 50 % / 80 % colour thresholds).
+
+Falls back to em-dashes when `strategy_snapshot is None`.
+
+`StrategyDashboardView` now exposes both new widgets via `history_panel` / `ripple_table` properties; `update_from_state()` invokes both on every tick.
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `ui/chart_overlays.py` | `SmaOverlay`, `EmaOverlay`, `VwapOverlay`, `StructuralLevelsOverlay`, `VolProfileOverlay` (B1–B4) |
+| `tests/test_chart_overlays.py` | SMA/EMA/VWAP math, structural-level selection, VP POC selection, helper-math sanity, default-overlay integration (27 checks) |
+| `tests/test_strategy_dashboard.py` | C1 deque slot/maxlen/bounding/empty-start; C2 panel paint robustness (empty, zero budget, zero PnL span, multi-resize); C3 table fields, dashes fallback, snapshot updates, uPnL color, ES% threshold colors; dashboard wiring (49 checks) |
+
+### Modified Files
+
+| File | Phase-7 Changes |
+|------|----------------|
+| `ui/heatmap_widget.py` | Removed dead first `_native_gesture_event`; added `DEPTH_FADE_WINDOW=30` / `DEPTH_MIN_FADE=0.30` constants; `_forward_fill_intensity` shim now forwards `**kwargs` |
+| `ui/orderflow_viewmodel.py` | Imports new fade constants; allocates `_depth_fade` cache; `_forward_fill_intensity` accepts optional `fade_out`; `_compute_depth_image` populates the buffer and applies post-LUT alpha multiplication when any column < 1.0 |
+| `ui/candle_chart_view.py` | `_register_default_overlays()` registers SMA/EMA/VWAP/structural/VP in `__init__`; new `clear_overlays()`; structural overlay holds `extra_candles=self._candles` for ATH/ATL |
+| `ui/market_state.py` | New `snapshot_history` slot + `SNAPSHOT_HISTORY_MAXLEN = 600` class constant + `snapshot_history_maxlen` constructor param |
+| `ui/live_trading_session.py` | Append `(ts_ms, snap)` to `mw._market_state.snapshot_history` when a fresh snapshot is produced |
+| `ui/strategy_dashboard_view.py` | `_DiagnosticsPlaceholder` deleted; `_StrategyHistoryPanel` and `_RippleStateTable` added; bottom area now stacks history panel above table |
+| `tests/test_heatmap_continuity.py` | +8 fade tests (132/132 checks; previously 82) |
+| `tests/test_candle_chart_view.py` | `test_construction` and `test_overlay_registration` updated to expect the auto-registered defaults |
+
+### Regression Status
+
+All UI test suites green after Phase 7 (zero changes to behavioural invariants):
+
+| Suite | Result |
+|---|---|
+| `test_heatmap_continuity.py` | 132/132 |
+| `test_chart_overlays.py` (new) | 27/27 |
+| `test_strategy_dashboard.py` (new) | 49/49 |
+| `test_candle_chart_view.py` | 15/15 |
+| `test_market_state.py` | 9/9 |
+| `test_multi_view.py` | 12/12 |
+| `test_bubble_pipeline.py` | 65/65 |
+| `test_bubble_aggregation.py` | 68/68 |
+| `test_bucket_model.py` | 60/60 |
+| `test_strategy_ui.py` | 163/163 |
+| `test_ui_cleanup.py` | 38/38 |
+| `test_strategy_store.py` | 63/63 |
+| `test_integration_e2e.py` | 55/55 |
+| `test_replay_overlay.py` | 34/34 |
+| `test_performance_profile.py` | 13/13 |
+
+Phase-7 invariants explicitly tested:
+
+- Forward-fill intensity values are bit-identical with or without the fade buffer (`test_fade_buffer_intensity_unchanged`).
+- Alpha fade is applied only post-LUT (`test_fade_alpha_applied_in_compute_frame`).
+- `compute_frame` benchmark still under 50 ms (`test_compute_frame_benchmark`).
+- Dual bid/ask LUTs and bucket-row coverage unchanged.
+- Overlay errors do not crash the paint cycle.
+
+---
+
+## 13. Phase 11C — Heatmap Depth/Seam Coherence Fix + Diagnostics
+
+### 13.1 Symptom (User-Reported, Persistent After 11B)
+
+> "It is glitchy, heatmap boundary doesn't make sense (red is on the blue side of price)…"
+
+The Phase-11B per-column-mid fix correctly addressed the symptom in the *fully-populated-book* scenario (every slice carrying its own valid depth + bid/ask). **It did not address** the much more common live-feed pattern where Binance USD-M futures sends:
+
+- A trade-only / quote-level update (best_bid / best_ask change), but
+- The depth snapshot for the next 100 ms slice is unchanged (or temporarily empty), so
+
+`OrderFlowViewModel.add_depth_column()` reused the prior slice's depth dictionaries while overwriting `best_bid`/`best_ask` with the *fresh* values supplied by the caller. Each slice tuple consequently carried **OLD depth glued to a NEW seam**.
+
+### 13.2 Root Cause Analysis
+
+In `ui/orderflow_viewmodel.py::add_depth_column`:
+
+1. `new_depth = (timestamp != self._last_raw_depth_ts)` is **True** even when `bids=[]` and `asks=[]` (an empty-book tick), because the gating only depends on the raw depth timestamp.
+2. Inside the `new_depth` branch, when both new dicts are empty, `_cur_bids/_cur_asks/_cur_depth_prices/_cur_depth_log_qtys` are **NOT updated** (only `_book_empty_ticks` is incremented).
+3. The slice-construction block then read `dict(self._cur_bids)` (still the *prior* depth) but stored the caller's *current* `best_bid`/`best_ask`.
+4. The gap-fill loop suffered the same defect: gap placeholders were appended with the latest call's `best_bid`/`best_ask` rather than the prior slice's pair.
+
+When `_compute_depth_image` later builds per-column `mid_rows[col] = row(0.5*(s[3]+s[4]))`, those columns end up with a seam reflecting the **new** mid while their depth bands map to **old** prices. Visually, old asks at prices in `[new_mid, old_mid]` re-classify as BIDs (and vice-versa) — the textbook "red on the blue side of price" artefact, plus a flickery boundary on every quote refresh.
+
+The Phase-11B per-column logic is correct **assuming the slice tuple's `best_bid/best_ask` truly paired with its depth** — that assumption was being violated upstream.
+
+### 13.3 Fix
+
+`OrderFlowViewModel` (Phase 11C):
+
+1. **Track `_cur_best_bid` / `_cur_best_ask` alongside `_cur_bids/_cur_asks`** — these are pinned to the latest book update that *also refreshed the depth dictionaries*. They are **NOT** updated during empty-book ticks.
+2. **Slice construction uses `_cur_best_bid/_cur_best_ask`** (not the raw `best_bid/best_ask` parameter) when storing the new slice tuple. This guarantees depth + seam are captured at the same moment.
+3. **Gap-fill placeholders inherit the prior slice's full state** (depth + bid/ask) rather than the current call's bid/ask, so missing slices render consistently with the last known book.
+4. **Reusing the prior slice's depth (the `elif self._slices` branch) also reuses the prior slice's `best_bid/best_ask`** for the same coherence reason.
+
+Net effect: every tuple in `_slices` is now guaranteed to be internally coherent — `(bids_snap, asks_snap, best_bid, best_ask, prices, log_qtys)` always represents one consistent snapshot of the book. `_compute_depth_image` (unchanged from 11B) consequently renders every column with its own *true* historical seam.
+
+### 13.4 Diagnostic Logging
+
+To make any future regression observable without recompiling, `OrderFlowViewModel` now emits a throttled summary of heatmap state once per `_heatmap_diag_interval_s` (default 5 s) when enabled:
+
+- **Toggle**: env var `ORDERFLOW_HEATMAP_DIAG=1` *or* set `vm._heatmap_diag_enabled = True` interactively.
+- **Cadence**: `vm._heatmap_diag_interval_s` (default 5.0).
+- **Schema** (`vm._last_heatmap_diag` is always populated, even when logging is disabled):
+
+| Key | Meaning |
+|---|---|
+| `n_img_cols` | Image column count |
+| `n_rows` | Image row count |
+| `pmin` / `pmax` / `pr` | Current visible price range |
+| `n_slices` | Slices in deque |
+| `mid_set_in_loop` | # columns whose seam was set from a slice's best_bid/best_ask |
+| `mid_forward_filled` | # columns whose seam was inherited via forward-fill |
+| `mid_row_min` / `mid_row_max` | Row range covered by the seam |
+| `mid_row_latest` | Latest column's seam row (for cross-check vs. trade mid) |
+| `mid_row_clipped_top` / `mid_row_clipped_bot` | # columns whose seam pegged to image edges (signals price-range zoom too tight) |
+| `book_empty_ticks` | Running count of empty-book updates |
+
+A typical healthy log line on the live feed:
+
+```
+heatmap_diag cols=601 rows=400 slices=600 mid_set=600 ff=1 clip_top=0 clip_bot=0 \
+  mid_rows=[120..145] latest=132 p=[8910.2..8945.6] empty_ticks=3
+```
+
+If `mid_row_clipped_top` or `mid_row_clipped_bot` is large, the auto-scale price range is too tight for the historical mid swing in the visible window — that becomes the next investigation target.
+
+### 13.5 Test Plan
+
+| Test | Purpose | Status |
+|---|---|---|
+| `tests/test_heatmap_continuity.py::test_phase11c_slice_carries_depth_and_seam_together` | Empty-book tick at a *different* mid retains prior bid/ask. | Added |
+| `tests/test_heatmap_continuity.py::test_phase11c_gap_fill_carries_prior_seam` | Every gap-filled slice carries the prior slice's bid/ask. | Added |
+| `tests/test_heatmap_continuity.py::test_phase11c_held_over_depth_keeps_paired_seam` | 8 consecutive empty-book ticks all retain old-mid seam. | Added |
+| `tests/test_heatmap_continuity.py::test_phase11c_diag_dict_populated` | `_last_heatmap_diag` populated with required keys after `compute_frame`. | Added |
+
+All four tests **fail without the production fix** (verified by `git stash` / re-run / `git stash pop`). Existing 11B tests (`test_per_column_mid_row_with_moving_price`, `test_per_column_mid_row_forward_fills_through_gap`) continue to pass.
+
+### 13.6 Acceptance Criteria
+
+- `tests/test_heatmap_continuity.py` — 158/158 checks pass.
+- All UI suites green after the change: `test_strategy_dashboard` (70/70), `test_bubble_pipeline` (65/65), `test_market_state` (9/9), `test_multi_view` (12/12), `test_bubble_aggregation` (68/68), `test_bucket_model` (60/60), `test_strategy_ui` (163/163), `test_ui_cleanup` (38/38), `test_strategy_store` (63/63), `test_replay_overlay` (34/34), `test_performance_profile` (13/13), `test_candle_chart_view` (15/15), `test_chart_overlays` (27/27), `test_live_trading_session` (10/10), `test_stream_health` (19/19).
+- No public API change to `add_depth_column` (caller still passes `best_bid, best_ask`); the change is purely in how those values are stored.
+
+### 13.7 Files Touched
+
+| File | Change |
+|---|---|
+| `ui/orderflow_viewmodel.py` | New `_cur_best_bid` / `_cur_best_ask` paired with `_cur_*`; slice construction + gap-fill use them; throttled `_last_heatmap_diag` snapshot; `os` import added; opt-in `ORDERFLOW_HEATMAP_DIAG` env-var logger. |
+| `tests/test_heatmap_continuity.py` | Four new Phase-11C tests; helper test list updated. |
+| `UI_STRATEGY_INTEGRATION_PLAN.md` | This section. |
+
+---
+
+## 14. Heatmap UI Pause & Deferred Phases
+
+### 14.1 Pause Trigger
+
+Per the user's directive: **if the heatmap visual issues (glitch / mis-coloured boundary / bubble drop-outs) persist after the Phase 11C fix, no further heatmap UI work is to be undertaken until later phases of `implementation_plan.md` are complete**. This section captures the scope that would otherwise have been prioritised, so the work is recoverable later without re-discovering the context.
+
+### 14.2 Phase 11D — Bubble Drop-out Investigation (Deferred)
+
+**User-reported symptom:** "the bubbles stop rendering" — trade bubbles cease appearing on the heatmap intermittently or after a UI session has been running for a while.
+
+**Reproducibility:** Not reproducible from the static screenshot to date. Earlier session diagnostics suggested:
+
+- `bub` count plateauing at the cell-cap (`MAX_RENDERED_BUBBLES`) rather than dropping to 0,
+- depth/trade timestamp skew (`skew=-12421ms`) at one point — i.e. depth ahead of trades, which `chart_now` accounts for but only up to `_MAX_DEPTH_LEAD_MS` (5 s).
+
+**Investigation plan when re-opened:**
+
+1. Add (or wire) a UI-thread bubble-pipeline diag overlay using the existing `_bubble_diag` dict (`failure_stage`, `filtered_by_time/x/y`, `agg_*` counters). Right now the dict is populated but only logged when there are zero or non-zero trades — no UI exposure.
+2. Capture a session log + clipboard snapshot at the moment bubbles disappear. Specifically need: `_bubble_diag.failure_stage`, deque size, `last_trade_ts` vs. `chart_now`, `t_start`, `pmin`/`pmax`.
+3. Audit `_compute_bubbles` for off-by-one in time-window vs. `t_start` quantisation when the WS feed catches up after a gap.
+4. Check if `_trades_dropped` / `_MAX_TRADES_HELD` saturation correlates with the drop-out (high-volume burst → deque trimmed → new trades arriving but at indices that fail the visible-window filter).
+
+**Acceptance:** A reproducible test plus a fix that keeps `frame.visible_bubble_count` non-zero across the same scenario.
+
+### 14.3 Phase 11E — Auto-scale Price-Range Hardening (Deferred)
+
+**Hypothesis (not yet user-reported as a symptom, but flagged by 11C diagnostics):** when `_zoom_fraction` (default 0.0017) yields a very tight price band and the visible window contains a large mid swing, historical mids fall outside `[pmin, pmax]` and `mid_rows` clip to row 0 or `n_rows-1`. The user perceives this as "the boundary doesn't make sense at the edges."
+
+**Investigation plan:**
+
+1. Make `_compute_depth_image` log a warning when `mid_row_clipped_top + mid_row_clipped_bot > N_THRESHOLD` (e.g. >5% of cols) for several consecutive frames.
+2. Decide whether `add_depth_column` should widen `[pmin, pmax]` to also enclose all *visible-window* slice mids (not just trade extremes) when `_auto_scale=True`.
+3. Consider exposing a UI control to switch between "tight zoom (current price)" and "history-aware zoom" so the user can choose.
+
+**Acceptance:** No `mid_row_clipped_*` warnings during a normal session.
+
+### 14.4 Phase 11F — LUT Perceptual Calibration (Deferred / Cosmetic)
+
+The current bid/ask LUT peaks (BID = `(240, 255, 245)` near-white-cyan; ASK = `(255, 245, 120)` yellow) make high-intensity cells visually similar regardless of side. Some of the user's "glitchy" perception may be the LUT washing out at saturation. **Defer until 11D/11E settle**, then reassess whether the gradients should be tightened (e.g. BID peak at saturated cyan, ASK peak at saturated red) for clearer side discrimination.
+
+### 14.5 Resumption Trigger
+
+Phase 11D / 11E / 11F should be opened only after the user explicitly confirms heatmap UI work should resume (or after the next-priority `implementation_plan.md` phase ships). At that point, recover the diagnostics in `vm._last_heatmap_diag` and `vm._bubble_diag` and start with the highest-impact deferred phase (likely 11D — bubble drop-out is the only remaining user-reported visible defect once 11C lands).
+
+### 14.6 Reference: Diagnostic Commands
+
+```bash
+# Enable heatmap diag at startup
+ORDERFLOW_HEATMAP_DIAG=1 python main.py --mode ui
+
+# Or interactively in the running app's Python shell
+mw._orderflow_vm._heatmap_diag_enabled = True
+mw._orderflow_vm._heatmap_diag_interval_s = 1.0
+```
+
+The throttled log line goes to the standard `ui.orderflow_viewmodel` logger at `INFO`.

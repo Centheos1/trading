@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -124,6 +125,11 @@ class OrderFlowViewModel:
         self._cur_asks: dict = {}
         self._cur_depth_prices = np.empty(0, dtype=np.float64)
         self._cur_depth_log_qtys = np.empty(0, dtype=np.float64)
+        # Phase 11C — track best_bid/best_ask paired with the CURRENT
+        # _cur_bids/_cur_asks snapshot. Updated whenever _cur_* is
+        # updated, never stale-coupled to a fresher quote tick.
+        self._cur_best_bid: float = 0.0
+        self._cur_best_ask: float = 0.0
         self._cur_log_max: float = 0.0
         self._last_log_max: float = 0.0
         self._last_raw_depth_ts: int = 0
@@ -216,6 +222,15 @@ class OrderFlowViewModel:
         }
         self._bubble_diag_log_throttle: float = 0.0
         self._last_visible_bubble_count: int = 0
+
+        # Phase 11C heatmap diagnostics — throttled, off by default.
+        # Toggle via env var ORDERFLOW_HEATMAP_DIAG=1 (or set the attribute
+        # directly in tests / interactive sessions).
+        self._heatmap_diag_enabled: bool = bool(int(
+            os.environ.get("ORDERFLOW_HEATMAP_DIAG", "0") or 0))
+        self._heatmap_diag_throttle: float = 0.0
+        self._heatmap_diag_interval_s: float = 5.0
+        self._last_heatmap_diag: dict = {}
 
     # ---------------------------------------------------------------- properties
 
@@ -399,6 +414,9 @@ class OrderFlowViewModel:
             if new_bids or new_asks:
                 self._cur_bids = new_bids
                 self._cur_asks = new_asks
+                # Phase 11C — pair the seam with this depth snapshot.
+                self._cur_best_bid = float(best_bid)
+                self._cur_best_ask = float(best_ask)
                 self._book_empty_ticks = 0
                 self._last_valid_book_ts = timestamp
                 all_p = list(new_bids.keys()) + list(new_asks.keys())
@@ -426,42 +444,68 @@ class OrderFlowViewModel:
         slice_ts = (effective_ts // self._slice_ms) * self._slice_ms
         self._last_sample_ts = slice_ts
 
+        # Phase 11C — every slice tuple must carry the (best_bid, best_ask)
+        # that paired with the depth at the moment that depth was captured.
+        # `self._cur_best_bid/_cur_best_ask` are pinned to the latest book
+        # update that ALSO refreshed `_cur_bids/_cur_asks`; using them here
+        # (instead of the raw `best_bid/best_ask` parameters) prevents a
+        # stale depth snapshot from being glued to a fresher seam, which
+        # is the root cause of the "red on the blue side" / glitchy
+        # boundary artefact.
         if new_depth:
             bids_snap = dict(self._cur_bids)
             asks_snap = dict(self._cur_asks)
             snap_prices = self._cur_depth_prices
             snap_log_qtys = self._cur_depth_log_qtys
+            snap_best_bid = self._cur_best_bid
+            snap_best_ask = self._cur_best_ask
         elif self._slices:
-            bids_snap = self._slices[-1][1]
-            asks_snap = self._slices[-1][2]
-            snap_prices = self._slices[-1][5]
-            snap_log_qtys = self._slices[-1][6]
+            prev_slice = self._slices[-1]
+            bids_snap = prev_slice[1]
+            asks_snap = prev_slice[2]
+            snap_best_bid = prev_slice[3]
+            snap_best_ask = prev_slice[4]
+            snap_prices = prev_slice[5]
+            snap_log_qtys = prev_slice[6]
         else:
             bids_snap = dict(self._cur_bids)
             asks_snap = dict(self._cur_asks)
             snap_prices = self._cur_depth_prices
             snap_log_qtys = self._cur_depth_log_qtys
+            snap_best_bid = self._cur_best_bid
+            snap_best_ask = self._cur_best_ask
 
         if self._slices and self._slices[-1][0] == slice_ts:
             if new_depth:
                 self._slices[-1] = (slice_ts, bids_snap, asks_snap,
-                                    best_bid, best_ask,
+                                    snap_best_bid, snap_best_ask,
                                     snap_prices, snap_log_qtys)
         else:
             if self._slices:
-                prev_ts = self._slices[-1][0]
+                prev_slice = self._slices[-1]
+                prev_ts = prev_slice[0]
                 gap = (slice_ts - prev_ts) // self._slice_ms - 1
                 if 0 < gap <= 20:
+                    # Gap-fill placeholders inherit the PRIOR slice's full
+                    # state (depth + matching seam) so missing slices render
+                    # consistently with the last known book.
+                    gap_bids = prev_slice[1]
+                    gap_asks = prev_slice[2]
+                    gap_bb = prev_slice[3]
+                    gap_ba = prev_slice[4]
+                    gap_prices = prev_slice[5]
+                    gap_log_qtys = prev_slice[6]
                     fill_ts = prev_ts + self._slice_ms
                     while fill_ts < slice_ts:
                         self._slices.append(
-                            (fill_ts, bids_snap, asks_snap,
-                             best_bid, best_ask,
-                             snap_prices, snap_log_qtys))
+                            (fill_ts, gap_bids, gap_asks,
+                             gap_bb, gap_ba,
+                             gap_prices, gap_log_qtys))
                         fill_ts += self._slice_ms
                     self._missed_slices += gap
             self._slices.append(
-                (slice_ts, bids_snap, asks_snap, best_bid, best_ask,
+                (slice_ts, bids_snap, asks_snap,
+                 snap_best_bid, snap_best_ask,
                  snap_prices, snap_log_qtys))
             self._heatmap_samples += 1
 
@@ -676,14 +720,30 @@ class OrderFlowViewModel:
         prev_data_id = None
         prev_col = -1
 
+        # Per-column bid/ask seam row. -1 means "no valid mid recorded yet";
+        # forward-filled below so empty/stale columns inherit the most recent
+        # known mid. Using a single global mid_row for every column miscolours
+        # historical depth as price moves (Phase 11B fix).
+        mid_rows = np.full(n_img_cols, -1, dtype=np.int32)
+
         for s in self._slices:
             col = (s[0] - t_start_q) // sm
             if col < 0 or col >= n_img_cols:
                 continue
 
+            best_bid = s[3]
+            best_ask = s[4]
+            if best_bid > 0 and best_ask > 0:
+                mid = (best_bid + best_ask) * 0.5
+                mr = int((1.0 - (mid - pmin) / pr) * nrm1 + 0.5)
+                mid_rows[col] = max(0, min(nrm1, mr))
+                mid_row_latest = mid_rows[col]
+
             data_id = id(s[5])
             if data_id == prev_data_id and 0 <= prev_col < n_img_cols:
                 intensity[:, col] = intensity[:, prev_col]
+                if mid_rows[col] < 0:
+                    mid_rows[col] = mid_rows[prev_col]
                 prev_data_id = data_id
                 prev_col = col
                 continue
@@ -694,13 +754,6 @@ class OrderFlowViewModel:
                 prev_data_id = data_id
                 prev_col = col
                 continue
-
-            best_bid = s[3]
-            best_ask = s[4]
-            if best_bid > 0 and best_ask > 0:
-                mid = (best_bid + best_ask) * 0.5
-                mid_row_latest = int((1.0 - (mid - pmin) / pr) * nrm1 + 0.5)
-                mid_row_latest = max(0, min(nrm1, mid_row_latest))
 
             bucket_idx = np.clip(
                 ((prices - pmin) * inv_bs).astype(np.int32),
@@ -735,13 +788,72 @@ class OrderFlowViewModel:
         fade = self._depth_fade
         self._forward_fill_intensity(intensity, fade_out=fade)
 
-        mid_row = max(0, min(nrm1, mid_row_latest))
+        # Forward-fill mid_rows so empty / stale columns inherit the prior
+        # column's seam (and back-fill the leading gap from the first valid).
+        valid = np.nonzero(mid_rows >= 0)[0]
+        n_mid_set_in_loop = int(valid.size)
+        if valid.size == 0:
+            mid_rows[:] = max(0, min(nrm1, mid_row_latest))
+        else:
+            first_valid = int(valid[0])
+            if first_valid > 0:
+                mid_rows[:first_valid] = mid_rows[first_valid]
+            last = mid_rows[first_valid]
+            for c in range(first_valid + 1, n_img_cols):
+                if mid_rows[c] < 0:
+                    mid_rows[c] = last
+                else:
+                    last = mid_rows[c]
+
+        # ---- Phase 11C diagnostics (throttled) -------------------------
+        # Snapshot a small summary so we can tell whether the seam is
+        # behaving on production data without polluting the hot loop.
+        diag = {
+            "n_img_cols": int(n_img_cols),
+            "n_rows": int(n_rows),
+            "pmin": float(pmin),
+            "pmax": float(pmin + pr),
+            "pr": float(pr),
+            "n_slices": int(len(self._slices)),
+            "mid_set_in_loop": int(n_mid_set_in_loop),
+            "mid_forward_filled": int(n_img_cols - n_mid_set_in_loop),
+            "mid_row_min": int(mid_rows.min()) if mid_rows.size else 0,
+            "mid_row_max": int(mid_rows.max()) if mid_rows.size else 0,
+            "mid_row_latest": int(mid_row_latest),
+            "mid_row_clipped_top": int((mid_rows == 0).sum()),
+            "mid_row_clipped_bot": int((mid_rows == nrm1).sum()),
+            "book_empty_ticks": int(self._book_empty_ticks),
+        }
+        self._last_heatmap_diag = diag
+        if self._heatmap_diag_enabled:
+            now_mono = time.monotonic()
+            if (now_mono - self._heatmap_diag_throttle
+                    >= self._heatmap_diag_interval_s):
+                self._heatmap_diag_throttle = now_mono
+                logger.info(
+                    "heatmap_diag cols=%d rows=%d slices=%d "
+                    "mid_set=%d ff=%d clip_top=%d clip_bot=%d "
+                    "mid_rows=[%d..%d] latest=%d "
+                    "p=[%.4f..%.4f] empty_ticks=%d",
+                    diag["n_img_cols"], diag["n_rows"],
+                    diag["n_slices"],
+                    diag["mid_set_in_loop"],
+                    diag["mid_forward_filled"],
+                    diag["mid_row_clipped_top"],
+                    diag["mid_row_clipped_bot"],
+                    diag["mid_row_min"], diag["mid_row_max"],
+                    diag["mid_row_latest"],
+                    diag["pmin"], diag["pmax"],
+                    diag["book_empty_ticks"],
+                )
+
         idx = np.clip((intensity * 255).astype(np.int32), 0, 255)
-        rgba = np.empty((n_rows, n_img_cols, 4), dtype=np.uint8)
-        if mid_row > 0:
-            rgba[:mid_row, :] = _HEAT_LUT_ASK[idx[:mid_row, :]]
-        if mid_row < n_rows:
-            rgba[mid_row:, :] = _HEAT_LUT_BID[idx[mid_row:, :]]
+        ask_lut = _HEAT_LUT_ASK[idx]
+        bid_lut = _HEAT_LUT_BID[idx]
+        # row index < column's mid_row → above mid → ASK side (red)
+        ask_mask = (np.arange(n_rows, dtype=np.int32)[:, None]
+                    < mid_rows[None, :])
+        rgba = np.where(ask_mask[:, :, None], ask_lut, bid_lut)
 
         # Apply per-column alpha fade for forward-filled depth (alpha-only,
         # post-LUT — intensity values used by tests are untouched).

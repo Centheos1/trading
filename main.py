@@ -36,8 +36,8 @@ if __name__ == "__main__":
     exchange = None
 
     while True:
-        mode = input("Choose the program mode (data / backtest / optimise / tide / wave / ui / execute): ").lower()
-        if mode in ["data", "backtest", "optimise", "tide", "wave", "ui", "execute"]:
+        mode = input("Choose the program mode (data / backtest / optimise / tide / wave / ui / execute / replay): ").lower()
+        if mode in ["data", "backtest", "optimise", "tide", "wave", "ui", "execute", "replay"]:
             break
 
     if mode == "ui":
@@ -54,7 +54,7 @@ if __name__ == "__main__":
         exit(wave_interactive())  # noqa: direct import avoids __init__ runpy conflict
 
     if mode == "execute":
-        import sys, os, asyncio, time, signal as signal_mod, json
+        import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__),
                                          'backtestingCpp', 'orderflow', 'build'))
         try:
@@ -72,6 +72,7 @@ if __name__ == "__main__":
         from execution.models import SizingConfig, SizingMode
         from execution.binance_broker import BinanceBroker
         from execution.execution_manager import ExecutionManager
+        from execution.live_runner import run_live_execute
 
         symbol = input("Symbol [BTCUSDT]: ").strip().upper() or "BTCUSDT"
 
@@ -115,116 +116,45 @@ if __name__ == "__main__":
             exec_mgr.stop()
             exit(0)
 
-        config = ofe.EngineConfig()
-        config.tick_size = 0.01
-        engine = ofe.OrderFlowEngine(config)
-        engine.set_signal_callback(lambda sig: exec_mgr.on_signal(sig))
-
         exec_mgr.arm()
         print("Execution ARMED. Press Ctrl+C to stop.\n")
 
-        import requests as req
+        rc = run_live_execute(
+            symbol=symbol,
+            exec_mgr=exec_mgr,
+            ofe_module=ofe,
+            websockets_module=websockets,
+        )
+        exit(rc)
+
+    if mode == "replay":
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__),
+                                         'backtestingCpp', 'orderflow', 'build'))
         try:
-            resp = req.get("https://fapi.binance.com/fapi/v1/depth",
-                           params={"symbol": symbol, "limit": 1000}, timeout=10)
-            resp.raise_for_status()
-            j = resp.json()
-            snap = ofe.DepthUpdate()
-            snap.timestamp = int(time.time() * 1000)
-            snap.first_update_id = j.get("lastUpdateId", 0)
-            snap.final_update_id = snap.first_update_id
-            snap.is_snapshot = True
-            bids, asks = [], []
-            for b in j.get("bids", []):
-                lv = ofe.DepthLevel()
-                lv.price, lv.quantity = float(b[0]), float(b[1])
-                bids.append(lv)
-            for a in j.get("asks", []):
-                lv = ofe.DepthLevel()
-                lv.price, lv.quantity = float(a[0]), float(a[1])
-                asks.append(lv)
-            snap.bids, snap.asks = bids, asks
-            engine.process_depth(snap)
-            logger.info("Depth snapshot: %d bids, %d asks", len(bids), len(asks))
-        except Exception as e:
-            logger.error("Depth snapshot failed: %s", e)
+            import orderflow_engine as ofe
+        except ImportError:
+            print("orderflow_engine not built. Run: cd backtestingCpp/orderflow && ./build.sh")
+            exit(1)
 
-        async def run_feed():
-            base = "wss://fstream.binance.com/ws/"
-            sym_lower = symbol.lower()
-            trade_ws = await websockets.connect(f"{base}{sym_lower}@trade")
-            depth_ws = await websockets.connect(f"{base}{sym_lower}@depth@100ms")
+        from tools.replay_harness import replay_session
 
-            async def read_trades():
-                try:
-                    async for msg in trade_ws:
-                        j = json.loads(msg)
-                        t = ofe.Trade()
-                        t.timestamp = j["T"]
-                        t.price = float(j["p"])
-                        t.quantity = float(j["q"])
-                        t.is_buyer_maker = j["m"]
-                        engine.process_trade(t)
-                except (websockets.ConnectionClosed, asyncio.CancelledError):
-                    pass
+        sidecar_path = input("Sidecar JSONL path: ").strip()
+        if not sidecar_path or not os.path.exists(sidecar_path):
+            print(f"Sidecar not found: {sidecar_path!r}")
+            exit(1)
+        tick_store_path = input("TickStore HDF5 path: ").strip()
+        if not tick_store_path or not os.path.exists(tick_store_path):
+            print(f"TickStore not found: {tick_store_path!r}")
+            exit(1)
 
-            async def read_depth():
-                try:
-                    async for msg in depth_ws:
-                        j = json.loads(msg)
-                        u = ofe.DepthUpdate()
-                        u.timestamp = j.get("E", 0)
-                        u.first_update_id = j.get("U", 0)
-                        u.final_update_id = j.get("u", 0)
-                        u.is_snapshot = False
-                        b_list, a_list = [], []
-                        for b in j.get("b", []):
-                            lv = ofe.DepthLevel()
-                            lv.price, lv.quantity = float(b[0]), float(b[1])
-                            b_list.append(lv)
-                        for a in j.get("a", []):
-                            lv = ofe.DepthLevel()
-                            lv.price, lv.quantity = float(a[0]), float(a[1])
-                            a_list.append(lv)
-                        u.bids, u.asks = b_list, a_list
-                        engine.process_depth(u)
-                except (websockets.ConnectionClosed, asyncio.CancelledError):
-                    pass
-
-            async def status_printer():
-                while True:
-                    await asyncio.sleep(30)
-                    side = exec_mgr.current_side
-                    pos_str = f"{side.value} {exec_mgr.current_qty:.6f}" if side else "Flat"
-                    logger.info("Position: %s | Orders: %d", pos_str, len(exec_mgr.orders))
-                    exec_mgr.refresh_account()
-
-            tasks = [
-                asyncio.create_task(read_trades()),
-                asyncio.create_task(read_depth()),
-                asyncio.create_task(status_printer()),
-            ]
-            stop = asyncio.Event()
-            try:
-                await stop.wait()
-            except asyncio.CancelledError:
-                pass
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            await trade_ws.close()
-            await depth_ws.close()
-
-        try:
-            asyncio.run(run_feed())
-        except KeyboardInterrupt:
-            print("\nShutting down...")
-        finally:
-            exec_mgr.disarm(close_position=True)
-            time.sleep(2)
-            exec_mgr.stop()
-            print("Execution stopped.")
-        exit(0)
+        report = replay_session(
+            sidecar_path=sidecar_path,
+            tick_store_path=tick_store_path,
+            ofe_module=ofe,
+        )
+        print(report.summary())
+        exit(0 if report.ok else 2)
 
     # Exchange
     while True:

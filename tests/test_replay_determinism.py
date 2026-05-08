@@ -22,19 +22,31 @@ except ImportError:
 
 
 def _make_depth(ts, mid, levels=10, base_qty=50.0):
-    """Build a synthetic DepthUpdate snapshot."""
+    """Build a synthetic DepthUpdate snapshot.
+
+    NOTE: pybind11's default vector binding for ``DepthUpdate.bids`` /
+    ``.asks`` returns a copy on read, so per-element ``.append()`` is a
+    no-op (the modified list is garbage-collected). Always build the
+    list in Python and assign the whole list back via the property
+    setter — the prior version of this helper was silently producing
+    empty depth updates. Phase 13X.
+    """
     d = ofe.DepthUpdate()
     d.timestamp = ts
     d.is_snapshot = True
+    bids = []
+    asks = []
     for i in range(levels):
         bl = ofe.DepthLevel()
         bl.price = mid - (i + 1) * 0.01
         bl.quantity = base_qty + (i % 3) * 10.0
-        d.bids.append(bl)
+        bids.append(bl)
         al = ofe.DepthLevel()
         al.price = mid + (i + 1) * 0.01
         al.quantity = base_qty + (i % 3) * 10.0
-        d.asks.append(al)
+        asks.append(al)
+    d.bids = bids
+    d.asks = asks
     return d
 
 
@@ -211,6 +223,43 @@ class TestReplayDeterminism(unittest.TestCase):
         self.assertGreater(last.timestamp, 0, "snapshot timestamp should be populated")
         self.assertGreater(last.ripple.timestamp, 0, "ripple.timestamp should be populated")
         self.assertGreater(last.features.timestamp, 0, "features.timestamp should be populated")
+
+    def test_depth_helper_actually_populates_levels(self):
+        """Phase 13X regression: ``_make_depth`` used to call
+        ``d.bids.append(...)`` which is a no-op under pybind11's default
+        vector binding (the helper produced empty depth updates and the
+        rest of the suite was silently testing the no-op case).
+        Pin the populated-list shape so we cannot regress."""
+        d = _make_depth(ts=12_345, mid=100.0, levels=10, base_qty=50.0)
+        self.assertEqual(len(d.bids), 10)
+        self.assertEqual(len(d.asks), 10)
+        self.assertGreater(d.bids[0].quantity, 0.0)
+        self.assertGreater(d.asks[0].quantity, 0.0)
+        self.assertLess(d.bids[0].price, d.asks[0].price,
+                        "bid should be below ask")
+
+    def test_engine_actually_observes_depth(self):
+        """Phase 13X regression: with the empty-depth bug the engine's
+        OrderBook stayed at zero best_bid/best_ask, so all downstream
+        signals/features were degenerate. Now that ``_make_depth`` is
+        fixed, the OrderBook should have a real top-of-book."""
+        events = _build_event_sequence(50)
+        config = _make_config()
+        engine = ofe.OrderFlowEngine(config)
+        engine.start("")
+        for kind, evt in events:
+            if kind == "depth":
+                engine.process_depth(evt)
+            else:
+                engine.process_trade(evt)
+        ob = engine.get_order_book()
+        engine.stop()
+        self.assertGreater(ob.get_best_bid(), 0.0,
+                           "best_bid should be populated after depth events")
+        self.assertGreater(ob.get_best_ask(), 0.0,
+                           "best_ask should be populated after depth events")
+        self.assertGreater(ob.get_best_ask(), ob.get_best_bid(),
+                           "ask should be above bid")
 
 
 @unittest.skipUnless(HAS_MODULE, "orderflow_engine C++ module not available")

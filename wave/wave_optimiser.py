@@ -12,6 +12,27 @@ Objectives (maximise Sharpe, maximise Calmar, minimise MaxDD):
     (sharpe, calmar, -|max_drawdown|)
 
 All Parameters including timeframe are optimisable.
+
+Calibration assumption (Phase 9 — backtest hardening)
+─────────────────────────────────────────────────────
+Feature thresholds (η, dispersion, AR) are calibrated against the *bar-count*
+distributions produced by the chosen timeframe.  The default ranges in
+``WaveOptimiserConfig.param_space`` were tuned on hourly bar data; if you
+search over the ``timeframe`` axis without setting
+``WaveOptimiserConfig.rescale_windows = True`` then a candidate that swaps
+``timeframe`` to ``5m`` will see windows that are ~12x narrower in
+wall-clock terms (e.g. ``eta_window=24`` becomes 2h instead of 24h), which
+shifts every feature's distribution and breaks threshold calibration.
+
+Two ways to handle this:
+
+1. Set ``WaveOptimiserConfig.rescale_windows = True`` (recommended when
+   ``timeframe`` is in the search space).  The optimiser will scale
+   ``eta_window``, ``vwap_window``, ``structure_window``, ``disp_window``,
+   ``ar_window`` by the bar-seconds ratio when applying a new timeframe so
+   the wall-clock coverage stays constant.
+2. Pin ``timeframe`` to a single value and let the GA search the windows
+   directly.  This is what older runs implicitly did.
 """
 
 from __future__ import annotations
@@ -94,6 +115,13 @@ class WaveOptimiserConfig:
 
     multi_timeframe: bool = True
 
+    # Phase 9 — backtest hardening.
+    # When True, ``with_timeframe`` rescales feature-window lengths to keep
+    # wall-clock coverage constant when ``timeframe`` is mutated.  See module
+    # docstring for the calibration rationale.  Default False preserves the
+    # behaviour of pre-Phase-9 runs.
+    rescale_windows: bool = False
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Sampling and mutation helpers
@@ -136,10 +164,23 @@ _HORIZONS_BY_TF: dict[str, tuple[int, ...]] = {
 }
 
 
-def _apply(params: WaveStrategyParams, name: str, value) -> WaveStrategyParams:
+def _apply(
+    params: WaveStrategyParams,
+    name: str,
+    value,
+    *,
+    rescale_windows: bool = False,
+) -> WaveStrategyParams:
+    """Apply a single GA parameter assignment, returning a new params copy.
+
+    Phase 9: ``rescale_windows`` is forwarded to
+    :py:meth:`WaveStrategyParams.with_timeframe` when ``name == "timeframe"``
+    so window lengths track the new bar-clock and threshold calibration
+    stays valid across timeframes.
+    """
     if name == "timeframe":
         tf = str(value)
-        new = params.with_timeframe(tf)
+        new = params.with_timeframe(tf, rescale_windows=rescale_windows)
         # Also update accuracy horizons to match the new timeframe's scale
         horizons = _HORIZONS_BY_TF.get(tf, params.accuracy_horizons)
         from dataclasses import replace as _replace
@@ -355,7 +396,10 @@ class WaveOptimiser:
         for _ in range(self.cfg.population_size):
             params = deepcopy(self.base_params)
             for spec in self.cfg.param_space:
-                params = _apply(params, spec.name, _sample_one(spec, self._rng))
+                params = _apply(
+                    params, spec.name, _sample_one(spec, self._rng),
+                    rescale_windows=self.cfg.rescale_windows,
+                )
             ind = WaveIndividual(params=params)
             self._evaluate(ind)
             pop.append(ind)
@@ -416,7 +460,10 @@ class WaveOptimiser:
         params = deepcopy(a)
         for spec in self.cfg.param_space:
             if self._rng.random() < 0.5:
-                params = _apply(params, spec.name, getattr(b, spec.name))
+                params = _apply(
+                    params, spec.name, getattr(b, spec.name),
+                    rescale_windows=self.cfg.rescale_windows,
+                )
         return params
 
     def _mutate(self, params: WaveStrategyParams) -> WaveStrategyParams:
@@ -424,7 +471,8 @@ class WaveOptimiser:
             if self._rng.random() < self.cfg.mutation_rate:
                 params = _apply(
                     params, spec.name,
-                    _mutate_one(spec, getattr(params, spec.name), self._rng)
+                    _mutate_one(spec, getattr(params, spec.name), self._rng),
+                    rescale_windows=self.cfg.rescale_windows,
                 )
         return params
 
