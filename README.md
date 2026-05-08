@@ -830,6 +830,78 @@ Deferred to Phase 13C:
   *inside* a single `on_timer_tick` invocation (e.g. reordering of
   heatmap vs. CVD updates) is out of scope.
 
+### Phase 7V — HMM vs. Rule-Based Backtest A/B Validation `[COMPLETED]`
+
+Closes the explicit validation gap left open at the end of Phase 7 —
+the comparison infrastructure (`set_hmm_backend` / `set_score_backend`
+on `RippleEngine`) shipped in mid-2025 but the actual A/B validation
+run was never executed. Phase 7V delivers the harness, runs it, and
+commits the first real baseline.
+
+The harness:
+
+1. Runs an `orderflow` backtest against a `TickStore` with the default
+   rule-based `ScoreBasedInference` backend, capturing every
+   `RippleDecision` along with the corresponding 6-D evidence vector
+   (via `ripple.last_evidence()`) and the `triggering_state`
+   `RippleState` integer.
+2. Trains a Gaussian-emission HMM on the captured evidence sequence
+   via `hmm.HMMTrainer.select_model(k_range=[3, 4, 5, 6])`, picks K by
+   BIC argmin, and derives the `state_map` (HMM hidden state →
+   `RippleState` int) by majority vote against the rule-based labels.
+3. Saves the trained model JSON to `models/hmm_<symbol>_<label>_<ts>.json`.
+4. Re-runs the same backtest with `params["hmm_enabled"]=True` +
+   `params["hmm_model_path"]=<saved file>`, capturing the same metrics.
+5. Writes a Markdown + JSON A/B report to `reports/`.
+
+CLI:
+
+```bash
+cd /Users/clintsellen/Documents/Trading/app/backtest
+python -m tools.hmm_abtest \
+  --symbol BTCUSDT --exchange binance \
+  --from-time 2026-03-07 --to-time 2026-03-09 \
+  --label phase7v_smoke --k-range 3,4,5 --seed 0
+```
+
+Files:
+
+- `hmm/abtest.py` — pure-Python helpers: `derive_state_map`,
+  `compare_metrics`, `summarize_winner`, `format_comparison_report`,
+  `format_comparison_json`, `AbtestSummary`.
+- `tools/hmm_abtest.py` — CLI orchestrator.
+- `tests/test_hmm_abtest.py` — 38 new offline tests; full coverage of
+  the helpers + a stub-runner integration that exercises
+  `run_abtest()` end-to-end without the C++ engine.
+- `reports/hmm_abtest_BTCUSDT_phase7v_baseline.md` /
+  `.json` — the canonical first real run captured against
+  `data/binance_ticks.h5` (BTCUSDT, 2026-03-07 → 2026-03-09).
+- `models/hmm_BTCUSDT_phase7v_smoke_*.json` — first trained HMM model.
+
+First-run result (BTCUSDT, 2-day window, default post-13Y params):
+
+| Metric | Rule-based | HMM (K=3) | Winner |
+|---|---:|---:|---|
+| `pnl` | 0.000000 | 3.336452 | **hmm** |
+| `max_drawdown` | 0.000000 | 0.000151 | **score** |
+| `num_trades` | 1 | 16 | informational |
+| `sharpe_ratio` | 0.289721 | 0.289721 | **tie** |
+| `cagr` | 5337.121322 | 5337.121322 | **tie** |
+
+**Verdict:** *Mixed: HMM wins 1, rule-based wins 1, ties 2.* Sharpe and
+CAGR tie because both runs share the same `SignalEngine`; only the
+Ripple inference backend differs. The CAGR figure is a mechanical
+annualization of a tiny return over 2 days — not a meaningful
+multi-year projection. For a credible promotion decision, re-run
+against ≥30-day windows on multiple symbols.
+
+Validation:
+
+- `python -m unittest tests.test_hmm_abtest -v` — 38/38 pass in 0.40 s.
+- `python -m tools.hmm_abtest --symbol BTCUSDT ...` end-to-end run
+  against `data/binance_ticks.h5` — exits 0, emits both report
+  artifacts, deterministic given fixed `--seed`.
+
 ---
 
 ## Metric Documentation

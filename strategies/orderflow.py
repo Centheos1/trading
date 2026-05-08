@@ -30,6 +30,11 @@ _RIPPLE_MAP: Dict[str, str] = {
     "idle_exit_threshold": "idle_exit_threshold",
     "bounce_max_break_risk": "bounce_max_break_risk",
     "feature_window_ms": "feature_window_ms",
+    # Phase 7V: surface HMM toggles via the params dict so the A/B
+    # validation harness (and any other caller) can flip backends
+    # without monkey-patching the engine after construction.
+    "hmm_enabled": "hmm_enabled",
+    "hmm_model_path": "hmm_model_path",
 }
 
 _LIFECYCLE_KEYS: Tuple[str, ...] = (
