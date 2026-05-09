@@ -52,6 +52,44 @@ When in doubt, consult these documents in priority order:
 - **Do not add configuration options unless they will be used in V1.** Configurable does not mean good.
 - **Do not add layers of indirection** unless they solve a concrete problem.
 
+### 3.5 Integration ≠ Unit-Test-Complete `[lesson from 2026-05 V1 audit]`
+
+A phase is **NOT done** when its unit tests pass. A phase is done when
+the new capability is **invoked from at least one live runtime entry
+point** (`ui/live_trading_session.py`, `execution/live_runner.py`, or
+`main.py:<mode>`) AND that wiring is itself covered by a regression
+test.
+
+Failure mode: the 2026-05 V1 audit found that `RippleEngine::set_risk_budget`,
+`set_wave_snapshot`, and `set_realized_vol` were unit-test-complete since
+Phases 4 / 5 but had **never been called by any live entry point**. The
+"COMPLETED" status on Phases 4, 5, 8, and 12 reflected unit-test
+delivery, not end-to-end integration. The result was a backend with a
+deterministic Tide → Wave → Ripple architecture and a frontend that
+silently ran every live session against `DefaultTideSnapshot` and
+`DefaultWaveSnapshot`.
+
+**Operating rules:**
+
+1. When closing a phase, add a "wired live?" row to the phase's
+   acceptance criteria. The row passes only if a `grep` for the new
+   API surface returns at least one production-code hit outside
+   `tests/`.
+2. Add a **wiring test** alongside the unit tests. A wiring test
+   instantiates the runtime entry point with a stub engine and asserts
+   the engine receives the expected setter calls at the expected
+   cadence.
+3. In the implementation plan, the §2.2 "Existing Capabilities" table
+   has a `Wired live?` column. Update it honestly. `⚠️ Engine-only`
+   is a permitted status — `✅` requires actual production wiring.
+4. If a capability is intentionally engine-only (e.g. a research-only
+   inference backend behind a flag), say so explicitly and link to the
+   flag.
+
+This is the single most expensive lesson the project has learned to
+date. It is the root cause of `implementation_plan.md` §7.1 V1 Closure
+Roadmap (Phase 14 series).
+
 ---
 
 ## 4. Mandatory Testing Rules
@@ -197,6 +235,71 @@ For a given sequence of events and a given configuration:
 - The strategy MUST produce identical outputs every time.
 - This applies to all features, state transitions, trade decisions, and fills (in paper mode).
 
+### 7.4 Live Execution Topology Contract `[V1 — Phase 14A — ENFORCED IN CODE 2026-05-09]`
+
+The live execute path MUST consume `RippleDecision` intents, not raw `SignalEngine.Signal` events.
+
+- `engine.set_ripple_callback(...)` is the **only** approved subscription point for the execution layer (paper or live).
+- `engine.set_signal_callback(...)` is reserved for **observation / logging / recording** (e.g. `SessionRecorder`). It MUST NOT drive `ExecutionManager.on_signal` or any other order-routing entry point.
+- Cooldowns, throttles, and gating in the execution layer MUST use `intent.timestamp` (event time, ms), never `time.time()` / `time.monotonic()` / `datetime.now()` (wall-clock).
+- The Ripple lifecycle FSM, scaling logic, exit taxonomy, and `RiskEngine` are the source of truth for *whether* an order fires; the execution layer is the source of truth for *how* it fires (broker, sizing, retry).
+- `ExecutionManager.on_signal` is preserved as a **deprecated shim** so the Phase 12 regression suite still pins the legacy surface, but it logs a one-time WARNING and is no longer wired by `live_runner.py`, `main.py:execute`, or `ui/main_window.py`.
+
+**Rationale.** Routing the live path through raw signals bypasses
+the entire Tide / Wave / Ripple architecture, the V1 §22.2 #4 exit
+taxonomy contract, and the V1 §22.2 #12 risk-checks contract. The
+2026-05 V1 audit found this exact gap on the live path; it is closed
+by `implementation_plan.md` §7.1 Phase 14A (shipped 2026-05-09 with
+23 new `test_execution_manager.py` tests, a new `test_live_runner.py`
+suite of 13 tests, and a 419-test wider regression sweep). New code
+MUST NOT re-introduce signal-driven routing on the live path.
+
+**Enforcement check (CI-friendly — both must pass for any commit
+that touches `execution/`, `ui/`, or `main.py`):**
+
+```bash
+# Gate 1: production code must NOT subscribe execution to signals.
+# Expected output: empty (only doc references in implementation_plan /
+# README / this file are matched against the broader filesystem).
+grep -rn "engine\.set_signal_callback(.*on_signal" execution/ ui/ main.py
+
+# Gate 2: any time.time() in execution_manager.py must be inside the
+# deprecated on_signal / _execute_signal path (2 surviving hits at
+# present). Decision logic on the canonical on_intent path is
+# wall-clock-free; the new TestOnIntentEventTimeCooldown test class
+# guards this invariant by patching time.time to raise.
+grep -n "time\.time()" execution/execution_manager.py
+```
+
+### 7.5 Layered Strategy Wiring Contract `[V1 — Phase 14B]`
+
+Every live runtime entry point (`ui/live_trading_session.py`,
+`execution/live_runner.py`, `main.py:execute`) MUST push the latest
+Tide budget, Wave snapshot, and realized volatility into the C++
+engine on every tick at the cadences specified in `strategy.md` §5.3
+(Tide 60 s, Wave 5 s, RV 1 s).
+
+The setters that MUST be called:
+- `RippleEngine::set_risk_budget(es_budget, max_position_usd, risk_multiplier)` — Tide → Risk wiring.
+- `RippleEngine::set_wave_snapshot(WaveSnapshot)` — Wave → permissions wiring.
+- `RippleEngine::set_realized_vol(double)` — Vol → sizing wiring.
+- `RippleEngine::set_inventory(InventorySnapshot)` — broker position → engine wiring (when inventory tracking is added in V2).
+
+**Rationale.** Without these calls the engine runs against
+`DefaultTideSnapshot::make()` (NEUTRAL, no budget) and
+`DefaultWaveSnapshot::make()` (NEUTRAL, all permissions FULL) — which
+silently disables the entire upper architecture. Unit tests for the
+setters do NOT exempt a runtime path from calling them.
+
+**Enforcement check (CI-friendly):**
+
+```bash
+# Each must return at least one production hit (excluding tests/).
+grep -rn "set_risk_budget" ui/ execution/ main.py
+grep -rn "set_wave_snapshot" ui/ execution/ main.py
+grep -rn "set_realized_vol" ui/ execution/ main.py
+```
+
 ---
 
 ## 8. Documentation Update Rules
@@ -311,6 +414,9 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 | Permission bypass | Ripple ignores Wave permissions | Enforce check in `TriggerDecisionEngine` |
 | Budget override | Ripple exceeds Tide risk budget | Enforce check in `RiskEngine` on order path |
 | Non-deterministic replay | Different outputs for same inputs | Replay tests after every behavioral change |
+| Wiring drift (engine-only delivery) | Capability is unit-test-complete in C++/Python but never invoked by any live entry point — engine silently runs against `Default*Snapshot` defaults | §3.5 wiring rule + `Wired live?` column on §2.2 of `implementation_plan.md` + grep-based CI checks (see §7.4 / §7.5) |
+| Signal-driven live execution | Live `ExecutionManager` consumes raw `SignalEngine.Signal` events instead of `RippleDecision` intents — bypasses lifecycle FSM, scaling, exits, and `RiskEngine` | §7.4 live execution topology contract; `engine.set_signal_callback` is for observation only |
+| Wall-clock decision logic | `time.time()` / `datetime.now()` in cooldown / throttle / gating logic — breaks event-time replay determinism | §7.1 + §7.4; CI grep gate on `execution/execution_manager.py` |
 
 ### 11.2 Implementation Failures
 

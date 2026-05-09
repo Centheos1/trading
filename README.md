@@ -6,6 +6,41 @@ parameter optimisation (NSGA-II), and a C++ order flow engine.
 
 ---
 
+## V1 Status — NOT YET GA (as of 2026-05)
+
+**TL;DR.** Backtest, optimise, replay, and UI live-view modes are
+production-quality. The **`execute` (live trading) mode is V1-incomplete**
+and must not be relied on for capital deployment yet — the live execution
+path bypasses the Ripple lifecycle FSM, the Wave permissions matrix, and
+the Tide risk budget. See `implementation_plan.md` §7.1 for the
+**Phase 14 V1 Closure Roadmap**.
+
+| Mode | V1 Status | Safe to use? |
+|---|---|---|
+| `python main.py backtest` (orderflow / wave / tide) | ✅ V1-complete | Yes |
+| `python main.py optimise` (NSGA-II) | ✅ V1-complete (one polish item — Phase 14E) | Yes |
+| `python main.py ui` (live view, paper fills via `paper_fills` flag) | ✅ V1-complete | Yes (paper only) |
+| `python main.py execute` (live Binance USD-M futures trading) | ⚠️ **V1-partial** — Phase 14A done (Ripple-driven, event-time cooldown); Tide / Wave / Risk wiring still pending (Phase 14B + 14C) | **TESTNET only** — testnet OK to soak-test Ripple FSM end-to-end. Real funds: still NO until Phase 14C ships the broker risk-rejection acceptance suite. |
+| `tools/replay_harness.py` (deterministic replay verifier) | ✅ V1-complete | Yes |
+| `tools/hmm_abtest.py` (Phase 7V HMM A/B harness) | ✅ V2 research tooling | Yes (research only) |
+
+**Outstanding V1 closure work (in priority order):**
+
+| Sub-phase | Title | Severity | Status | Est. effort |
+|---|---|---|---|---|
+| 14A | Live execution driven by Ripple decisions (incl. event-time cooldown) | 🔴 Blocker | ✅ **DONE 2026-05-09** | 2–3 days (actual: ~1 day) |
+| 14B | Tide / Wave / Vol snapshot push to live engine | 🔴 Blocker | NOT STARTED | 1–2 days |
+| 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | NOT STARTED | 1 day |
+| 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | NOT STARTED | 0.5 day |
+| 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | NOT STARTED | 0.5 day |
+
+V2 / V3 scope (HMM Wave classifier, Hierarchical ES, Multi-symbol,
+Multi-factor PCA, Adaptive Kelly sizing, Live model retraining, LIMIT/OCO
+broker support) is documented in `implementation_plan.md` §7.2 and is
+explicitly out-of-scope for V1.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -328,25 +363,43 @@ for the full architectural breakdown (Phases A–E + 6 + 7).
 
 ## Remaining Work
 
-### Live Execute Path (Phase 12 — Hardened)
+### Live Execute Path (Phase 12 + Phase 14A — Ripple-driven)
 
 The outbound order-routing layer mirrors the Phase 10 inbound-feed
-hardening. Ripple decisions flow through the same code path whether
-the user is paper-trading or routed at a real broker, and Phase 12
-adds the unit-test scaffolding that path was missing.
+hardening. Phase 12 added the unit-test scaffolding the
+`PaperEngine` / `ExecutionManager` / `BinanceBroker` layer was missing.
+**Phase 14A** (2026-05-09) rewired the live execution topology so that
+both paper and live paths consume `RippleDecision` intents (which
+already pass through the lifecycle FSM, scaling logic, exit taxonomy,
+and `RiskEngine`).
+
+> **Tide / Wave wiring is still pending** (`Phase 14B` + `14C` —
+> `implementation_plan.md` §7.1). The C++ `RippleEngine` runs against
+> `DefaultTideSnapshot` / `DefaultWaveSnapshot` until those phases
+> ship, so the local `RiskEngine` receives no budget on the live path
+> and Wave permissions are all `FULL`. **TESTNET soak runs are safe;
+> real-fund deployment must wait for Phase 14C.**
 
 ```
 RippleEngine (C++)
   → RippleDecision
-    → main_window._on_ripple_received
-      → ripple_decision_to_intent (execution/models.py)
-        ├─ paper:  PaperEngine.on_intent
-        │            → _handle_entry / _handle_exit
-        │            → order_callback → TradeBlotter / AccountPanel
-        └─ live:   ExecutionManager.on_signal (cooldown + side gate)
-                     → asyncio worker loop
-                       → BinanceBroker.place_order (REST)
-                         → _poll_order_fill until FILLED
+    ├─ ripple_decision_to_intent (execution/models.py)
+    │    ├─ paper:  PaperEngine.on_intent          ← unchanged from Phase 12
+    │    │            → _handle_entry / _handle_exit
+    │    │            → order_callback → TradeBlotter / AccountPanel
+    │    └─ live:   ExecutionManager.on_intent     ← Phase 14A
+    │                 (event-time cooldown via intent.timestamp)
+    │                 → asyncio worker loop
+    │                   → BinanceBroker.place_order (REST, MARKET)
+    │                     → _poll_order_fill until FILLED
+    └─ recorder.record_ripple_decision (sidecar — Phase 13)
+
+SignalEngine (C++)
+  → Signal
+    └─ recorder.record_signal (sidecar — Phase 13, observation only)
+       NB: signals NO LONGER drive ExecutionManager post-14A.
+       The deprecated ExecutionManager.on_signal entry point logs a
+       one-time WARNING if any caller still routes signals through it.
 ```
 
 Phase 12 added ≈ 83 new offline tests across four suites (no real
@@ -390,11 +443,26 @@ Combined runtime of the four new suites is under 1 second, well below
 the 5-second budget. No production-code patches were required — the
 audit pass during test writing did not surface any defect.
 
-Deferred to a separate phase:
-- Live-broker integration soak / paper-trade reconciliation runs
-  (Phase 14 candidate).
+**V1 closure work (Phase 14 — see `implementation_plan.md` §7.1):**
+- ✅ **14A — DONE 2026-05-09.** Replaced `set_signal_callback(on_signal)`
+  with `set_ripple_callback(...)` → `ripple_decision_to_intent` →
+  `ExecutionManager.on_intent`. Wall-clock cooldown moved to event-time
+  (`intent.timestamp` → `_last_intent_ts_ms`). 23 new tests in
+  `tests/test_execution_manager.py`, 13 new tests in
+  `tests/test_live_runner.py`. Both grep gates pass.
+- 14B — Push `TideSnapshot` / `WaveSnapshot` / realized vol into the
+  C++ engine on every live tick.
+- 14C — End-to-end V1 §22.2 #12 contract test: `StubBroker` sees zero
+  orders when `consumed_es ≥ es_budget`, Wave is `DISABLED`, Tide is
+  `CRISIS`, `max_position` is exceeded, two trades are concurrent, or
+  cooldown is active.
+
+**Deferred to V2:**
 - LIMIT / OCO order support and partial-fill bookkeeping
   enhancements.
+- Multi-symbol routing.
+- Server-side risk policy (Binance risk limits) — Phase 14C only
+  enforces the *local* `RiskEngine`.
 
 ### Wave Parameter Tuning & Calibration (Phase 9 — Backtest Hardening)
 Wave thresholds (`eta_bo_threshold`, `dispersion_critical`, etc.) are calibrated

@@ -10,18 +10,33 @@ from collections import deque
 
 from execution.broker_interface import BrokerInterface
 from execution.models import (
-    AccountInfo, Order, OrderSide, OrderStatus, OrderType,
-    Position, SizingConfig, SizingMode,
+    AccountInfo, ExecutionIntent, Order, OrderSide, OrderStatus,
+    OrderType, Position, SizingConfig, SizingMode,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class ExecutionManager:
-    """Routes signals to a broker with position sizing, cooldown, and safety guards.
+    """Routes Ripple intents to a broker with position sizing, cooldown,
+    and safety guards.
 
     Runs its own asyncio event loop in a background thread so the caller
     (Qt main thread or CLI) never blocks.
+
+    Phase 14A — Live execution topology contract (AGENT_STRATEGY_RULES.md
+    §7.4): the live path consumes ``RippleDecision`` intents via
+    :meth:`on_intent`, which already honour the Ripple lifecycle FSM,
+    Wave permissions, the ``RiskEngine`` ES throttle, and Tide budgets.
+    The legacy :meth:`on_signal` entry point remains as a deprecated
+    shim so that the prior signal-driven topology can still be tested,
+    but it is no longer wired by ``live_runner.py`` / ``main_window``.
+
+    Cooldowns are enforced in **event time** (`intent.timestamp_ms`) per
+    the V1 §22.2 / AGENT_STRATEGY_RULES.md §7.1 determinism contract.
+    The ``time.time()`` call inside ``_execute_signal`` (deprecated path)
+    is preserved only for the legacy on_signal flow; ``on_intent`` /
+    ``_execute_intent_entry`` use event time exclusively.
     """
 
     MIN_NOTIONAL = 105
@@ -38,12 +53,22 @@ class ExecutionManager:
         self._symbol = symbol.upper()
         self._sizing = sizing
         self._cooldown_s = cooldown_s
+        # Phase 14A: ms-precision event-time cooldown gate. We keep the
+        # ``cooldown_s`` constructor parameter unchanged for backwards
+        # compatibility but enforce it as ``cooldown_s * 1000`` ms
+        # against ``intent.timestamp`` on the on_intent path.
+        self._cooldown_ms = int(cooldown_s * 1000.0)
         self._order_callback = order_callback
 
         self._armed = False
         self._current_side: Optional[OrderSide] = None
         self._current_qty: float = 0.0
+        # Wall-clock seconds — only ever read/written by the deprecated
+        # ``on_signal`` path. Phase 14A guarantees decision logic on the
+        # canonical ``on_intent`` path uses event time only.
         self._last_order_ts: float = 0.0
+        # Event-time milliseconds — used by ``on_intent``.
+        self._last_intent_ts_ms: int = 0
         self._last_signal_price: float = 0.0
         self._step_size: float = 0.0
         self._orders: Deque[Order] = deque(maxlen=500)
@@ -52,6 +77,7 @@ class ExecutionManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._on_signal_warning_logged = False
 
     @property
     def armed(self) -> bool:
@@ -113,7 +139,27 @@ class ExecutionManager:
             self._submit(self._close_position_coro())
 
     def on_signal(self, signal) -> None:
-        """Called from the signal callback (any thread)."""
+        """**DEPRECATED — Phase 14A.** Use :meth:`on_intent` instead.
+
+        This entry point still works to keep legacy callers (and the
+        Phase 12 regression suite) green, but it is no longer wired by
+        ``live_runner.py`` or ``main_window``. Signal-driven routing
+        bypasses the Ripple lifecycle FSM, Wave permissions, and the
+        ``RiskEngine`` ES throttle — see AGENT_STRATEGY_RULES.md §7.4.
+
+        Cooldown on this path is wall-clock based; that is intentional
+        for backwards compatibility and is part of the reason the
+        method is deprecated.
+        """
+        if not self._on_signal_warning_logged:
+            logger.warning(
+                "ExecutionManager.on_signal is deprecated (Phase 14A). "
+                "Wire engine.set_ripple_callback to on_intent instead. "
+                "Signal-driven routing bypasses Ripple FSM, Wave "
+                "permissions, and RiskEngine."
+            )
+            self._on_signal_warning_logged = True
+
         if not self._armed or not self._loop:
             return
 
@@ -135,12 +181,84 @@ class ExecutionManager:
             self._execute_signal(desired_side, type_name), self._loop
         )
 
+    def on_intent(self, intent: ExecutionIntent) -> None:
+        """Phase 14A — canonical live-execution entry point.
+
+        Consumes a Ripple ``ExecutionIntent`` (from
+        :func:`execution.models.ripple_decision_to_intent`) and routes
+        it to the broker. The intent has already passed through the
+        Ripple lifecycle FSM, Wave permissions matrix, and ``RiskEngine``
+        on the C++ side, so this method is a thin transport layer:
+        cooldown gate, side resolution, broker dispatch.
+
+        **Determinism contract (V1 §22.2 + AGENT_STRATEGY_RULES.md §7.1):**
+        the cooldown gate uses ``intent.timestamp`` (event time, ms)
+        and never consults wall-clock time. A captured live session
+        can therefore be replayed with no temporal drift.
+
+        Thread-safe: dispatches the actual broker call onto the
+        manager's asyncio worker via ``run_coroutine_threadsafe``.
+        """
+        if intent is None:
+            return
+        if not self._armed or not self._loop:
+            return
+
+        intent_type = intent.intent_type or ""
+        # cancel/rearm/prepare are no-ops on the live MARKET path —
+        # we have no passive orders to cancel and no preparation
+        # state. They are still legitimate intents (used by paper).
+        if intent_type in ("cancel", "rearm", "prepare"):
+            return
+
+        # Event-time cooldown gate. Reject intents that arrive within
+        # ``cooldown_ms`` of the last accepted intent.
+        ts_ms = int(intent.timestamp or 0)
+        if (self._last_intent_ts_ms > 0
+                and ts_ms > 0
+                and (ts_ms - self._last_intent_ts_ms) < self._cooldown_ms):
+            return
+
+        # Cache the reference price for downstream sizing.
+        if intent.reference_price > 0:
+            self._last_signal_price = intent.reference_price
+
+        if intent_type == "exit":
+            # Exits always close the current position regardless of
+            # side. If we have no position there is nothing to do —
+            # we still update the cooldown stamp to mirror the entry
+            # path's "I saw an intent" semantic.
+            self._last_intent_ts_ms = ts_ms if ts_ms > 0 else self._last_intent_ts_ms
+            if self._current_qty <= 0 or self._current_side is None:
+                return
+            asyncio.run_coroutine_threadsafe(
+                self._execute_intent_exit(intent), self._loop)
+            return
+
+        if intent_type == "entry":
+            if intent.side is None:
+                return
+            desired_side = intent.side
+            if self._current_side == desired_side and self._current_qty > 0:
+                return
+            self._last_intent_ts_ms = ts_ms if ts_ms > 0 else self._last_intent_ts_ms
+            asyncio.run_coroutine_threadsafe(
+                self._execute_intent_entry(intent, desired_side),
+                self._loop)
+            return
+
     def refresh_account(self) -> None:
         if self._loop:
             asyncio.run_coroutine_threadsafe(self._refresh_account(), self._loop)
 
     def update_sizing(self, sizing: SizingConfig) -> None:
         self._sizing = sizing
+
+    def update_cooldown(self, cooldown_s: float) -> None:
+        """Update the cooldown window (seconds). Recomputes the
+        ms-precision event-time gate used by :meth:`on_intent`."""
+        self._cooldown_s = cooldown_s
+        self._cooldown_ms = int(cooldown_s * 1000.0)
 
     async def _connect(self) -> bool:
         ok = await self._broker.connect()
@@ -240,6 +358,74 @@ class ExecutionManager:
         self._current_side = None
         self._current_qty = 0.0
         await self._refresh_account()
+
+    async def _execute_intent_entry(
+        self, intent: ExecutionIntent, desired_side: OrderSide
+    ) -> None:
+        """Phase 14A — entry path driven by a Ripple ``ExecutionIntent``.
+
+        Mirrors :meth:`_execute_signal` but reads price hints from the
+        intent and tags orders with the Ripple action / reason for
+        downstream attribution. No wall-clock reads on the decision
+        path — :attr:`_last_intent_ts_ms` already captured event time
+        in :meth:`on_intent`.
+        """
+        signal_type = intent.action or "RIPPLE_ENTRY"
+        try:
+            if (self._current_qty > 0
+                    and self._current_side != desired_side):
+                close_order = await self._broker.close_position(self._symbol)
+                if close_order:
+                    close_order.signal_type = f"CLOSE_{signal_type}"
+                    close_order.ripple_reason = intent.reason or ""
+                    self._record_order(close_order)
+                    if close_order.status not in (
+                            OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                        logger.warning(
+                            "Close order not filled: %s", close_order.status)
+                        return
+                    await self._refresh_account()
+                self._current_side = None
+                self._current_qty = 0.0
+
+            qty = self._compute_quantity(desired_side)
+            if qty <= 0:
+                return
+
+            if qty > self._sizing.max_position:
+                qty = self._sizing.max_position
+
+            order = await self._broker.place_order(
+                self._symbol, desired_side, qty, OrderType.MARKET)
+            order.signal_type = signal_type
+            order.ripple_reason = intent.reason or ""
+            self._record_order(order)
+
+            if order.status in (
+                    OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                self._current_side = desired_side
+                self._current_qty = order.fill_quantity or qty
+                await self._refresh_account()
+            else:
+                logger.warning(
+                    "Order %s: %s",
+                    order.status.value, order.error_message)
+        except Exception as e:
+            logger.error("Execution error (intent entry): %s", e)
+
+    async def _execute_intent_exit(self, intent: ExecutionIntent) -> None:
+        """Phase 14A — exit path driven by a Ripple ``ExecutionIntent``."""
+        try:
+            order = await self._broker.close_position(self._symbol)
+            if order:
+                order.signal_type = intent.action or "RIPPLE_EXIT"
+                order.ripple_reason = intent.reason or ""
+                self._record_order(order)
+            self._current_side = None
+            self._current_qty = 0.0
+            await self._refresh_account()
+        except Exception as e:
+            logger.error("Execution error (intent exit): %s", e)
 
     def _compute_quantity(self, side: OrderSide) -> float:
         mode = self._sizing.mode

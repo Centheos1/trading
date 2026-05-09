@@ -1716,3 +1716,48 @@ mw._orderflow_vm._heatmap_diag_interval_s = 1.0
 ```
 
 The throttled log line goes to the standard `ui.orderflow_viewmodel` logger at `INFO`.
+
+---
+
+## 15. UI Implications of the V1 Closure Roadmap (Phase 14)
+
+The 2026-05 V1 audit (see `implementation_plan.md` §7.1) surfaced two
+items that touch this document. Phase 14 work happens primarily in
+`execution/` and the C++ engine, but two pieces land in `ui/`.
+
+### 15.1 Phase 14B — Tide / Wave Snapshot Push from `LiveTradingSession`
+
+**Why this affects the UI plan.** `LiveTradingSession.on_timer_tick`
+already updates `MarketState` from `engine.get_strategy_snapshot()` for
+the diagnostics panel (§2.2). Phase 14B requires the *opposite*
+direction as well: the session must `push` the latest Tide/Wave
+snapshots and realized vol *into* the engine before the engine emits
+its next decision.
+
+**Implementation outline (delegated to `implementation_plan.md` §7.1
+Phase 14B; this section captures only the UI surface impact).**
+
+| File | UI-side change |
+|---|---|
+| `ui/live_trading_session.py` | New `_tide_engine`, `_wave_engine` attributes (Python research engines, instantiated alongside the C++ engine). On every `on_timer_tick`: query both engines, then call `self._engine.set_risk_budget(...)`, `self._engine.get_ripple().set_wave_snapshot(...)`, `self._engine.get_ripple().set_realized_vol(...)`. All three calls gated on `enable_layered_strategy: bool = True` (default ON; allows pure-Ripple legacy mode for regression). Cadences match `strategy.md` §5.3 (Tide 60 s, Wave 5 s, RV 1 s) — implemented via simple "elapsed since last push" gates inside `on_timer_tick`. |
+| `ui/main_window.py` | Optional new `Strategy → Layered Strategy` checkbox in the toolbar that toggles `enable_layered_strategy`. If absent, default ON is fine. |
+| Diagnostics panel | No data-contract change. `StrategyDiagnosticsPanel` already reads Wave regime / risk fields from `get_strategy_snapshot()`; once the engine *receives* real snapshots, those fields will start showing real values instead of the static `DefaultTideSnapshot` / `DefaultWaveSnapshot` defaults. Worth adding a small visual hint (e.g. "● live" vs "○ default") to communicate the wiring state to the operator. |
+
+### 15.2 Phase 14A — Live Execution Driven by Ripple Decisions
+
+**UI-side impact: minor.** The existing toolbar `Arm Execution` button
+keeps its current semantics (toggles `ExecutionManager._armed`). What
+changes is the data the manager consumes:
+
+| File | UI-side change |
+|---|---|
+| `ui/main_window.py` | `_on_ripple_received` already converts `RippleDecision` → `ExecutionIntent` (via `ripple_decision_to_intent`) for the paper path. Phase 14A makes the live path consume the same intent stream. The UI surface change is essentially zero — `Arm Execution` continues to gate, the diagnostics panel continues to show counts. The "live wiring" indicator from §15.1 should also reflect the routing topology (`signal-driven (legacy)` vs `ripple-driven (V1)`). |
+| `ui/strategy_dashboard_view.py` | Optional: a small "routing: ripple-driven" badge in the strategy panel. Cosmetic — not blocking V1. |
+
+### 15.3 Phase 11D / 11E / 11F — Status Unchanged
+
+The deferred heatmap-cosmetics phases (§14.2 / §14.3 / §14.4) remain
+deferred per §14.5. They are **not** V1 closure work — `strategy.md`
+§22.2 has no UI rendering items, and the bubble drop-out regression
+guards are already in place from `tests/test_bubble_pipeline.py`.
+Resume only on user request or after V1 GA.

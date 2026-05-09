@@ -1016,10 +1016,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_engine_signal(self, signal):
-        """C++ legacy signal callback — invoked from WS thread."""
+        """C++ legacy signal callback — invoked from WS thread.
+
+        Phase 14A: this is OBSERVATION-only. Live execution is driven
+        by Ripple decisions inside :meth:`_on_ripple_received` so that
+        the Ripple lifecycle FSM, Wave permissions, and ``RiskEngine``
+        govern every order. Signal-driven routing was removed because
+        it bypassed all three layers (AGENT_STRATEGY_RULES.md §7.4).
+        """
         self._new_signal.emit(signal)
-        if self._exec_manager and self._exec_manager.armed:
-            self._exec_manager.on_signal(signal)
 
     def _on_ripple_decision(self, decision):
         """C++ Ripple decision callback — invoked from WS thread (GIL held).
@@ -1086,6 +1091,22 @@ class MainWindow(QMainWindow):
                     self._ripple_metrics.inventory_suppressed += 1
             elif intent and intent.intent_type == "exit":
                 self._paper_engine.on_intent(intent)
+
+        # Phase 14A: Live execution if armed in live mode. Routes the
+        # same Ripple intent through ``ExecutionManager.on_intent``
+        # (event-time cooldown, Ripple-FSM-respecting). The legacy
+        # ``_on_engine_signal -> on_signal`` route is OBSERVATION-only
+        # now — see AGENT_STRATEGY_RULES.md §7.4.
+        if (self._strategy_mode == StrategyMode.LIVE and
+                self._exec_manager is not None and
+                self._exec_manager.armed):
+            intent = ripple_decision_to_intent(decision, state_name,
+                                               intent_name=intent_name)
+            if intent and intent.intent_type in ("entry", "exit"):
+                try:
+                    self._exec_manager.on_intent(intent)
+                except Exception:
+                    logger.exception("exec_manager.on_intent failed")
 
     def _on_order_received(self, order):
         status = order.status.value

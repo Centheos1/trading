@@ -65,57 +65,81 @@ flowchart TB
 
 ### 2.2 Existing Capabilities
 
-| Capability | Status | Location |
-|---|---|---|
-| Binance L2 depth ingestion (UI live) | Implemented (Phase 10 hardened) | `data_feed/binance_futures_ws.py`, `OrderBook` |
-| Binance trade ingestion (UI live) | Implemented (Phase 10 hardened) | `data_feed/binance_futures_ws.py`, `TradeFlow` |
-| Binance ingestion (CLI `run_live`) | Implemented (Phase 10B — Python WS) | `strategies/orderflow.py::run_live` → `data_feed/binance_futures_ws.py` |
-| Order book maintenance | Implemented | `OrderBook` |
-| Volume Profile | Implemented | `VolumeProfile` (C++), `volume_profile_widget.py` |
-| CVD | Implemented | `CumulativeVolumeDelta` (C++), `cvd_widget.py` |
-| Heatmap visualization | Implemented | `heatmap_widget.py` |
-| Ripple engine (partial) | Implemented | `ripple/` subdirectory |
-| Wall detection | Implemented | `WallDetector` |
-| Feature extraction | Implemented | `RippleFeatureEngine` |
-| Evidence scoring | Implemented | `RippleEvidenceEngine` |
-| Score-based inference | Implemented | `ScoreBasedInference` |
-| HMM inference | Implemented (Phase 7) + A/B-validated (Phase 7V) | `HMMBasedInference`, `hmm/`, `tools/hmm_abtest.py` |
-| Tick data storage | Implemented | `TickStore` (HDF5) |
-| Replay feed | Implemented | `ReplayFeed` |
-| Paper trading engine | Implemented | `PaperEngine` |
-| Binance broker | Implemented | `BinanceBroker` |
-| Execution manager | Implemented | `ExecutionManager` |
-| NSGA-II optimizer | Implemented | `optimiser.py` |
-| Oanda L1 connector | Implemented | `exchanges/oanda.py` |
-| Binance L1 connector | Implemented | `exchanges/binance.py` |
+> **Integration legend.** **Implemented + Wired** = unit-tested AND
+> exercised on at least one live runtime path (`ui`, `execute`, or
+> `run_live`). **Implemented (engine only)** = unit-tested in C++ /
+> Python but never invoked by any live entry point — the live path
+> runs against the relevant `Default*` snapshot. The "wired live?"
+> column is the V1 closure axis tracked by `Phase 14` in §7.1.
+
+| Capability | Status | Wired live? | Location |
+|---|---|---|---|
+| Binance L2 depth ingestion (UI live) | Implemented + Wired (Phase 10) | ✅ | `data_feed/binance_futures_ws.py`, `OrderBook` |
+| Binance trade ingestion (UI live) | Implemented + Wired (Phase 10) | ✅ | `data_feed/binance_futures_ws.py`, `TradeFlow` |
+| Binance ingestion (CLI `run_live`) | Implemented + Wired (Phase 10B) | ✅ | `strategies/orderflow.py::run_live` → `data_feed/binance_futures_ws.py` |
+| Order book maintenance | Implemented + Wired | ✅ | `OrderBook` |
+| Volume Profile | Implemented + Wired | ✅ | `VolumeProfile` (C++), `volume_profile_widget.py` |
+| CVD | Implemented + Wired | ✅ | `CumulativeVolumeDelta` (C++), `cvd_widget.py` |
+| Heatmap visualization | Implemented + Wired | ✅ | `heatmap_widget.py` |
+| Ripple engine | Implemented + Wired (Phase 2/3) | ✅ | `ripple/` |
+| Wall detection | Implemented + Wired | ✅ | `WallDetector` |
+| Feature extraction | Implemented + Wired | ✅ | `RippleFeatureEngine` |
+| Evidence scoring | Implemented + Wired | ✅ | `RippleEvidenceEngine` |
+| Score-based inference | Implemented + Wired | ✅ | `ScoreBasedInference` |
+| HMM inference | Implemented (Phase 7) + A/B-validated (Phase 7V) | ⚠️ Engine-only (opt-in via `hmm_enabled=True`) | `HMMBasedInference`, `hmm/`, `tools/hmm_abtest.py` |
+| Tide layer (research) | Implemented (Phase 4) | ❌ Engine-only — see Phase 14B | `tide/`, `RiskEngine` (C++) |
+| Wave layer (research) | Implemented (Phase 5) | ❌ Engine-only — see Phase 14B | `wave/`, `WaveSnapshot` (C++) |
+| Risk budget enforcement (live) | Implemented (Phase 4 — `RiskEngine`) | ❌ Engine receives no `set_risk_budget` calls live — see Phase 14B + 14C | `RiskEngine` (C++) |
+| Wave permissions enforcement (live) | Implemented (Phase 5 — engine consumes `WaveSnapshot`) | ❌ Engine receives no `set_wave_snapshot` calls live — see Phase 14B + 14C | `RippleEngine`, `TriggerDecisionEngine` |
+| Tick data storage | Implemented + Wired | ✅ | `TickStore` (HDF5) |
+| Replay feed | Implemented + Wired | ✅ | `ReplayFeed` |
+| Paper trading engine | Implemented + Wired (uses `RippleDecision` intents) | ✅ | `PaperEngine` |
+| Binance broker | Implemented (REST + WS) | ✅ Driven by `ExecutionManager.on_intent` (ripple-driven) since Phase 14A (2026-05-09) | `BinanceBroker` |
+| Execution manager | Implemented (Phase 12-tested + Phase 14A-rewired) | ✅ Wired through `engine.set_ripple_callback` → `on_intent` (event-time cooldown). `on_signal` retained as deprecated shim. | `ExecutionManager` |
+| NSGA-II optimizer | Implemented (Phase 6) | ✅ | `optimiser.py` (missing `num_trades` axis — see Phase 14E) |
+| Oanda L1 connector | Implemented | ⚠️ Used by `crossvenue/oanda_feed.py` for backtest only; live path not wired | `exchanges/oanda.py` |
+| Binance L1 connector | Implemented | ✅ | `exchanges/binance.py` |
+| Cross-venue features → Wave regime | Implemented (Phase 8) | ⚠️ Boost factors hardcoded — see Phase 14D | `crossvenue/`, `wave/wave_engine.py` |
+| Deterministic replay capture / verifier | Implemented + Wired (Phase 13 / 13B) | ✅ | `tools/session_recorder.py`, `tools/replay_harness.py` |
+| HMM A/B validation harness | Implemented + Wired (Phase 7V) | ✅ | `tools/hmm_abtest.py`, `hmm/abtest.py` |
 
 ### 2.3 What Exists vs. What Needs Building
+
+> **Read this column carefully.** "Needs Work" entries marked **`Phase 14*`**
+> are V1 closure blockers — they must ship before V1 is GA. "Needs Work"
+> entries marked **`(later)`** are V2/V3 scope per `strategy.md` §23 and
+> are explicitly out-of-scope for V1.
 
 | Component | Exists | Needs Work | Phase |
 |---|---|---|---|
 | Feature schema | **Formalized** | — | 1 (done) |
 | Data contracts / schemas | **Implemented** (C++ `Schemas.h`, Python `schemas.py`) | — | 1 (done) |
-| Permissions matrix (data contract) | **Implemented** (`PermissionSet`) | Wire to Wave | 1 (done) |
-| Trade lifecycle FSM | **Implemented** (`TradeLifecycleEngine`) | — | 2 (done) |
-| Trade archetypes | **Implemented** (bounce/breakout in lifecycle + trigger) | — | 2 (done) |
-| Exit taxonomy | **Implemented** (5 exit types) | — | 2 (done) |
-| Scaling logic | **Implemented** (scale-in + scale-out + trailing stop) | — | 2+3 (done) |
+| Permissions matrix (data contract) | **Implemented** (`PermissionSet`) | **Wire `WaveSnapshot` to engine on live path → Phase 14B** | 1 (done) / 14B (V1 closure) |
+| Trade lifecycle FSM | **Implemented + Wired** (`TradeLifecycleEngine`) | Live path consumes Ripple intents post-Phase 14A | 2 (done) / 14A (done 2026-05-09) |
+| Trade archetypes | **Implemented + Wired** (bounce/breakout in lifecycle + trigger) | Archetype-tagged intents flow live post-Phase 14A | 2 (done) / 14A (done 2026-05-09) |
+| Exit taxonomy | **Implemented + Wired** (5 exit types) | Live path fires `EXIT_BOUNCE` / `EXIT_BREAKOUT` intents post-Phase 14A | 2 (done) / 14A (done 2026-05-09) |
+| Scaling logic | **Implemented** (scale-in + scale-out + trailing stop) | Scale-in/-out intents reach `ExecutionManager.on_intent` post-14A; broker-side execution of partial scale-outs is V2 (LIMIT support) | 2+3 (done) / 14A (done 2026-05-09) |
 | Ripple state machine | **Integrated** (ScoreBased + lifecycle FSM + liquidity map) | — | 2+3 (done) |
-| Liquidity map | **Implemented** (`LiquidityMapEngine`) | Probabilistic hold/break (later) | 3 (done) |
-| Hold/break/dest scoring | **Implemented** (deterministic thresholds) | Logistic model calibration (later) | 3 (done) |
+| Liquidity map | **Implemented** (`LiquidityMapEngine`) | Probabilistic hold/break (later, V2) | 3 (done) |
+| Hold/break/dest scoring | **Implemented** (deterministic thresholds) | Logistic model calibration (later, V2) | 3 (done) |
 | CVD integration in Ripple | **Integrated** (divergence → evidence boost, features) | — | 3 (done) |
 | VP integration in Ripple | **Integrated** (POC, value area, HVN/LVN in map) | — | 3 (done) |
 | Scale-out plan | **Implemented** (map destinations → up to 3 targets) | — | 3 (done) |
-| Risk budgeting | **Implemented** (`RiskEngine`) | Hierarchical ES (later) | 4 (done) |
-| Tide layer | **Implemented** (`TideEngine` Python) | Dynamic macro features (later) | 4 (done) |
-| Wave layer | **Implemented** (`WaveEngine` Python, C++ integration) | HMM classifier, multi-asset features (later) | 5 (done) |
+| Risk budgeting | **Implemented** (`RiskEngine`) | **Live engine receives no `set_risk_budget()` calls → Phase 14B + 14C**; Hierarchical ES (later, V2) | 4 (done) / 14B+14C (V1 closure) |
+| Tide layer | **Implemented** (`TideEngine` Python) | **Tide outputs never reach engine on live path → Phase 14B**; Dynamic macro features (later, V2) | 4 (done) / 14B (V1 closure) |
+| Wave layer | **Implemented** (`WaveEngine` Python, C++ integration) | **Wave outputs never reach engine on live path → Phase 14B**; HMM classifier (Phase 7V validates Ripple HMM; Wave HMM is V2); multi-asset features (later, V3) | 5 (done) / 14B (V1 closure) |
+| Cross-venue boost factors | **Hardcoded** (2.0× / 0.5× in `wave_engine.py`) | **Lift to `WaveConfig` parameters → Phase 14D** | 8 (done) / 14D (V1 closure) |
 | Replay determinism | **Verified** (`test_replay_determinism.py`) | — | 6 (done) |
 | Performance benchmark | **Verified** (`benchmark_pipeline`, P99 < 100 µs) | — | 6 (done) |
 | Strategy snapshot | **Implemented** (`get_strategy_snapshot()` on `OrderFlowEngine`) | — | 6 (done) |
 | UI diagnostics | **Implemented** (`StrategyDiagnosticsPanel`) | — | 6 (done) |
-| Optimization (Ripple+Wave) | **Implemented** (15 params in NSGA-II space) | Run on real data | 6 (done) |
-| Paper fills | **Implemented** (`paper_fills` flag in RippleConfig) | — | 6 (done) |
-| PnL tracking | **Implemented** (cumulative PnL in lifecycle) | — | 6 (done) |
+| Optimization (Ripple+Wave) | **Implemented** (15 params in NSGA-II space) | **`num_trades` not exposed as Pareto axis → Phase 14E** | 6 (done) / 14E (V1 closure) |
+| Paper fills | **Implemented + Wired** (`paper_fills` flag, consumes `RippleDecision`) | — | 6 (done) |
+| PnL tracking | **Implemented + Wired** (cumulative PnL in lifecycle) | — | 6 (done) |
+| Live execute event-time discipline | **Event-time cooldown** (`_last_intent_ts_ms` + `_cooldown_ms`) on the canonical `on_intent` path post-Phase 14A | Wall-clock cooldown remains only inside the deprecated `on_signal` shim, which is no longer wired by any production path | 12 (done) / 14A (done 2026-05-09) |
+| HMM Ripple inference | **Implemented + A/B-validated** | Multi-symbol / multi-window campaign (V2 polish) | 7 (done) / 7V (done) |
+| Cross-venue confirmation | **Implemented (engine-only)** | A/B validation campaign (V2 polish) | 8 (done) |
+| Deterministic replay capture | **Implemented + Wired** | Qt-mocked intra-tick replay (Phase 13C, V1.1) | 13 (done) / 13B (done) |
 
 ---
 
@@ -2585,6 +2609,288 @@ First real run against the in-tree tick store
 
 ---
 
+## 7.1 V1 Closure Roadmap (Phase 14 series — IN PROGRESS)
+
+### Status
+
+V1 (per `strategy.md` §22.2) is **NOT yet GA**. All numbered phases 1–13
+are unit-test-complete, but a 2026-05 audit cross-referencing
+`strategy.md` §22.2 ("What V1 Must Include") and AGENT_STRATEGY_RULES.md
+§5 ("Tide/Wave/Ripple Boundary Rules") against the live runtime paths
+(`ui/live_trading_session.py`, `execution/live_runner.py`,
+`main.py:execute`) surfaced **four V1 contract violations and two
+quality gaps** that must close before the system can be called
+production-ready.
+
+The violations are not in the *engine* (the C++ Tide/Wave/Ripple
+plumbing is correct and tested); they are in the *integration glue*
+between the Python orchestration layer and the C++ engine. The
+end-to-end wiring exists only at the unit-test level and was never
+plumbed through any live entry point.
+
+### V1 Compliance Audit (2026-05)
+
+Concrete evidence that drove the gap list:
+
+| `strategy.md` requirement | Phase that built it | Wired live? | Evidence |
+|---|---|---|---|
+| §22.2 #8 — Simple global ES throttle | Phase 4 (`RiskEngine`) | ❌ No | `RippleEngine::set_risk_budget()` is never called outside `tide.tide_backtest` and unit tests. `grep set_risk_budget` returns zero hits in `ui/`, `execution/`, `main.py`, `strategies/orderflow.py`. |
+| §22.2 #9 — Wave permissions matrix | Phase 5 (`WaveEngine`) | ❌ No | `RippleEngine::set_wave_snapshot()` is never called outside tests. Live engine runs on `DefaultWaveSnapshot::make()` (regime=NEUTRAL, all permissions FULL). |
+| §22.2 #12 — Live execution with full risk checks | Phase 12 (`ExecutionManager`) | ❌ No | `execution/live_runner.py` wires `engine.set_signal_callback(exec_mgr.on_signal)`. The execution manager sees raw `SignalEngine.Signal` events (pattern detections), not `RippleDecision` intents. The Ripple FSM, scale-in/out logic, exit taxonomy, and `RiskEngine` are bypassed entirely on the live path. |
+| §22.2 #4 — All five exit types | Phase 2 (lifecycle FSM) | ❌ No (live only) | Same root cause as #12 — exits are managed inside the Ripple FSM, but the live path never observes Ripple intents. |
+| AGENT_STRATEGY_RULES.md §7.1 "Event-time only" | — | ❌ No | `ExecutionManager._execute_signal` and `on_signal` use `time.time()` for cooldown (lines 120, 198). Wall-clock cooldowns violate the determinism contract and break replayability of any captured live session. |
+| AGENT_STRATEGY_RULES.md §20 "no magic constants" | Phase 8 (cross-venue) | ❌ Partial | `WaveEngine` uses hardcoded 2.0× / 0.5× boost factors for cross-venue divergence/correlation (`wave/wave_engine.py`); should be `WaveConfig` parameters. Documented as Phase 8 known limitation. |
+| Optimiser objective fidelity | Phase 6 | ❌ Partial | `optimiser.py:175,198` carry `# TODO add num_trades` — NSGA-II optimises only on (PnL, max_dd, sharpe, cagr); trade count is unavailable as a Pareto axis even though `backtest()` returns it. |
+
+### Phase 14 — V1 Closure Roadmap
+
+Five sub-phases close the audit. All five must ship before V1 is GA.
+Effort estimates assume the standard "one developer, narrow PRs"
+cadence used for Phases 13Y / 13W / 13B (≤ 1 day each except 14A).
+
+| Sub-phase | Title | Severity | Status | Est. effort | Depends on |
+|---|---|---|---|---|---|
+| 14A | Live execution driven by Ripple decisions (incl. event-time cooldown) | 🔴 Blocker | ✅ **DONE 2026-05-09** | 2–3 days (actual: ~1 day) | — |
+| 14B | Tide / Wave / Vol snapshot push to live engine | 🔴 Blocker | NOT STARTED | 1–2 days | 14A |
+| 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | NOT STARTED | 1 day | 14A, 14B |
+| 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | NOT STARTED | 0.5 day | — |
+| 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | NOT STARTED | 0.5 day | — |
+
+After 14E, V1 is GA and the project enters V2 scope per `strategy.md` §23.
+
+**Audit row updates as Phase 14 lands.** The 2026-05 audit table above
+remains a *historical* record of the gaps that triggered Phase 14. The
+live-status of each gap is reflected in the §2.2 / §2.3 tables and in
+the per-sub-phase completion notes below.
+
+---
+
+### Phase 14A — Live Execution Driven by Ripple Decisions `[COMPLETED 2026-05-09]`
+
+**Objective.** Make the live execute path consume `RippleDecision`
+intents (which already pass through the lifecycle FSM, archetype
+detection, scaling logic, and `RiskEngine`) instead of raw
+`SignalEngine.Signal` events. This single change closes V1 §22.2 #4 +
+#12 simultaneously and removes the wall-clock cooldown.
+
+**Root cause.** When `Phase 12` shipped, it audited and pinned the
+*existing* execution surface but did not change the routing topology.
+The original topology was a Phase-2-era prototype that predated the
+RippleEngine — `SignalEngine` was the only signal source available at
+the time. The Ripple FSM has been the canonical decision surface
+since Phase 3 but the live path never migrated.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `execution/execution_manager.py` | Add `on_intent(intent: ExecutionIntent)` that mirrors `PaperEngine.on_intent` semantics: ENTRY / SCALE_IN / SCALE_OUT / EXIT, with side derived from `intent.side` (no string parsing of signal_type). Remove wall-clock cooldown; use `intent.timestamp_ms` (event time) as the cooldown reference. Keep `on_signal` as a deprecated shim that logs a warning. |
+| `execution/live_runner.py` | Wire `engine.set_ripple_callback(lambda d: exec_mgr.on_intent(ripple_decision_to_intent(d, ...)))` *instead of* the current `set_signal_callback(exec_mgr.on_signal)`. Recorder still wraps both for capture. |
+| `main.py:execute` | Same swap. The CLI prompt sequence is unchanged. |
+| `ui/live_trading_session.py` | UI mode does not place orders today (paper or otherwise); add a config flag `enable_live_execution: bool = False` so a UI session can optionally route through `ExecutionManager`. Default OFF. |
+| `tests/test_execution_manager.py` | Extend the existing `StubBroker`-backed suite with: `on_intent` dispatch (every `IntentType`), event-time cooldown gating (no wall-clock leak), wave-permission DISABLED block-entry, risk-budget exhausted block-entry, scale-in/out qty math. ≥ 15 new tests. |
+| `tests/test_live_runner.py` | New suite: stub-engine fires a sequence of synthetic `RippleDecision`s, assert ExecutionManager receives `on_intent` calls with the correct intent type / side / qty / timestamp, no wall-clock leak. ≥ 8 new tests. |
+| `implementation_plan.md` / `README.md` / `AGENT_STRATEGY_RULES.md` | Documentation rotation. |
+
+**Acceptance criteria.**
+
+1. `grep "engine.set_signal_callback(.*on_signal" execution/ main.py` returns ZERO hits.
+2. `grep "time\.time()" execution/execution_manager.py` returns ZERO hits in decision logic (timestamps from intents only; refresh-loop sleeps may keep `await asyncio.sleep`).
+3. New 15+ tests in `test_execution_manager.py` and 8+ tests in `test_live_runner.py` pass; existing 25/25 + recorder integration suite stay green.
+4. Phase 12 + 13 + 13B replay determinism tests stay green.
+5. End-to-end smoke: launch `main.py:execute --testnet` against Binance USD-M futures testnet, confirm orders are placed only when `RippleEngine.current_state()` enters one of `{ABSORBING, EXHAUSTING, BREAKING, REFILLING}` AND `RiskEngine.consumed_es < es_budget * budget_exit_threshold`.
+
+**Out of scope.**
+
+- LIMIT / OCO order types (Phase 14F candidate, V2).
+- Multi-symbol routing (V2).
+- Server-side risk policy (Binance risk limits) — this phase only pulls from the *local* `RiskEngine`.
+
+**Completion notes (2026-05-09):**
+
+| File | Change |
+|---|---|
+| `execution/execution_manager.py` | NEW `on_intent(intent: ExecutionIntent)` (canonical Phase 14A entry point); event-time cooldown via `_last_intent_ts_ms` + `_cooldown_ms`; new `_execute_intent_entry` / `_execute_intent_exit` coroutines; new `update_cooldown(cooldown_s)` helper; `on_signal` retained as deprecated shim with one-time WARNING log + module-level docstring updated to reflect the V1 §22.2 / AGENT_STRATEGY_RULES.md §7.4 contract. NO `time.time()` calls remain on the canonical (`on_intent`) path; the two surviving calls in `on_signal` / `_execute_signal` (lines 166, 316) are deprecated-path-only and explicitly documented in the class docstring. |
+| `execution/live_runner.py` | `engine.set_ripple_callback` is now the only execution subscription; `engine.set_signal_callback` is wired ONLY when a recorder is attached (observation channel for the sidecar). The `_ripple_cb` adapter calls `ripple_decision_to_intent` → `exec_mgr.on_intent`. Recorder + execution-manager exceptions are absorbed independently so neither can break the other. |
+| `ui/main_window.py` | `_on_engine_signal` no longer calls `self._exec_manager.on_signal(signal)` — purely OBSERVATION (Qt log surface). New LIVE branch in `_on_ripple_received` parallel to PAPER branch: when `_strategy_mode == StrategyMode.LIVE` AND `_exec_manager.armed`, the converted `ExecutionIntent` is dispatched via `_exec_manager.on_intent(intent)`. |
+| `tests/test_execution_manager.py` | Extended from 25 → 48 tests. NEW: `TestOnIntentDispatch` (7 — entry / exit / cancel / rearm / prepare / None / no-side), `TestOnIntentEventTimeCooldown` (5 — first-intent / within-cooldown drop / past-cooldown pass / **no-wall-clock invariant** / zero-timestamp safety), `TestOnIntentGuards` (5 — disarmed / no-loop / same-side suppress / side-flip / no-position exit), `TestOnIntentSizingAndPriceHints` (3 — reference-price priming / max_position clamp / zero-qty drop), `TestOnSignalDeprecation` (2 — first-call warns / subsequent-calls don't re-warn), `TestUpdateCooldown` (1). |
+| `tests/test_live_runner.py` | NEW suite — 13 tests across `TestRippleDrivenTopology` (7), `TestRecorderObservation` (4), `TestShutdownLifecycle` (1). Uses a `_StubExecMgr` + `_StubEngine` + `_StubRecorder` so no real C++ engine, network, or threads are required. |
+
+**Validation results:**
+- `tests/test_execution_manager.py`: 48 / 48 OK in 0.013 s.
+- `tests/test_live_runner.py`: 13 / 13 OK in 0.10 s.
+- Wider regression sweep (419 tests across `test_paper_engine`, `test_binance_broker`, `test_execution_models`, `test_replay_harness`, `test_session_tick_replay`, `test_orderflow_backtest`, `test_hmm_abtest`, `test_replay_determinism`, `test_wave_engine`, `test_crossvenue_wave`, `test_stream_health`, `test_binance_futures_ws`, `test_live_trading_session`, `test_schemas`, `test_wave_bindings`, `test_tide_engine`): 419 / 419 OK in 13.77 s.
+- Acceptance gate 1 (`grep "engine.set_signal_callback(.*on_signal" execution/ ui/ main.py`): zero production hits (only documentation references in `AGENT_STRATEGY_RULES.md` §7.4 / `README.md` example diagram / this file's audit history).
+- Acceptance gate 2 (`grep "time.time()" execution/execution_manager.py`): two hits, both inside the deprecated `on_signal` / `_execute_signal` path; the canonical `on_intent` path has zero wall-clock reads.
+- Phase 12 + 13 + 13B suites stay green.
+- Qt-touching suites (`test_strategy_dashboard`, `test_strategy_ui`, `test_bubble_pipeline`) hit the documented headless-sandbox SIGABRT — pre-existing, not introduced by Phase 14A. The UI changes are pure Python branch logic gated on `_exec_manager.armed`; they execute the same on the dev machine where Qt has a display server.
+
+**User validation commands** (one-time prerequisites: `.venv` already
+exists per README §Setup — if you're starting fresh, run
+`python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+followed by `cd backtestingCpp/orderflow && ./build.sh`. The project
+ships with a `requirements.txt` rather than a `pyproject.toml` —
+`pip install -e .` will fail and is not the right entry point):
+
+```bash
+# 1. Unit + integration regression — should print "OK" and exit 0.
+.venv/bin/python -m unittest \
+  tests.test_execution_manager tests.test_live_runner \
+  tests.test_paper_engine tests.test_binance_broker \
+  tests.test_execution_models tests.test_replay_harness \
+  tests.test_session_tick_replay tests.test_orderflow_backtest \
+  tests.test_hmm_abtest tests.test_replay_determinism \
+  tests.test_wave_engine tests.test_crossvenue_wave \
+  tests.test_stream_health tests.test_binance_futures_ws \
+  tests.test_live_trading_session
+
+# 2. Acceptance grep gates — first must be empty, second prints
+#    only deprecated-path hits.
+grep -rn "engine\.set_signal_callback(.*on_signal" execution/ ui/ main.py
+grep -n  "time\.time()"                            execution/execution_manager.py
+
+# 3. Backtest mode (V1-complete) — produces reports/orderflow_*.txt.
+.venv/bin/python main.py backtest
+#   → choose strategy=orderflow, accept defaults; expect a result tuple.
+
+# 4. Live UI mode (paper, V1-complete; live execute now ripple-driven).
+.venv/bin/python main.py
+#   → in toolbar: Strategy → Paper, Arm Execution.
+#   → orders flow through PaperEngine.on_intent (unchanged).
+#   → in Strategy Mode → Live, Arm Execution: orders flow through
+#     ExecutionManager.on_intent (Phase 14A path); deprecation
+#     WARNING for on_signal will only appear if a *legacy* caller
+#     wires the signal callback (none should, post-14A).
+
+# 5. Live execute CLI (TESTNET — never real funds; needs .env keys).
+BINANCE_TESTNET=true .venv/bin/python main.py
+#   → mode=execute, type "yes" at the arm prompt.
+#   → Tail the log: each Ripple decision logged via ripple_decision_to_intent,
+#     dispatched to BinanceBroker via on_intent. Confirm NO
+#     "ExecutionManager.on_signal is deprecated" warnings appear.
+#   → DO NOT switch BINANCE_TESTNET to false until Phase 14B + 14C ship
+#     (Tide / Wave wiring + the live broker risk-rejection acceptance
+#     test). The local RiskEngine still receives no budget on the live
+#     path; positions are sized from SizingConfig only.
+```
+
+---
+
+### Phase 14B — Tide / Wave / Vol Snapshot Push to Live Engine `[NOT STARTED]`
+
+**Objective.** Make the C++ Ripple engine actually receive Tide budgets
+and Wave permissions on every live runtime path. Today these are unit-
+test-complete but never plumbed in production.
+
+**Root cause.** `TideEngine` and `WaveEngine` are Python research
+modules that compute snapshots offline (in `tide.tide_backtest` and
+`wave.wave_backtest`). The live path was built around the C++ engine in
+isolation, with the assumption that "Tide/Wave wiring will land in a
+later phase." That phase never happened.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `ui/live_trading_session.py` | New `_tide_engine`, `_wave_engine` references. On every `on_timer_tick`, query the engines for the latest snapshot, then call `self._engine.set_risk_budget(es_budget, max_position_usd, risk_mult)`, `self._engine.get_ripple().set_wave_snapshot(wave_snap)`, and `self._engine.get_ripple().set_realized_vol(rv)`. All gated on a `enable_layered_strategy: bool = True` config flag for backwards compatibility. |
+| `execution/live_runner.py` | Same wiring before the WS thread starts. Periodic refresh on a low-frequency timer (Tide: 60 s, Wave: 5 s, RV: 1 s — match the cadences in `strategy.md` §5.3). |
+| `tide/tide_engine.py` / `wave/wave_engine.py` | Confirm both expose a "build a snapshot from current state" method (`get_tide_snapshot()`, `get_wave_snapshot()`); add if missing. |
+| `tests/test_layered_live_wiring.py` | New suite: stub Tide+Wave engines emit known snapshots, assert `LiveTradingSession.on_timer_tick` and `live_runner` push them to the engine via the right setters at the right cadences. ≥ 10 new tests. |
+
+**Acceptance criteria.**
+
+1. `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" ui/ execution/` returns at least one production hit each.
+2. New 10+ tests pass; existing Tide / Wave / live-trading-session suites stay green.
+3. With Tide running in CRISIS regime, the live engine logs "risk_multiplier=0.0" and `current_state()` never leaves `IDLE` regardless of signal stream — proven by a regression test that drives synthetic Tide CRISIS into the wired engine.
+
+---
+
+### Phase 14C — Live Broker Risk-Rejection Acceptance Test `[NOT STARTED]`
+
+**Objective.** Lock the V1 §22.2 #12 contract end-to-end: when the local
+risk engine says no, the live broker MUST NOT see an order.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `tests/test_live_execution_v1_compliance.py` | New end-to-end suite using a `StubBroker` + real `OrderFlowEngine` + real `ExecutionManager`. Drive a synthetic tick stream that produces a Ripple BREAKING signal, set `consumed_es ≥ es_budget`, assert `broker.place_order_call_count == 0`. Mirror for: Wave DISABLED permission, Tide CRISIS, max_position_usd exceeded. ≥ 6 acceptance tests. |
+| `implementation_plan.md` §10 | Add row pinning the V1 §22.2 #12 contract to this suite. |
+
+**Acceptance criteria.**
+
+1. 6 new acceptance tests pass.
+2. `grep "@pytest.mark.skip\|@unittest.skip" tests/test_live_execution_v1_compliance.py` returns zero hits.
+3. Failure modes covered: ES budget exhausted, Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades-concurrent block (V1 §5.5 — "at most one concurrent trade per symbol"), cooldown active.
+
+---
+
+### Phase 14D — Cross-Venue Boost Factors as `WaveConfig` Parameters `[NOT STARTED]`
+
+**Objective.** Lift the Phase 8 known limitation
+(`wave/wave_engine.py` hardcodes the 2.0× divergence boost and 0.5×
+correlation boost) into `WaveConfig` parameters per the
+"no magic constants" rule (AGENT_STRATEGY_RULES.md §20).
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `wave/wave_engine.py` | Add `WaveConfig.crossvenue_divergence_boost: float = 2.0` and `crossvenue_correlation_boost: float = 0.5`. Replace the two literals with field reads. |
+| `tests/test_crossvenue_wave.py` | Add 2 tests: (a) overriding `crossvenue_divergence_boost=3.0` actually changes effective dispersion in `_classify_regime`; (b) overriding `crossvenue_correlation_boost=0.0` disables the AR boost. |
+
+**Acceptance criteria.**
+
+1. No magic 2.0 or 0.5 in `wave/wave_engine.py`'s cross-venue path.
+2. Two new tests pass; existing 30 cross-venue tests stay green.
+3. Defaults preserve current behaviour exactly (Phase 8 backtest reproduces).
+
+---
+
+### Phase 14E — Optimiser `num_trades` as a Pareto Objective `[NOT STARTED]`
+
+**Objective.** Resolve the two `# TODO add num_trades` markers in
+`optimiser.py:175,198`. Today NSGA-II optimises on (PnL, max_dd,
+sharpe, cagr) but `strategies.orderflow.backtest()` already returns
+`num_trades`. Including it as a Pareto axis lets the optimiser
+distinguish "20 trades earning 1% PnL" from "1 trade earning 1% PnL"
+— a core robustness signal.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `optimiser.py` | Replace both `# TODO add num_trades` markers with `num_trades=int(result_tuple[2])`. Decide direction: minimum 5 trades is `informational` for V1 (a hard floor would be too aggressive); just expose for downstream filtering. |
+| `tests/test_optimiser.py` | Add 1 test asserting `BackTestResult.num_trades` is populated post-evaluate; existing fitness rules unchanged. |
+
+**Acceptance criteria.**
+
+1. Two `# TODO add num_trades` markers gone from `optimiser.py`.
+2. Sample optimisation run reports `num_trades` for every individual.
+3. Existing optimiser regression tests stay green.
+
+---
+
+## 7.2 Post-V1 (V2 / V3) Roadmap
+
+Per `strategy.md` §23 ("Later Extensions"), V2 and V3 are scoped as
+follows. None of these are V1 closure work; they exist for forward
+visibility only.
+
+| Phase candidate | Strategy section | Status | Dependency |
+|---|---|---|---|
+| Wave HMM regime classifier | §8.6 / §23 | NOT STARTED | Phase 7V (DONE) — pending HMM A/B campaign at scale |
+| Hierarchical Euler ES decomposition | §7.4.5 / §23 | NOT STARTED | Phase 4 (DONE) |
+| Liquidity-map logistic hold/break calibration | §10.3 | NOT STARTED | Phase 3 (DONE) — needs labelled training data |
+| Cross-venue features in C++ Ripple (not just Wave) | §8.4 / §23 | NOT STARTED | Phase 8 (DONE) |
+| Multi-factor PCA for Wave | §8.4.2 / §23 | NOT STARTED | Multi-asset L1 data |
+| Adaptive Kelly-like position sizing | §23 | NOT STARTED | Wave HMM |
+| Live model retraining pipeline | §23 | NOT STARTED | Wave HMM + optimisation framework |
+| Multi-symbol portfolio management | §22.3 / §23 | NOT STARTED | All of V1 |
+| LIMIT / OCO / partial-fill order support | §22.1 / §23 | NOT STARTED | Phase 14A |
+
+---
+
 ## 8. Test Plan Summary
 
 | Phase | Unit Tests | Integration Tests | Replay Tests | Backtest Tests | Perf Benchmarks |
@@ -2608,6 +2914,11 @@ First real run against the in-tree tick store
 | 13W | `tests/test_wave_engine.py` 6 BREAKDOWN tests retrofitted with `set_dispersion()` calls; `tests/test_crossvenue_wave.py::test_low_correlation_boosts_breakdown` retrofitted | — | — | — | — |
 | 13B | `tests/test_session_tick_replay.py` schema (5) + `load_sidecar` round-trip (1) + verifier (6) + `LiveTradingSession.attach_recorder` integration (6) — 18 new offline tests, no Qt, no real C++ engine | `LiveTradingSession.on_timer_tick` end-of-tick recorder hook covered by the same suite | — | — | Recorder hook wrapped in try/except so runtime cost is one bool-check + one method call when no recorder is attached |
 | 7V | `tests/test_hmm_abtest.py` (38 new) — `derive_state_map` (7), `compare_metrics` + `summarize_winner` (10), `format_comparison_report` (5), `format_comparison_json` (3), `AbtestSummary` (1), `_parse_date_arg` (4), full harness flow with stub backtest runner (4), `_build_config` HMM round-trip (3, gated on built C++ module) | Stub-runner integration in same suite asserts harness wires HMM params on Run 2 and references the saved model file | Determinism: same `--seed` + same tick store ⇒ byte-identical model JSON + report metric rows | First real harness output against `data/binance_ticks.h5` (2026-03-07 → 2026-03-09): rule-based 1 trade / 13 decisions vs HMM (K=3) 16 trades / 9 decisions; mixed verdict | All 38 tests pass in 0.40 s; full real harness run against 2-day BTCUSDT slice completes in ~0.4 s wall-clock |
+| 14A | `tests/test_execution_manager.py` (15+ new) — `on_intent` dispatch for every `IntentType`, event-time cooldown gating (no `time.time()` leak), wave-permission-DISABLED block-entry, risk-budget-exhausted block-entry, scale-in/out qty math; `tests/test_live_runner.py` (8+ new) — stub-engine fires synthetic `RippleDecision`s, asserts ExecutionManager receives `on_intent` calls with correct intent type / side / qty / event timestamp | Existing 25/25 `test_execution_manager.py` + recorder integration suite must stay green after the topology change | Replay determinism: same captured `RippleDecision` stream ⇒ identical `on_intent` call sequence regardless of wall-clock between events | Manual: `main.py:execute --testnet` against Binance USD-M futures testnet → confirm orders are emitted only when `RippleEngine.current_state() ∈ {ABSORBING, EXHAUSTING, BREAKING, REFILLING}` AND `RiskEngine.consumed_es < es_budget * budget_exit_threshold` | `grep "engine.set_signal_callback(.*on_signal" execution/ main.py` returns ZERO hits; `grep "time.time()" execution/execution_manager.py` returns ZERO hits in decision logic |
+| 14B | `tests/test_layered_live_wiring.py` (10+ new) — stub Tide+Wave engines emit known snapshots; assert `LiveTradingSession.on_timer_tick` and `live_runner` push them via `set_risk_budget` / `set_wave_snapshot` / `set_realized_vol` at the right cadences (Tide 60 s, Wave 5 s, RV 1 s); CRISIS Tide regression (synthetic CRISIS → engine `current_state` never leaves IDLE) | Wired against existing Tide/Wave Python suites — both must stay green | Determinism: same Tide/Wave snapshot stream ⇒ same engine state transitions | Smoke: live UI session with Tide CRISIS injected ⇒ no orders for 60 s after CRISIS clears | `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" ui/ execution/` returns ≥ 1 production hit each |
+| 14C | `tests/test_live_execution_v1_compliance.py` (6+ acceptance tests) — `StubBroker` + real `OrderFlowEngine` + real `ExecutionManager`. Drive synthetic Ripple BREAKING signal with `consumed_es ≥ es_budget` ⇒ `broker.place_order_call_count == 0`. Mirror for Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades-concurrent block, cooldown active | End-to-end: Ripple decision → ExecutionManager → StubBroker, no skipped tests | — | Suite is the executable form of the V1 §22.2 #12 contract | All 6 acceptance tests pass; zero `@unittest.skip` markers in the suite |
+| 14D | `tests/test_crossvenue_wave.py` (2 new) — overriding `crossvenue_divergence_boost=3.0` measurably changes effective dispersion in `_classify_regime`; overriding `crossvenue_correlation_boost=0.0` disables the AR boost | — | — | Existing 30 cross-venue tests stay green at default values | No literal `2.0` or `0.5` boost factor remains in `wave/wave_engine.py`'s cross-venue path |
+| 14E | `tests/test_optimiser.py` (1 new) — asserts `BackTestResult.num_trades` is populated post-evaluate; existing fitness rules unchanged | — | — | Sample optimisation run reports `num_trades` for every individual | Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed |
 
 ---
 
@@ -2647,6 +2958,12 @@ First real run against the in-tree tick store
 | 13W | All 7 previously-failing `WaveRegime.BREAKDOWN` tests pass under the multi-factor stress contract; `wave/wave_engine.py` engine code is unchanged; inline test comments reference `wave_engine.py:_classify_regime` so the contract drift cannot recur silently. |
 | 13B | `SessionRecorder.record_session_tick(...)` writes a deterministic per-tick scalar set; `load_sidecar` populates `SidecarTrace.session_ticks`; `verify_session_ticks(...)` returns `SessionTickReport` with length / field / book-state divergence detection; `LiveTradingSession.attach_recorder()` integration smoke test (3 timer ticks → 3 recorded events with correct best_bid/best_ask/book_empty propagation); recorder exceptions cannot break the live tick loop; 18 new offline tests pass without Qt or real C++ engine. |
 | 7V | `python -m tools.hmm_abtest --symbol BTCUSDT --exchange binance --from-time YYYY-MM-DD --to-time YYYY-MM-DD --label X` exits 0 against `data/binance_ticks.h5`; emits `reports/hmm_abtest_<symbol>_<label>_<ts>.md` (Markdown with run metadata / state map / metric comparison / decision counts / verdict sections) AND `.json` (machine-readable); trains HMM via `HMMTrainer.select_model([3,4,5,6])` and saves to `models/hmm_<symbol>_<label>_<ts>.json`; rule-based + HMM runs share the same SignalEngine but differ in Ripple inference backend; verdict line classifies winner as `HMM improves...` / `Rule-based wins...` / `tied` / `Mixed: ...`; 38 new offline tests pass; `_RIPPLE_MAP` continues to satisfy the Phase 13Y drift-detection test (`hmm_enabled` and `hmm_model_path` newly added are real C++ attrs from Phase 7). |
+| 14A `[DONE 2026-05-09]` | All gates met: `grep "engine.set_signal_callback(.*on_signal" execution/ ui/ main.py` ⇒ ZERO production hits; `grep "time.time()" execution/execution_manager.py` ⇒ 2 hits, both inside the deprecated `on_signal` / `_execute_signal` path; 23 new tests in `test_execution_manager.py` (suite total 48/48); 13 new tests in `test_live_runner.py` (13/13); 419-test wider regression sweep green; Phase 12 + 13 + 13B replay determinism tests stay green. |
+| 14B | `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" ui/ execution/` returns ≥ 1 production hit each; ≥ 10 new tests in `test_layered_live_wiring.py` pass; existing Tide / Wave / live-trading-session suites stay green; CRISIS Tide regression: synthetic CRISIS into wired engine ⇒ `current_state` never leaves IDLE. |
+| 14C | All 6 V1 §22.2 #12 acceptance tests in `test_live_execution_v1_compliance.py` pass; zero `@unittest.skip` markers; failure modes covered: ES budget exhausted, Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades-concurrent, cooldown active. |
+| 14D | No literal `2.0` / `0.5` boost factor remains in `wave/wave_engine.py` cross-venue path; 2 new `WaveConfig` parameter tests pass; existing 30 cross-venue tests stay green at default values. |
+| 14E | Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed; sample optimisation run reports `num_trades` for every NSGA-II individual; 1 new optimiser test pins the field; existing optimiser regression tests stay green. |
+| **V1 GA** | **All Phase 14 acceptance rows green; full regression sweep (Phases 1–13B + 14A–14E) green; `tests/test_live_execution_v1_compliance.py` is the executable form of the V1 §22.2 #12 contract.** |
 
 ---
 
@@ -2662,35 +2979,73 @@ First real run against the in-tree tick store
 
 ## 12. Milestones
 
-### V1 — Deterministic Baseline (Phases 1–6)
+> **2026-05 correction.** The previous version of this section labelled
+> Phases 1–6 as "V1" and Phase 7 as "V2". That mapping does not match
+> `strategy.md` §22 / §23 (the source of truth). V1 per the strategy
+> spec includes the live execution path with full risk checks (§22.2
+> #12), all five exit types (§22.2 #4), Wave permissions enforcement
+> (§22.2 #9), and ES risk throttle (§22.2 #8) — all wired end-to-end,
+> not just unit-test-complete. HMM is explicitly V2 (§22.3 #1 + §23).
+> The mapping below is the correct one.
 
-**Delivered capabilities:**
-- Formalized schema and contracts.
-- Deterministic Ripple with bounce/breakout archetypes.
-- Full trade lifecycle management.
-- Liquidity map with hold/break/dest scores.
-- VP and CVD integration.
-- Simple ES risk throttle.
-- Deterministic Wave regime classifier.
-- Permissions matrix.
-- Optimization framework.
-- Replay consistency.
-- UI exposure (multi-view dashboard, heatmap polish, candle overlays — see `UI_STRATEGY_INTEGRATION_PLAN.md` Phases A–E + 6 + 7).
+### V1 — Deterministic Baseline + Live Execution (Phases 1–6 + 9 + 10 + 10B + 10C + 11 + 11B + 11C + 12 + 13 + 13B + **14 [IN PROGRESS]**)
 
-### V2 — Probabilistic Extensions (Phase 7)
+**Status: NOT YET GA — see §7.1 V1 Closure Roadmap.**
 
-**Delivered capabilities:**
-- HMM-based Ripple state inference.
-- Optional HMM-based Wave regime.
-- Model training and selection pipeline.
+**Delivered (unit-test-complete + integration-wired):**
+- Formalized schema and contracts (Phase 1).
+- Deterministic Ripple with bounce/breakout archetypes (Phase 2).
+- Full trade lifecycle FSM (Phase 2).
+- Liquidity map with hold/break/dest scores, VP + CVD integration (Phase 3).
+- Optimization framework, replay consistency (Phase 6).
+- Backtester hardening — equity floor, slippage, monthly returns, regime diagnostics (Phase 9).
+- Live data feeds (Phase 10 / 10B / 10C — Python WS).
+- UI exposure (Phases 11 / 11B / 11C — multi-view dashboard, heatmap polish, candle overlays; UI_STRATEGY_INTEGRATION_PLAN.md Phases A–E + 6 + 7).
+- Execution layer test coverage (Phase 12).
+- Deterministic replay capture + verifier (Phase 13 / 13B).
 
-### V3+ — Multi-Venue and Advanced Risk (Phase 8+)
+**Delivered (engine-only — wiring closes in Phase 14):**
+- ES risk throttle (Phase 4 — `RiskEngine`). Wired live in Phase 14B+14C.
+- Tide layer (Phase 4 — `TideEngine` Python). Wired live in Phase 14B.
+- Wave regime classifier + permissions matrix (Phase 5). Wired live in Phase 14B.
+- Cross-venue features (Phase 8). Boost factors lifted to config in Phase 14D.
 
-**Delivered capabilities:**
-- Cross-venue confirmation.
-- Hierarchical ES with Euler decomposition.
-- Adaptive position sizing.
-- Live model retraining.
+**V1 closure work (Phase 14 — see §7.1):**
+- 14A — Live execution driven by Ripple decisions (incl. event-time cooldown).
+- 14B — Tide / Wave / Vol snapshot push to live engine.
+- 14C — Live broker risk-rejection acceptance test.
+- 14D — Cross-venue boost factors as `WaveConfig` parameters.
+- 14E — Optimiser `num_trades` as a Pareto objective.
+
+**V1 GA gate:** all Phase 14 acceptance rows in §10 green AND
+`tests/test_live_execution_v1_compliance.py` (the executable form of
+the V1 §22.2 #12 contract) passes against `StubBroker` + real engine.
+
+### V2 — Probabilistic Extensions + Cross-Venue Confirmation (Phases 7 / 7V / 8 + Wave HMM)
+
+**Status: PARTIALLY DELIVERED — engine-side only, end-to-end wiring is V2 work.**
+
+**Delivered (engine-only):**
+- HMM-based Ripple state inference (Phase 7).
+- HMM A/B validation harness (Phase 7V — Phase 7 marked validated).
+- Cross-venue features → Wave regime input (Phase 8 — Python WaveEngine only; not yet in C++ Ripple).
+
+**Outstanding for V2 GA:**
+- HMM-based Wave regime classifier (currently rule-based only).
+- HMM A/B validation campaign at scale (multi-symbol, multi-window, ≥ 30-day windows for honest CAGR).
+- Cross-venue features inside C++ Ripple (today they only flow through Python WaveEngine).
+- Hierarchical ES decomposition (Euler) — currently single global ES bucket.
+- Liquidity-map logistic hold/break calibration — currently deterministic thresholds.
+- LIMIT / OCO / partial-fill order types in `BinanceBroker` (today MARKET only).
+
+### V3 — Multi-Asset / Multi-Symbol / Adaptive Sizing
+
+**Status: NOT STARTED.**
+
+- Multi-symbol portfolio management (V1 enforces single-symbol per `strategy.md` §22.1).
+- Multi-factor PCA for Wave (needs multi-asset L1 data).
+- Adaptive Kelly-like position sizing (depends on V2 HMM posteriors).
+- Live model retraining pipeline (depends on V2 HMM + optimisation framework).
 
 ---
 

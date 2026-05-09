@@ -132,6 +132,19 @@ def run_live_execute(
 
     engine = engine_factory(ofe_module)
 
+    # Phase 14A — live execution topology contract
+    # (AGENT_STRATEGY_RULES.md §7.4): the execution manager subscribes
+    # to Ripple decisions, NOT raw SignalEngine signals. The Ripple
+    # decision has already passed through the lifecycle FSM, the Wave
+    # permissions matrix, and the RiskEngine ES throttle on the C++
+    # side. Routing the live broker through raw signals would bypass
+    # all three.
+    #
+    # The signal callback is preserved as an OBSERVATION channel only:
+    # when a recorder is attached, signals are written to the sidecar
+    # for downstream analysis. They never drive ``ExecutionManager``.
+    from execution.models import ripple_decision_to_intent  # noqa: PLC0415
+
     if recorder is not None:
         if not getattr(recorder, "_header_written", False):
             try:
@@ -147,18 +160,45 @@ def run_live_execute(
                 recorder.record_signal(sig)
             except Exception:
                 logger.exception("recorder.record_signal failed")
-            try:
-                exec_mgr.on_signal(sig)
-            except Exception:
-                logger.exception("exec_mgr.on_signal failed")
 
         engine.set_signal_callback(_signal_cb)
+
+        def _ripple_cb(decision: Any) -> None:
+            try:
+                recorder.record_ripple_decision(decision)
+            except Exception:
+                logger.exception("recorder.record_ripple_decision failed")
+            try:
+                intent = ripple_decision_to_intent(decision)
+            except Exception:
+                logger.exception("ripple_decision_to_intent failed")
+                intent = None
+            if intent is None:
+                return
+            try:
+                exec_mgr.on_intent(intent)
+            except Exception:
+                logger.exception("exec_mgr.on_intent failed")
+
         try:
-            engine.set_ripple_callback(recorder.record_ripple_decision)
+            engine.set_ripple_callback(_ripple_cb)
         except Exception:
             logger.exception("set_ripple_callback failed")
     else:
-        engine.set_signal_callback(lambda sig: exec_mgr.on_signal(sig))
+        def _ripple_cb(decision: Any) -> None:
+            try:
+                intent = ripple_decision_to_intent(decision)
+            except Exception:
+                logger.exception("ripple_decision_to_intent failed")
+                return
+            if intent is None:
+                return
+            try:
+                exec_mgr.on_intent(intent)
+            except Exception:
+                logger.exception("exec_mgr.on_intent failed")
+
+        engine.set_ripple_callback(_ripple_cb)
 
     if apply_rest_snapshot:
         try:

@@ -399,8 +399,18 @@ class TestLiveTradingSessionRecorderHook(unittest.TestCase):
         ob = MagicMock()
         ob.get_snapshot = MagicMock(return_value=snap)
         engine.get_order_book = MagicMock(return_value=ob)
-        engine.get_trade_flow = MagicMock()
-        engine.get_signal_engine = MagicMock()
+        # Trade flow + signal engine stubs return numeric scalars so the
+        # status-label f-strings in LiveTradingSession.on_timer_tick format
+        # cleanly. Returning bare MagicMocks here triggers
+        # "unsupported format string passed to MagicMock.__format__"
+        # which the tick loop catches but logs as noise.
+        tf = MagicMock()
+        tf.get_total_volume = MagicMock(return_value=0.0)
+        engine.get_trade_flow = MagicMock(return_value=tf)
+        sig = MagicMock()
+        sig.get_pnl = MagicMock(return_value=0.0)
+        sig.get_position = MagicMock(return_value=0)
+        engine.get_signal_engine = MagicMock(return_value=sig)
         sess._engine = engine
         return sess
 

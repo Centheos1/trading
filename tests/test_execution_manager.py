@@ -28,6 +28,7 @@ from execution.broker_interface import BrokerInterface
 from execution.execution_manager import ExecutionManager
 from execution.models import (
     AccountInfo,
+    ExecutionIntent,
     Order,
     OrderSide,
     OrderStatus,
@@ -522,6 +523,426 @@ class TestStartStopLifecycle(unittest.TestCase):
             self.assertFalse(m.start())
         finally:
             m.stop()
+
+
+# ----------------------------------------------------------------------
+# Phase 14A — on_intent tests (Ripple-driven live execution path)
+
+def _intent(
+    intent_type: str = "entry",
+    side: Optional[OrderSide] = OrderSide.BUY,
+    timestamp_ms: int = 1_700_000_000_000,
+    reference_price: float = 100.0,
+    action: str = "ENTER_BOUNCE_LONG",
+    reason: str = "wall holds",
+) -> ExecutionIntent:
+    """Build an ``ExecutionIntent`` for on_intent tests."""
+    return ExecutionIntent(
+        timestamp=timestamp_ms,
+        action=action,
+        side=side,
+        intent_type=intent_type,
+        reference_price=reference_price,
+        reason=reason,
+    )
+
+
+class TestOnIntentDispatch(_LoopBaseCase):
+    """Verifies :meth:`ExecutionManager.on_intent` dispatches each
+    ``intent_type`` to the right downstream coroutine and that
+    no-op intent types short-circuit cleanly."""
+
+    def _arm_with_loop(self, broker: StubBroker, *, cooldown_s: float = 0.0):
+        m = _make_manager(broker, cooldown_s=cooldown_s)
+        m._loop = self.loop
+        m.arm()
+        return m
+
+    def test_entry_intent_schedules_execution(self):
+        broker = StubBroker()
+        m = self._arm_with_loop(broker)
+        scheduled: List = []
+
+        def fake_run(coro, loop):
+            scheduled.append(coro)
+            self.run_async(coro)
+            class _F:
+                def result(self, timeout=None): return None
+            return _F()
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=fake_run):
+            m.on_intent(_intent("entry", OrderSide.BUY,
+                                reference_price=200.0))
+
+        self.assertEqual(len(broker.placed_orders), 1)
+        self.assertEqual(broker.placed_orders[0].side, OrderSide.BUY)
+        self.assertEqual(broker.placed_orders[0].signal_type,
+                         "ENTER_BOUNCE_LONG")
+        self.assertEqual(broker.placed_orders[0].ripple_reason,
+                         "wall holds")
+
+    def test_exit_intent_closes_position(self):
+        broker = StubBroker()
+        broker.position = Position(symbol="BTCUSDT", side=OrderSide.BUY,
+                                   quantity=0.5, entry_price=100.0)
+        m = self._arm_with_loop(broker)
+        m._current_side = OrderSide.BUY
+        m._current_qty = 0.5
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (self.run_async(c),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("exit", side=None,
+                                action="EXIT_BOUNCE",
+                                reason="invalidation"))
+
+        self.assertEqual(len(broker.placed_orders), 1)
+        self.assertEqual(broker.placed_orders[0].side, OrderSide.SELL)
+        self.assertEqual(broker.placed_orders[0].signal_type, "EXIT_BOUNCE")
+        self.assertEqual(broker.placed_orders[0].ripple_reason,
+                         "invalidation")
+        self.assertIsNone(m.current_side)
+        self.assertEqual(m.current_qty, 0.0)
+
+    def test_cancel_intent_is_noop(self):
+        broker = StubBroker()
+        m = self._arm_with_loop(broker)
+        m.on_intent(_intent("cancel", side=None,
+                            action="CANCEL_PASSIVE_ORDERS"))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+    def test_rearm_intent_is_noop(self):
+        broker = StubBroker()
+        m = self._arm_with_loop(broker)
+        m.on_intent(_intent("rearm", side=None,
+                            action="REARM_FOR_NEXT_BOUNCE"))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+    def test_prepare_intent_is_noop(self):
+        broker = StubBroker()
+        m = self._arm_with_loop(broker)
+        m.on_intent(_intent("prepare", action="PREPARE_BOUNCE_LONG"))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+    def test_none_intent_is_noop(self):
+        broker = StubBroker()
+        m = self._arm_with_loop(broker)
+        m.on_intent(None)  # type: ignore[arg-type]
+        self.assertEqual(len(broker.placed_orders), 0)
+
+    def test_entry_without_side_is_noop(self):
+        broker = StubBroker()
+        m = self._arm_with_loop(broker)
+        m.on_intent(_intent("entry", side=None))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+
+class TestOnIntentEventTimeCooldown(_LoopBaseCase):
+    """The cooldown gate on the on_intent path uses ``intent.timestamp``
+    (event time) — never wall-clock. This is the V1 §22.2 +
+    AGENT_STRATEGY_RULES.md §7.1 determinism contract."""
+
+    def _scheduled(self, m, intent):
+        scheduled: List = []
+
+        def fake_run(coro, loop):
+            scheduled.append(coro)
+            self.run_async(coro)
+            class _F:
+                def result(self, timeout=None): return None
+            return _F()
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=fake_run):
+            m.on_intent(intent)
+        return scheduled
+
+    def test_first_intent_always_passes(self):
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=5.0)
+        m._loop = self.loop
+        m.arm()
+        # No prior intent — cooldown gate must not fire.
+        s = self._scheduled(m, _intent("entry", OrderSide.BUY,
+                                       timestamp_ms=10_000))
+        self.assertEqual(len(s), 1)
+        self.assertEqual(m._last_intent_ts_ms, 10_000)
+
+    def test_intent_within_cooldown_is_dropped_by_event_time(self):
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=5.0)
+        m._loop = self.loop
+        m.arm()
+        # Seed a prior intent at t=10_000ms.
+        m._last_intent_ts_ms = 10_000
+        # Same side — irrelevant; cooldown must fire first.
+        s = self._scheduled(m, _intent("entry", OrderSide.SELL,
+                                       timestamp_ms=12_000))
+        # 12_000 - 10_000 = 2_000 ms < 5_000 ms cooldown → dropped.
+        self.assertEqual(len(s), 0)
+        self.assertEqual(len(broker.placed_orders), 0)
+
+    def test_intent_after_cooldown_passes(self):
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=5.0)
+        m._loop = self.loop
+        m.arm()
+        m._last_intent_ts_ms = 10_000
+        # 10_000 + 5_000 = 15_000 — exactly at the boundary should pass.
+        s = self._scheduled(m, _intent("entry", OrderSide.SELL,
+                                       timestamp_ms=15_001))
+        self.assertEqual(len(s), 1)
+        self.assertEqual(m._last_intent_ts_ms, 15_001)
+
+    def test_no_wall_clock_in_decision_logic(self):
+        """Patch ``time.time`` to RAISE: the on_intent decision path
+        must not call it at all. Confirms the V1 §22.2 contract that
+        live-execution decision logic is event-time only."""
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=5.0)
+        m._loop = self.loop
+        m.arm()
+        # Seed a prior intent so we exercise the cooldown branch.
+        m._last_intent_ts_ms = 10_000
+
+        def boom():
+            raise AssertionError(
+                "wall-clock time.time() called from on_intent decision logic")
+
+        # Intercept the schedule call so the dispatched coroutine is
+        # closed deterministically (no orphan-coroutine RuntimeWarning).
+        def fake_run(coro, loop):
+            coro.close()
+            class _F:
+                def result(self, timeout=None): return None
+            return _F()
+
+        with patch("execution.execution_manager.time.time",
+                   side_effect=boom), \
+             patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=fake_run):
+            # Intent within cooldown — must be dropped without ever
+            # consulting wall-clock.
+            m.on_intent(_intent("entry", OrderSide.SELL,
+                                timestamp_ms=11_000))
+            # Intent past cooldown — same constraint; the gate uses
+            # event time and must not touch time.time().
+            m.on_intent(_intent("entry", OrderSide.SELL,
+                                timestamp_ms=20_000))
+        # Schedule succeeded for the second intent: state advanced.
+        self.assertEqual(m._last_intent_ts_ms, 20_000)
+
+    def test_zero_timestamp_intent_does_not_corrupt_cooldown_state(self):
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=5.0)
+        m._loop = self.loop
+        m.arm()
+        m._last_intent_ts_ms = 10_000
+        # An intent with timestamp=0 must NOT advance _last_intent_ts_ms
+        # (defensive: a malformed intent should be ignored, not break
+        # the cooldown gate for the rest of the session).
+        s = self._scheduled(m, _intent("entry", OrderSide.SELL,
+                                       timestamp_ms=0))
+        # Cooldown gate: 0 vs 10_000 — abs delta is 10_000 which is
+        # past cooldown. Schedule should pass but ts stays at 10_000.
+        self.assertEqual(len(s), 1)
+        self.assertEqual(m._last_intent_ts_ms, 10_000)
+
+
+class TestOnIntentGuards(_LoopBaseCase):
+    """Side / inventory / loop / armed guards on the on_intent path."""
+
+    def test_disarmed_intent_is_dropped(self):
+        broker = StubBroker()
+        m = _make_manager(broker)
+        m._loop = self.loop  # loop set but not armed
+        m.on_intent(_intent("entry", OrderSide.BUY))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+    def test_no_loop_intent_is_dropped(self):
+        broker = StubBroker()
+        m = _make_manager(broker)
+        m.arm()
+        # _loop is None — must short-circuit (no loop to schedule on).
+        m.on_intent(_intent("entry", OrderSide.BUY))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+    def test_same_side_entry_is_dropped(self):
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=0.0)
+        m._loop = self.loop
+        m.arm()
+        m._current_side = OrderSide.BUY
+        m._current_qty = 0.1
+
+        scheduled: List = []
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (scheduled.append(c), c.close(),
+                                             type("F", (), {"result": lambda *a, **k: None})())[2]):
+            m.on_intent(_intent("entry", OrderSide.BUY))
+
+        self.assertEqual(scheduled, [],
+                         "same-side entry must not schedule execution")
+
+    def test_side_flip_closes_then_reverses(self):
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=0.0)
+        m._loop = self.loop
+        m.arm()
+        m._current_side = OrderSide.BUY
+        m._current_qty = 0.1
+        broker.position = Position(symbol="BTCUSDT", side=OrderSide.BUY,
+                                   quantity=0.1, entry_price=100.0)
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (self.run_async(c),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("entry", OrderSide.SELL,
+                                action="ENTER_BREAKOUT_SHORT"))
+
+        # close (BUY→SELL) + new SELL = 2 orders
+        self.assertEqual(len(broker.placed_orders), 2)
+        self.assertEqual(broker.placed_orders[0].signal_type,
+                         "CLOSE_ENTER_BREAKOUT_SHORT")
+        self.assertEqual(broker.placed_orders[1].signal_type,
+                         "ENTER_BREAKOUT_SHORT")
+        self.assertEqual(m.current_side, OrderSide.SELL)
+
+    def test_exit_with_no_position_is_noop(self):
+        broker = StubBroker()
+        m = _make_manager(broker)
+        m._loop = self.loop
+        m.arm()
+        # No current position.
+        m.on_intent(_intent("exit", side=None, action="EXIT_BOUNCE"))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+
+class TestOnIntentSizingAndPriceHints(_LoopBaseCase):
+    """Sizing math + reference-price priming on the on_intent path."""
+
+    def test_intent_reference_price_seeds_last_signal_price(self):
+        broker = StubBroker()
+        m = _make_manager(broker)
+        m._loop = self.loop
+        m.arm()
+        # Intercept scheduling so we can inspect _last_signal_price
+        # before the coroutine fires (which would also seed it).
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (c.close(),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("entry", OrderSide.BUY,
+                                reference_price=42_000.0))
+        self.assertEqual(m._last_signal_price, 42_000.0)
+
+    def test_intent_max_position_clamp(self):
+        broker = StubBroker(step_size=0.0)
+        m = _make_manager(broker, sizing=SizingConfig(
+            mode=SizingMode.FIXED_NOTIONAL, value=1_000_000.0,
+            max_position=0.5))
+        m._loop = self.loop
+        m.arm()
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (self.run_async(c),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("entry", OrderSide.BUY,
+                                reference_price=100.0))
+        self.assertEqual(len(broker.placed_orders), 1)
+        # raw qty = 10_000 → clamped to 0.5
+        self.assertAlmostEqual(broker.placed_orders[0].quantity, 0.5)
+
+    def test_intent_zero_qty_is_dropped_silently(self):
+        """With FIXED_QTY=0 and no MIN_NOTIONAL fallback (price=0),
+        :meth:`_compute_quantity` returns 0.0. The intent path must
+        short-circuit cleanly, not place a zero-quantity order."""
+        broker = StubBroker()
+        m = _make_manager(broker, sizing=SizingConfig(
+            mode=SizingMode.FIXED_QTY, value=0.0001, max_position=10.0))
+        m._loop = self.loop
+        m.arm()
+        # No reference price supplied AND no _last_signal_price seeded.
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (self.run_async(c),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("entry", OrderSide.BUY,
+                                reference_price=0.0))
+        self.assertEqual(len(broker.placed_orders), 0)
+
+
+class TestOnSignalDeprecation(_LoopBaseCase):
+    """The legacy on_signal entry point still works (Phase 12 regression
+    suite must stay green) but it now logs a deprecation warning so
+    new callers know to migrate."""
+
+    def test_first_on_signal_logs_deprecation_warning(self):
+        broker = StubBroker()
+        m = _make_manager(broker)
+        m._loop = self.loop
+        m.arm()
+        # Close the dispatched coroutine cleanly to avoid orphan-
+        # coroutine RuntimeWarning (the loop isn't running here).
+        def fake_run(coro, loop):
+            coro.close()
+            class _F:
+                def result(self, timeout=None): return None
+            return _F()
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=fake_run), \
+             self.assertLogs("execution.execution_manager",
+                             level="WARNING") as cm:
+            m.on_signal(_signal("BUY", 100.0))
+        self.assertTrue(any("deprecated" in s.lower()
+                            for s in cm.output),
+                        f"expected deprecation warning, got {cm.output}")
+
+    def test_subsequent_on_signal_calls_do_not_re_warn(self):
+        broker = StubBroker()
+        m = _make_manager(broker)
+        m._loop = self.loop
+        m.arm()
+
+        def fake_run(coro, loop):
+            coro.close()
+            class _F:
+                def result(self, timeout=None): return None
+            return _F()
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=fake_run):
+            # First call emits the warning.
+            with self.assertLogs("execution.execution_manager",
+                                 level="WARNING"):
+                m.on_signal(_signal("BUY", 100.0))
+            # Second call: the warning is already latched, so no new
+            # WARNING records should be emitted.
+            self.assertTrue(m._on_signal_warning_logged)
+            try:
+                with self.assertLogs("execution.execution_manager",
+                                     level="WARNING") as cm:
+                    m.on_signal(_signal("BUY", 100.0))
+                # If we reach here, assertLogs captured something —
+                # verify it's not a re-warn.
+                self.assertFalse(
+                    any("deprecated" in s.lower() for s in cm.output),
+                    f"second on_signal should not re-warn: {cm.output}")
+            except AssertionError as e:
+                # assertLogs raises AssertionError when no logs match.
+                # That's the desired outcome.
+                self.assertIn("no logs", str(e).lower())
+
+
+class TestUpdateCooldown(_LoopBaseCase):
+    """:meth:`update_cooldown` keeps the seconds-precision public knob
+    and the ms-precision internal gate in sync."""
+
+    def test_update_cooldown_recomputes_ms(self):
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=5.0)
+        self.assertEqual(m._cooldown_ms, 5000)
+        m.update_cooldown(0.5)
+        self.assertEqual(m._cooldown_s, 0.5)
+        self.assertEqual(m._cooldown_ms, 500)
 
 
 if __name__ == "__main__":
