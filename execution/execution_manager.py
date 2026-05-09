@@ -226,11 +226,14 @@ class ExecutionManager:
         if intent_type == "exit":
             # Exits always close the current position regardless of
             # side. If we have no position there is nothing to do —
-            # we still update the cooldown stamp to mirror the entry
-            # path's "I saw an intent" semantic.
-            self._last_intent_ts_ms = ts_ms if ts_ms > 0 else self._last_intent_ts_ms
+            # return WITHOUT advancing the cooldown stamp so a later
+            # legitimate entry intent isn't blocked by a no-op exit.
+            # This mirrors the entry-path invariant: only dispatched
+            # intents advance the cooldown gate (suppressed entries on
+            # same-side / None-side also leave the stamp untouched).
             if self._current_qty <= 0 or self._current_side is None:
                 return
+            self._last_intent_ts_ms = ts_ms if ts_ms > 0 else self._last_intent_ts_ms
             asyncio.run_coroutine_threadsafe(
                 self._execute_intent_exit(intent), self._loop)
             return

@@ -595,6 +595,7 @@ class TestOnIntentDispatch(_LoopBaseCase):
                                              type("F", (), {"result": lambda *a, **k: None})())[1]):
             m.on_intent(_intent("exit", side=None,
                                 action="EXIT_BOUNCE",
+                                timestamp_ms=42_000,
                                 reason="invalidation"))
 
         self.assertEqual(len(broker.placed_orders), 1)
@@ -604,6 +605,10 @@ class TestOnIntentDispatch(_LoopBaseCase):
                          "invalidation")
         self.assertIsNone(m.current_side)
         self.assertEqual(m.current_qty, 0.0)
+        # Symmetric invariant: a dispatched exit MUST advance the
+        # cooldown stamp (counterpart to the no-op exit regression
+        # above which must NOT advance it).
+        self.assertEqual(m._last_intent_ts_ms, 42_000)
 
     def test_cancel_intent_is_noop(self):
         broker = StubBroker()
@@ -733,6 +738,39 @@ class TestOnIntentEventTimeCooldown(_LoopBaseCase):
         # Schedule succeeded for the second intent: state advanced.
         self.assertEqual(m._last_intent_ts_ms, 20_000)
 
+    def test_noop_exit_does_not_advance_cooldown_blocking_next_entry(self):
+        """Regression: a flat-state ``exit`` intent must NOT advance
+        ``_last_intent_ts_ms``. A prior revision updated the stamp
+        before the position-existence check, which silently dropped
+        the next legitimate entry that arrived within the cooldown
+        window. The entry path's invariant — only dispatched intents
+        advance the cooldown — must apply symmetrically to exits."""
+        broker = StubBroker()
+        m = _make_manager(broker, cooldown_s=5.0)
+        m._loop = self.loop
+        m.arm()
+        # No prior cooldown stamp; manager is flat.
+        self.assertEqual(m._last_intent_ts_ms, 0)
+        self.assertEqual(m._current_qty, 0.0)
+
+        # 1) No-op exit at t=10_000ms (no position to close).
+        m.on_intent(_intent("exit", side=None, action="EXIT_BOUNCE",
+                            timestamp_ms=10_000))
+        self.assertEqual(len(broker.placed_orders), 0)
+        self.assertEqual(m._last_intent_ts_ms, 0,
+                         "no-op exit must not advance cooldown")
+
+        # 2) Entry at t=12_000ms (well within 5_000ms cooldown of the
+        #    no-op exit). With the bug present the cooldown gate would
+        #    drop this; with the fix in place the entry must dispatch.
+        s = self._scheduled(m, _intent("entry", OrderSide.BUY,
+                                       timestamp_ms=12_000,
+                                       reference_price=200.0))
+        self.assertEqual(len(s), 1, "entry after no-op exit was dropped")
+        self.assertEqual(len(broker.placed_orders), 1)
+        self.assertEqual(broker.placed_orders[0].side, OrderSide.BUY)
+        self.assertEqual(m._last_intent_ts_ms, 12_000)
+
     def test_zero_timestamp_intent_does_not_corrupt_cooldown_state(self):
         broker = StubBroker()
         m = _make_manager(broker, cooldown_s=5.0)
@@ -811,12 +849,18 @@ class TestOnIntentGuards(_LoopBaseCase):
 
     def test_exit_with_no_position_is_noop(self):
         broker = StubBroker()
-        m = _make_manager(broker)
+        m = _make_manager(broker, cooldown_s=5.0)
         m._loop = self.loop
         m.arm()
-        # No current position.
-        m.on_intent(_intent("exit", side=None, action="EXIT_BOUNCE"))
+        # Seed a prior cooldown stamp so we can prove the no-op exit
+        # leaves it untouched (regression: an earlier revision advanced
+        # the stamp BEFORE the position check, polluting the gate).
+        m._last_intent_ts_ms = 10_000
+        m.on_intent(_intent("exit", side=None, action="EXIT_BOUNCE",
+                            timestamp_ms=12_000))
         self.assertEqual(len(broker.placed_orders), 0)
+        # No-op exit MUST NOT advance the cooldown stamp.
+        self.assertEqual(m._last_intent_ts_ms, 10_000)
 
 
 class TestOnIntentSizingAndPriceHints(_LoopBaseCase):
