@@ -136,7 +136,7 @@ flowchart TB
 | Optimization (Ripple+Wave) | ✅ **CLOSED 2026-05-11** — three-axis NSGA-II (cagr, sharpe_ratio, num_trades) post-14E | — | 6 (done) / 14E (done) |
 | Paper fills | **Implemented + Wired** (`paper_fills` flag, consumes `RippleDecision`) | — | 6 (done) |
 | PnL tracking | **Implemented + Wired** (cumulative PnL in lifecycle) | — | 6 (done) |
-| Live execute event-time discipline | **Event-time cooldown** (`_last_intent_ts_ms` + `_cooldown_ms`) on the canonical `on_intent` path post-Phase 14A | Wall-clock cooldown remains only inside the deprecated `on_signal` shim, which is no longer wired by any production path | 12 (done) / 14A (done 2026-05-09) |
+| Live execute event-time discipline | **Event-time cooldown** (`_last_intent_ts_ms` + `_cooldown_ms`) on the canonical `on_intent` path post-Phase 14A | ✅ Phase 14F deleted the deprecated `on_signal` / `_execute_signal` shim entirely; `import time` is no longer in `execution/execution_manager.py` so wall-clock reads on the decision path are impossible by construction | 12 (done) / 14A (done 2026-05-09) / 14F (done 2026-05-12) |
 | HMM Ripple inference | **Implemented + A/B-validated** | Multi-symbol / multi-window campaign (V2 polish) | 7 (done) / 7V (done) |
 | Cross-venue confirmation | **Implemented (engine-only)** | A/B validation campaign (V2 polish) | 8 (done) |
 | Deterministic replay capture | **Implemented + Wired** | Qt-mocked intra-tick replay (Phase 13C, V1.1) | 13 (done) / 13B (done) |
@@ -603,7 +603,7 @@ Post-review consistency fixes (strategy.md cross-reference):
 Key design decisions:
 - `TickContext` decouples lifecycle from full `RippleContext`/`RippleFeatures`, keeping the interface minimal and testable.
 - `LifecycleConfig` nested inside `RippleConfig` for hierarchical configuration.
-- `DefaultRiskBudgetSnapshot` and `DefaultPermissionSet` used as upstream inputs (Tide/Wave not yet implemented).
+- `DefaultRiskBudgetSnapshot` and `DefaultPermissionSet` used as upstream inputs at the time of Phase 2 (Tide/Wave were not yet implemented). Post-Phase 14B (2026-05-11), the live path pushes real `TideEngine` / `WaveEngine` snapshots into the C++ engine on a 60 s / 5 s cadence — the defaults remain as fallback when no snapshot has been published yet.
 - Single-trade constraint enforced: `try_setup()` returns `false` if a trade is already active.
 - All exit types evaluated in priority order: risk-budget > invalidation > time > target > exhaustion.
 - Scale-in only in `EXPANSION` state with CVD momentum and volatility-threshold gates.
@@ -1332,9 +1332,12 @@ Validation results:
   `await asyncio.sleep(1.0)` watchdog cadence.
 
 Known limitations / out-of-scope:
-- `LiveTradingSession.on_timer_tick` remains untested; it pulls extensive
-  `MainWindow` widget state and would require a substantial Qt mock to
-  test cleanly. Continues to be exercised by manual UI runs.
+- ~~`LiveTradingSession.on_timer_tick` remains untested.~~ ✅ **Closed
+  by Phase 14F.3 (2026-05-12)** — `tests/test_live_trading_session.py`
+  now pins `_push_layered_strategy()` cadence, snapshot translation,
+  counter parity with `execution/live_runner._layered_push_step`, and
+  counter stall on `get_ripple()` failure (12 new tests, headless,
+  no Qt widgets required).
 - Pre-existing 6 `test_wave_engine.py` and 1 `test_crossvenue_wave.py`
   failures are unaddressed (tracked separately, out of scope).
 - The `strategies/orderflow.py:run_live()` CLI helper still uses
@@ -2269,10 +2272,15 @@ Validation results:
   sharpe=0.269, cagr=0.0565)`.
 
 Known limitations / out-of-scope:
-- Wave/tide CLIs are not yet covered by an analogous binding-drift
-  guard. Those don't go through pybind11 (Python-only dataclasses),
-  but a separate `STRAT_PARAMS` ↔ dataclass-field audit would
-  formalise the contract there too. Filed as a possible follow-up.
+- ~~Wave/tide CLIs are not yet covered by an analogous binding-drift
+  guard.~~ ✅ **Closed by Phase 14F.2 (2026-05-12)** —
+  `tests/test_strat_params_audit.py` (7 new tests) pins the forward
+  audit (every `ParamSpec.name` ⇒ real `WaveStrategyParams` /
+  `TideStrategyParams` field), the reverse audit (every dataclass
+  field is either in `param_space` or explicitly whitelisted as
+  "fixed / not optimised"), and the `STRAT_PARAMS["orderflow"]` Wave
+  subset cross-check against `schemas.WaveConfig`. No drift found at
+  audit landing; the test will fail-fast on any future rename.
 
 ---
 
@@ -2669,8 +2677,10 @@ cadence used for Phases 13Y / 13W / 13B (≤ 1 day each except 14A).
 | 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | ✅ **DONE 2026-05-12** | 1 day (actual: ~0.5 day) | 14A, 14B |
 | 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) | — |
 | 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) | — |
+| 14F | V1 closure tail (drop deprecated `on_signal`, STRAT_PARAMS audit, layered-push test coverage, V1.1 risk-gate diagnostics + wiring indicator, docs drift) | 🟢 Polish | ✅ **DONE 2026-05-12** | 1 day (actual: ~0.75 day) | 14A–14E |
 
-After 14E, V1 is GA and the project enters V2 scope per `strategy.md` §23.
+After 14E, V1 is GA. 14F closes out the tractable polish / known-limitation
+items that survived V1 GA without re-opening V2 scope.
 
 **Audit row updates as Phase 14 lands.** The 2026-05 audit table above
 remains a *historical* record of the gaps that triggered Phase 14. The
@@ -2782,13 +2792,13 @@ BINANCE_TESTNET=true .venv/bin/python main.py
 #   → Tail the log: each Ripple decision logged via ripple_decision_to_intent,
 #     dispatched to BinanceBroker via on_intent. Confirm NO
 #     "ExecutionManager.on_signal is deprecated" warnings appear.
-#   → Post-2026-05-12 (Phase 14B + 14C shipped): the local RiskEngine
-#     now receives real Tide budgets on the live path (Phase 14B push
-#     thread) and the V1 §22.2 #12 contract is acceptance-pinned (Phase
-#     14C 18-test compliance suite). The only remaining V1 GA work is
-#     the two 🟠 Quality items (14D / 14E) — see §7.1 status table.
-#     TESTNET soak still recommended before flipping BINANCE_TESTNET
-#     to false for full V1 GA.
+#   → Post-2026-05-11 (V1 GA — all of Phase 14 shipped): the local
+#     RiskEngine receives real Tide budgets on the live path (14B push
+#     thread), the V1 §22.2 #12 contract is acceptance-pinned (14C
+#     18-test compliance suite), cross-venue boost factors are
+#     `WaveConfig` parameters (14D), and `num_trades` is a Pareto axis
+#     (14E). TESTNET soak is the standard pre-prod hygiene before
+#     flipping BINANCE_TESTNET to false; not a V1 GA gate.
 ```
 
 ---
@@ -2867,12 +2877,14 @@ BINANCE_TESTNET=true .venv/bin/python main.py
 #     - Per second: realized vol pushed to engine.
 #     - Every 5 s: Wave snapshot pushed.
 #     - Every 60 s: Tide risk budget pushed.
-#   → POST-2026-05-12: Phase 14C shipped. The local RiskEngine is now
-#     wired AND the broker-rejection contract is acceptance-pinned by
+#   → POST-2026-05-11 (V1 GA): the local RiskEngine is wired AND the
+#     broker-rejection contract is acceptance-pinned by
 #     `tests/test_live_execution_v1_compliance.py` (18 tests) under all
 #     six failure modes (ES exhausted, Wave DISABLED, Tide CRISIS,
 #     max_position exceeded, two trades concurrent, cooldown active).
-#     Only the two 🟠 Quality sub-phases (14D / 14E) remain before V1 GA.
+#     Cross-venue boost factors are `WaveConfig` parameters (14D) and
+#     `num_trades` is an NSGA-II Pareto axis (14E) — all five Phase 14
+#     sub-phases done; V1 is GA per §7.1.
 ```
 
 ---
@@ -3010,6 +3022,45 @@ lets the optimiser distinguish "20 trades earning 1% PnL" from
 1. ✅ Both `# TODO add num_trades` markers gone from `optimiser.py`. `rg "TODO add num_trades" optimiser.py` returns zero hits.
 2. ✅ `num_trades` is now a first-class Pareto axis in *both* operators.
 3. ✅ 4 new optimiser tests pass; existing optimiser regression tests (none previously existed in this directory) remain green. Broader regression sweep (559 tests across 18 non-Qt suites — see §8) is clean.
+
+---
+
+### Phase 14F — V1 Closure Tail `[COMPLETED 2026-05-12]`
+
+**Objective.** After 14E shipped V1 GA, five tractable V1-track items
+survived: a deprecated wall-clock cooldown surface that was never re-
+wired but still cluttered the class, a missing dataclass/STRAT_PARAMS
+audit (Phase 13Y follow-up), zero unit coverage for the post-14B push
+loop in the UI session, two named V1.1 diagnostics nice-to-haves
+(risk-gate block reason / count, layered-wiring indicator), and a
+handful of stale "remaining 14D/14E" references in the planning docs.
+Phase 14F closes all five without re-opening V2/V3 scope.
+
+**Scope (as shipped).**
+
+| File | Change |
+|---|---|
+| `execution/execution_manager.py` | **14F.1** — Deleted the deprecated `on_signal` shim, the `_execute_signal` coroutine, the `_on_signal_warning_logged` flag, the `_last_order_ts` wall-clock state, and the `import time` itself. Updated class docstring to record the removal. Wall-clock reads on the decision path are now **impossible by construction** — `time` is not in the module's namespace. |
+| `tests/test_execution_manager.py` | **14F.1** — Removed `TestOnSignalGates`, `TestExecuteSignal`, `TestOnSignalDeprecation`. Converted `TestExecuteSignalMaxPositionClamp` and the `_record_order` callback test to drive through the canonical `_execute_intent_entry` path. Added `TestOnSignalSurfaceRemoved` to assert the deprecated surface never returns. `test_no_wall_clock_in_decision_logic` strengthened to assert the module has no `time` attribute. |
+| `tests/test_live_runner.py` | **14F.1** — `_StubExecMgr` no longer mirrors `on_signal`; the legacy "exec_mgr.on_signal not called" assertion was rewritten as `hasattr(stub, "on_signal") is False`. |
+| `tests/test_strat_params_audit.py` | **14F.2** — **NEW FILE.** 7 audit tests pinning the forward + reverse `STRAT_PARAMS` / `ParamSpec` ↔ dataclass-field contracts for `WaveStrategyParams` × `WaveOptimiserConfig` and `TideStrategyParams` × `TideOptimiserConfig`, plus a cross-check that `STRAT_PARAMS["orderflow"]`'s Wave subset still maps to `schemas.WaveConfig`. Explicit "fixed / not optimised" whitelists with one-line justifications per field. |
+| `tests/test_live_trading_session.py` | **14F.3** — 12 new tests (`TestPushLayeredStrategyDisabled`, `TestPushLayeredStrategyCadence`, `TestPushLayeredStrategySnapshotTranslation`, `TestPushLayeredStrategyCounterStall`) pinning the RV/Wave/Tide cadences (10 / 50 / 600 timer ticks ⇒ 1 s / 5 s / 60 s), the snapshot translation through `wave_snapshot_to_ofe`, counter-stall on `get_ripple()` failure, and counter parity with `execution.live_runner._layered_push_step`. Resolves the Phase 10 "untested `on_timer_tick`" known limitation at the layered-push surface. |
+| `ui/live_trading_session.py` | **14F.4** — Added `_last_block_reason` / `_last_block_ts_ms` / `_block_count` / `_block_counts_by_reason` session state plus a `record_block(reason, ts_ms)` setter and `block_status()` accessor. **14F.5** — Added a `layered_push_status()` accessor that returns `{tide, wave, rv}` push counts for the dashboard wiring indicator. |
+| `ui/main_window.py` | **14F.4** — `_on_ripple_received` calls `self._session.record_block(block, intent.timestamp)` after the warning log when `intent_risk_block_reason` returns a non-None reason. `_on_timer_tick` proxies `block_status()` ⇒ `update_block_status(...)` and `layered_push_status()` ⇒ `update_wiring(...)` to the dashboard on every UI tick. **14F.1** — Comment block describing the legacy signal-driven route refreshed to record the removal. |
+| `ui/strategy_dashboard_view.py` | **14F.4** — New `_RiskGateStatusBar` widget displays "Last block: REASON Xs ago \| Blocked this session: N" with an orange highlight for blocks <10 s old. **14F.5** — New `_LayeredWiringIndicator` widget shows three `Tide ● / Wave ● / RV ●` indicators that flip from grey `○ default` to green `● live` once the corresponding push count crosses zero (one-way: a transient zero after a successful push does NOT revert the indicator). Both widgets are composited into the bottom of `StrategyDashboardView`; `update_block_status` / `update_wiring` proxy methods added. |
+| `tests/test_strategy_dashboard.py` | **14F.4 + 14F.5** — 16 new checks across the risk-gate diagnostics (9) and the layered-wiring indicator (7). Cover idle text, reason + count rendering, age formatting (seconds and minutes), color thresholds, idle reset on count=0, dashboard proxy method routing, session-level `record_block` per-reason counters, and the one-way `● live` flip invariant. |
+| `implementation_plan.md` | **14F.6** — Replaced two stale "don't switch BINANCE_TESTNET to false until 14D + 14E ship" bash commentary blocks (~lines 2786, 2872) with post-GA wording. Refreshed the Phase 2 line 606 note about Tide/Wave to reflect post-14B live wiring. Added Phase 14F to §7.1 status table. Updated §2.2 (event-time discipline) and the §2.3 known-limitation rows for Phase 10 `on_timer_tick` and Phase 13Y STRAT_PARAMS audit to "closed by 14F". |
+| `UI_STRATEGY_INTEGRATION_PLAN.md` | **14F.6** — §12.2 candle row updated from "Partially wired" to "Wired (Phase A — completed)". §10.3 "All Active" filter spec line marked as V1.1 deferred (paired with §15.3 polish), with explicit acknowledgement that the existing Strategy filter is sufficient for V1 GA. |
+
+**Acceptance — verified.**
+
+1. ✅ **14F.1 gate:** `rg "on_signal\|_execute_signal\|time\.time\(\)" execution/execution_manager.py` returns one historical docstring reference and zero code references. `import time` removed.
+2. ✅ **14F.2:** 7 new audit tests pass. No drift discovered at landing.
+3. ✅ **14F.3:** 12 new `_push_layered_strategy` tests pass with no Qt widgets in the loop.
+4. ✅ **14F.4:** Diagnostics bar renders reason + age + count; session counters increment on every blocked intent; tests cover both stages.
+5. ✅ **14F.5:** Wiring indicator flips to `● live` on first successful push per layer; one-way flip invariant pinned.
+6. ✅ **14F.6:** `rg "14D.*14E.*remain|Tide/Wave not yet implemented|Partially wired" implementation_plan.md UI_STRATEGY_INTEGRATION_PLAN.md` returns zero hits.
+7. ✅ **Broad regression:** 675 unittest tests across all non-Qt + offscreen-Qt suites (`QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests`) plus 339 custom-runner checks (`test_strategy_dashboard.py`, `test_strategy_ui.py`, `test_strategy_store.py`) — all green.
 
 ---
 
@@ -3158,6 +3209,7 @@ visibility only.
 - 14C ✅ DONE 2026-05-12 — Live broker risk-rejection acceptance test.
 - 14D ✅ DONE 2026-05-11 — Cross-venue boost factors as `WaveConfig` parameters.
 - 14E ✅ DONE 2026-05-11 — Optimiser `num_trades` as a Pareto objective.
+- 14F ✅ DONE 2026-05-12 — V1 closure tail: deprecated `on_signal` removed, STRAT_PARAMS audit landed, layered-push tests added (Phase 10 known limitation closed), V1.1 risk-gate diagnostics + wiring indicator shipped, doc drift cleared.
 
 **V1 GA gate (cleared 2026-05-11):** all Phase 14 acceptance rows in
 §10 are green, `tests/test_live_execution_v1_compliance.py` (the

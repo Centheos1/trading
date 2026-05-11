@@ -37,10 +37,11 @@ from execution.models import (
 
 class _StubExecMgr:
     """Mimics :class:`ExecutionManager`'s public surface used by
-    ``run_live_execute``."""
+    ``run_live_execute``. The legacy ``on_signal`` entry point was
+    deleted in Phase 14F — stubs deliberately omit it so any caller
+    that regresses will raise ``AttributeError`` at test time."""
     def __init__(self) -> None:
         self.on_intent_calls: List[ExecutionIntent] = []
-        self.on_signal_calls: List[Any] = []
         self.disarm_calls = 0
         self.stop_calls = 0
         self.disarm_close_position: List[bool] = []
@@ -51,9 +52,6 @@ class _StubExecMgr:
 
     def on_intent(self, intent: ExecutionIntent) -> None:
         self.on_intent_calls.append(intent)
-
-    def on_signal(self, signal) -> None:
-        self.on_signal_calls.append(signal)
 
     def disarm(self, close_position: bool = True) -> None:
         self.disarm_calls += 1
@@ -268,15 +266,14 @@ class TestRippleDrivenTopology(unittest.TestCase):
         engine.ripple_callback(_make_decision(intent_name="MYSTERY_INTENT"))
         self.assertEqual(len(exec_mgr.on_intent_calls), 0)
 
-    def test_on_signal_is_never_called_on_no_recorder_path(self):
-        """Regression: the legacy signal-driven topology placed orders
-        from raw SignalEngine signals. Phase 14A removes that path."""
+    def test_exec_mgr_has_no_on_signal_attribute(self):
+        """Phase 14F: the legacy ``on_signal`` surface was removed. The
+        stub mirrors the real ``ExecutionManager`` and deliberately
+        omits it — any caller that regresses will raise
+        ``AttributeError`` at the live boundary."""
         exec_mgr = _StubExecMgr()
-        engine = _StubEngine()
-        _run_live_execute_one_pass(exec_mgr=exec_mgr, engine=engine)
-        # No signal_callback was registered, so even if the engine
-        # tried to fire one, exec_mgr.on_signal would not be called.
-        self.assertEqual(len(exec_mgr.on_signal_calls), 0)
+        self.assertFalse(hasattr(exec_mgr, "on_signal"))
+        self.assertFalse(hasattr(exec_mgr, "on_signal_calls"))
 
     def test_exit_decision_routes_as_exit_intent(self):
         exec_mgr = _StubExecMgr()
@@ -306,9 +303,9 @@ class TestRecorderObservation(unittest.TestCase):
         self.assertEqual(len(rec.signal_calls), 1)
         # Critical: signals MUST NOT drive on_intent.
         self.assertEqual(len(exec_mgr.on_intent_calls), 0)
-        # And they MUST NOT drive on_signal either (the deprecated
-        # entry point exists but the runner no longer calls it).
-        self.assertEqual(len(exec_mgr.on_signal_calls), 0)
+        # Phase 14F: the legacy on_signal surface no longer exists on
+        # the stub (mirrors real ExecutionManager).
+        self.assertFalse(hasattr(exec_mgr, "on_signal"))
 
     def test_recorder_captures_ripple_decisions_alongside_intent(self):
         exec_mgr = _StubExecMgr()

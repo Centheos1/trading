@@ -417,6 +417,202 @@ class _RippleStateTable(QFrame):
             self._value_labels["ES Used"].setStyleSheet("color: #c8c8d8;")
 
 
+# ────────────────────────────────────────── _RiskGateStatusBar (Phase 14F.4)
+
+
+class _RiskGateStatusBar(QFrame):
+    """Phase 14F.4 — V1.1 diagnostics for the live risk-gate (§22.2 #12).
+
+    Shows two read-only fields:
+
+        Last block: REASON XXs ago   |   Blocked this session: N
+
+    ``ui/main_window.py:_on_timer_tick`` drives updates via
+    :meth:`update_block_status` on the existing 100 ms cadence, so the
+    UI doesn't hammer the widget. When no blocks have fired this
+    session the bar shows an idle ``—`` placeholder.
+
+    Wall-clock is used for the "Xs ago" age — that's display-layer
+    cosmetic and explicitly allowed by AGENT_STRATEGY_RULES.md §7.1
+    (the determinism contract only forbids wall-clock in *decision*
+    logic).
+    """
+
+    _IDLE_TEXT = "Last block: \u2014   |   Blocked this session: 0"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "QFrame { background: #0f0f19; border: 1px solid #22243a; }"
+            "QLabel { color: #b4b4c8; font-family: Menlo; font-size: 10px; }"
+        )
+        self.setMinimumHeight(22)
+        self.setMaximumHeight(28)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(8)
+
+        self._label = QLabel(self._IDLE_TEXT)
+        self._label.setStyleSheet("color: #c8c8d8;")
+        layout.addWidget(self._label)
+        layout.addStretch(1)
+
+        # Internal state — used by tests to inspect the most recent
+        # update without round-tripping through the rendered text.
+        self._last_reason: str = ""
+        self._last_ts_ms: int = 0
+        self._last_count: int = 0
+
+    def update_block_status(
+        self,
+        reason: str,
+        ts_ms: int,
+        count: int,
+        *,
+        now_ms: int = 0,
+    ) -> None:
+        """Refresh the bar from the session's risk-gate counters.
+
+        Parameters
+        ----------
+        reason
+            Latest block reason string (e.g. ``"ES_EXHAUSTED"``).
+            Empty string ⇒ no blocks yet this session.
+        ts_ms
+            Event-time of the last block (``intent.timestamp``).
+        count
+            Total blocks this session.
+        now_ms
+            Optional wall-clock-now in ms. Defaults to a real
+            ``time.time()`` read; tests can pass a fixed value to make
+            the age string deterministic.
+        """
+        self._last_reason = reason or ""
+        self._last_ts_ms = int(ts_ms or 0)
+        self._last_count = int(count or 0)
+
+        if not reason or count <= 0:
+            self._label.setText(self._IDLE_TEXT)
+            self._label.setStyleSheet("color: #c8c8d8;")
+            return
+
+        if now_ms <= 0:
+            import time as _time  # noqa: PLC0415 — display-only
+            now_ms = int(_time.time() * 1000)
+        age_s = max(0, (now_ms - self._last_ts_ms) // 1000)
+        age_str = (
+            f"{age_s}s ago" if age_s < 60 else
+            f"{age_s // 60}m {age_s % 60}s ago"
+        )
+        self._label.setText(
+            f"Last block: {reason} {age_str}   |   "
+            f"Blocked this session: {count}"
+        )
+        # Highlight when blocks are actively happening (<10s old).
+        if age_s < 10:
+            self._label.setStyleSheet("color: #ffa53c; font-weight: bold;")
+        else:
+            self._label.setStyleSheet("color: #c8c8d8;")
+
+    # Test-friendly accessors --------------------------------------------
+    @property
+    def text(self) -> str:
+        return self._label.text()
+
+    @property
+    def last_reason(self) -> str:
+        return self._last_reason
+
+    @property
+    def last_count(self) -> int:
+        return self._last_count
+
+
+# ────────────────────────────────────────── _LayeredWiringIndicator (Phase 14F.5)
+
+
+class _LayeredWiringIndicator(QFrame):
+    """Phase 14F.5 — V1.1 visual indicator for Phase 14B layered push.
+
+    Shows three dots next to one of ``● live`` (push count > 0) or
+    ``○ default`` (engine still on its built-in defaults):
+
+        Tide ●   Wave ●   RV ●
+
+    Once Phase 14B's push loop fires successfully for a given layer the
+    indicator flips to ``live`` and never reverts — that's the contract
+    operators need (a transient hiccup shouldn't make a green panel go
+    grey). If the push loop has never landed a successful setter call
+    for a layer, the indicator stays grey to flag a wiring problem.
+    """
+
+    _LIVE_COLOR = "#28dc82"
+    _DEFAULT_COLOR = "#6a6a8a"
+    _LIVE_GLYPH = "\u25cf"   # ●
+    _DEFAULT_GLYPH = "\u25cb"  # ○
+
+    _LAYERS: list[tuple[str, str]] = [
+        ("tide", "Tide"),
+        ("wave", "Wave"),
+        ("rv", "RV"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "QFrame { background: #0f0f19; border: 1px solid #22243a; }"
+            "QLabel { font-family: Menlo; font-size: 10px; }"
+        )
+        self.setMinimumHeight(22)
+        self.setMaximumHeight(28)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(12)
+
+        title = QLabel("Layered:")
+        title.setStyleSheet("color: #8888aa;")
+        layout.addWidget(title)
+
+        self._labels: dict[str, QLabel] = {}
+        self._state: dict[str, bool] = {key: False for key, _ in self._LAYERS}
+        for key, display in self._LAYERS:
+            lbl = QLabel(f"{display} {self._DEFAULT_GLYPH}")
+            lbl.setStyleSheet(f"color: {self._DEFAULT_COLOR};")
+            layout.addWidget(lbl)
+            self._labels[key] = lbl
+        layout.addStretch(1)
+
+    def update_wiring(self, status: dict[str, int]) -> None:
+        """Flip each layer to "live" once its push count crosses zero.
+
+        ``status`` is ``LiveTradingSession.layered_push_status()`` —
+        a mapping of layer key → cumulative successful pushes. The
+        flip is one-way: a transient failure that stops incrementing
+        the count does NOT revert the indicator to default, which
+        matches operator intuition ("we successfully wired Tide at
+        least once this session").
+        """
+        for key, _display in self._LAYERS:
+            if not self._state[key] and int(status.get(key, 0)) > 0:
+                self._state[key] = True
+                display = dict(self._LAYERS)[key]
+                self._labels[key].setText(f"{display} {self._LIVE_GLYPH}")
+                self._labels[key].setStyleSheet(
+                    f"color: {self._LIVE_COLOR}; font-weight: bold;")
+
+    # Test-friendly accessors --------------------------------------------
+    def is_live(self, layer: str) -> bool:
+        return bool(self._state.get(layer, False))
+
+    @property
+    def labels(self) -> dict[str, QLabel]:
+        return self._labels
+
+
 # ────────────────────────────────────────── StrategyDashboardView
 
 
@@ -452,14 +648,20 @@ class StrategyDashboardView(QWidget):
         self._history_panel = _StrategyHistoryPanel(market_state)
         # C3: current Ripple state grid
         self._ripple_table = _RippleStateTable(market_state)
+        # Phase 14F.4: V1.1 risk-gate diagnostics strip
+        self._risk_gate_bar = _RiskGateStatusBar()
+        # Phase 14F.5: V1.1 layered-wiring indicator
+        self._wiring_indicator = _LayeredWiringIndicator()
 
-        # Bottom area: history above table
+        # Bottom area: history above table above diagnostics strips
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         bottom_layout.setSpacing(2)
         bottom_layout.addWidget(self._history_panel)
         bottom_layout.addWidget(self._ripple_table)
+        bottom_layout.addWidget(self._risk_gate_bar)
+        bottom_layout.addWidget(self._wiring_indicator)
 
         splitter.addWidget(top_splitter)
         splitter.addWidget(self._blotter)
@@ -492,6 +694,14 @@ class StrategyDashboardView(QWidget):
     def ripple_table(self) -> _RippleStateTable:
         return self._ripple_table
 
+    @property
+    def risk_gate_bar(self) -> _RiskGateStatusBar:
+        return self._risk_gate_bar
+
+    @property
+    def wiring_indicator(self) -> _LayeredWiringIndicator:
+        return self._wiring_indicator
+
     def update_from_state(self):
         """Pull latest data from MarketState and push to child widgets."""
         snap = self._ms.strategy_snapshot
@@ -500,3 +710,17 @@ class StrategyDashboardView(QWidget):
         self._strategy_panel.set_strategy_state(self._ms.strategy_ui_state)
         self._ripple_table.update_from_state()
         self._history_panel.update()
+
+    def update_block_status(
+        self, reason: str, ts_ms: int, count: int
+    ) -> None:
+        """Phase 14F.4 — proxy update from
+        :meth:`LiveTradingSession.block_status` so the timer-tick path
+        only needs one entry point."""
+        self._risk_gate_bar.update_block_status(reason, ts_ms, count)
+
+    def update_wiring(self, status: dict) -> None:
+        """Phase 14F.5 — proxy update from
+        :meth:`LiveTradingSession.layered_push_status` so the timer-tick
+        path only needs one entry point."""
+        self._wiring_indicator.update_wiring(status)

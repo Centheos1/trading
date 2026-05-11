@@ -167,12 +167,93 @@ class LiveTradingSession:
         self._layered_pushes_wave: int = 0
         self._layered_pushes_rv: int = 0
 
+        # Phase 14F.4 — V1.1 risk-gate diagnostics. ``ui/main_window.py``
+        # calls :meth:`record_block` whenever ``intent_risk_block_reason``
+        # rejects a live Ripple intent (AGENT_STRATEGY_RULES.md §7.6).
+        # Operators previously had to grep the log to see suppressed
+        # trades; the strategy dashboard now surfaces the latest reason
+        # plus a session running total. Timestamps are event-time
+        # (``intent.timestamp``) — the dashboard converts to "Xs ago"
+        # only at render time, where wall-clock is acceptable.
+        self._last_block_reason: str = ""
+        self._last_block_ts_ms: int = 0
+        self._block_count: int = 0
+        self._block_counts_by_reason: dict[str, int] = {}
+
     def attach_recorder(self, recorder: Any) -> None:
         """Phase 13B — attach a ``SessionRecorder`` so each timer tick
         emits a ``session_tick`` event capturing the orchestration state
         (drained count, book state, resync flags). Pass ``None`` to
         detach."""
         self._recorder = recorder
+
+    # ──────────────────────────────────────────────────────────────
+    # Phase 14F.4 — Risk-gate diagnostics
+    # ──────────────────────────────────────────────────────────────
+
+    def record_block(self, reason: str, ts_ms: int) -> None:
+        """Record a Phase 14C risk-gate block.
+
+        Called by ``ui/main_window.py:_on_ripple_received`` whenever
+        :func:`execution.models.intent_risk_block_reason` rejects a live
+        intent. The strategy dashboard reads these fields via
+        :meth:`block_status` on every UI tick.
+
+        ``ts_ms`` is the event-time of the blocked intent
+        (``intent.timestamp``); the dashboard converts to "Xs ago" at
+        render time using wall-clock — wall-clock is acceptable on a
+        purely-cosmetic age display per AGENT_STRATEGY_RULES.md §7.1.
+        """
+        if not reason:
+            return
+        self._last_block_reason = reason
+        self._last_block_ts_ms = int(ts_ms or 0)
+        self._block_count += 1
+        self._block_counts_by_reason[reason] = (
+            self._block_counts_by_reason.get(reason, 0) + 1)
+
+    def block_status(self) -> tuple[str, int, int]:
+        """Snapshot of (last_reason, last_ts_ms, total_count) for the
+        strategy dashboard."""
+        return (self._last_block_reason,
+                self._last_block_ts_ms,
+                self._block_count)
+
+    @property
+    def last_block_reason(self) -> str:
+        return self._last_block_reason
+
+    @property
+    def last_block_ts_ms(self) -> int:
+        return self._last_block_ts_ms
+
+    @property
+    def block_count(self) -> int:
+        return self._block_count
+
+    @property
+    def block_counts_by_reason(self) -> dict[str, int]:
+        return dict(self._block_counts_by_reason)
+
+    # ──────────────────────────────────────────────────────────────
+    # Phase 14F.5 — Layered-wiring indicator
+    # ──────────────────────────────────────────────────────────────
+
+    def layered_push_status(self) -> dict[str, int]:
+        """Phase 14F.5 — return the per-layer push tallies so the
+        strategy panel can show ``● live`` once a layer has received at
+        least one successful push, or ``○ default`` while the layer is
+        still running against ``DefaultTideSnapshot`` /
+        ``DefaultWaveSnapshot`` / zero realized-vol.
+
+        Keys are stable identifiers; the UI maps them to display
+        labels.
+        """
+        return {
+            "tide": int(self._layered_pushes_tide),
+            "wave": int(self._layered_pushes_wave),
+            "rv": int(self._layered_pushes_rv),
+        }
 
     @property
     def engine(self) -> Any:

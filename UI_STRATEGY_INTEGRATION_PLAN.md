@@ -522,8 +522,8 @@ class SignalEntry:
 
 The existing category filter (Source combo, "Ripple only", "Exec only" checkboxes) should be extended:
 
-- Add a "Strategy" filter that shows only STRATEGY_* and RIPPLE_* categories.
-- Add an "All Active" filter that hides LEGACY_RAW and DIAGNOSTIC by default.
+- ✅ **Done (Phase C):** "Strategy" filter that shows only STRATEGY_* and RIPPLE_* categories.
+- ⏳ **Deferred to V1.1** (paired with §15.3 diagnostics polish): "All Active" filter that hides LEGACY_RAW and DIAGNOSTIC by default. Not blocking V1 GA — operators can already isolate the strategy traffic via the existing Strategy filter; this is a noise-reduction nicety that lands alongside the V1.1 diagnostics dashboard work.
 
 ### 10.4 Signal Log for This Strategy
 
@@ -591,7 +591,7 @@ For each UI element, check:
 
 | Element | File | Verdict | Action |
 |---|---|---|---|
-| **Candle combo** | `main_window.py:517-527` | Partially wired — sets `_candle_duration_ms` for VP recompute cadence, but label "Candle" implies visual bucketing. | **Repurpose** — wire to heatmap bucket size. |
+| **Candle combo** | `main_window.py:517-527` | ✅ **Wired (Phase A — completed)** — drives heatmap bucket size and VP recompute cadence. | **Done** — see Phase A completion in §11. |
 | **Tick Size input** | `main_window.py:531-533` | Wired to `ofe.EngineConfig.tick_size`. Used by the C++ signal engine (legacy, pre-Ripple). Not used by Tide/Wave/Ripple. | **Hide now, keep in code** — may be useful for legacy strategy testing. |
 | **Imbalance input** | `main_window.py:536-538` | Wired to `ofe.EngineConfig.imbalance_threshold`. Legacy signal engine parameter. Ripple has its own `absorption_entry` etc. | **Hide now, keep in code** — same rationale as Tick Size. |
 | **Sizing controls** | `main_window.py:543-553` | Used by execution manager. Only meaningful when armed. | **Keep, but disable when disarmed.** |
@@ -1766,9 +1766,31 @@ blocked live intent: ...` warning when it fires.
 | File | UI-side change (shipped) |
 |---|---|
 | `ui/main_window.py` | Imports `intent_risk_block_reason`. The `StrategyMode.LIVE` branch of `_on_ripple_received` computes a coarse `current_position_usd = abs(exec_mgr.current_qty) * intent.reference_price`, runs the gate, and short-circuits with a warning log when blocked. Exits + cancels short-circuit the gate so risk-reducing flows are never suppressed. |
-| Diagnostics panel | No widget change required for V1. **Future polish (V1.1):** surface the most recent block reason / count to the operator on the strategy dashboard so suppressed live-trades are visible without grepping the log. Out of scope for V1 GA per `strategy.md` §22.3. |
+| Diagnostics panel | ✅ **Closed by Phase 14F.4 (2026-05-12)** — the V1.1 polish item ("surface most recent block reason / count without grepping the log") shipped as a `_RiskGateStatusBar` widget under `StrategyDashboardView`. Session-level `record_block(reason, ts_ms)` increments a per-reason counter and stashes `last_block_reason` / `last_block_ts_ms`; the dashboard renders "Last block: REASON Xs ago \| Blocked this session: N" on every 100 ms timer tick, with an orange highlight for blocks <10 s old. 9 new headless tests in `test_strategy_dashboard.py`. |
 
-### 15.4 Phase 11D / 11E / 11F — Status Unchanged
+### 15.4 Phase 14F — V1 Closure Tail `[COMPLETED 2026-05-12]`
+
+**Wraps up the UI-facing items called out in §15.1 (Tide/Wave/RV
+wiring indicator) and §15.3 (risk-gate block reason).** Both were
+explicitly labelled "V1.1 polish" / "future polish" in their parent
+sections; Phase 14F lands both ahead of the next planned UI work so
+operators have full visibility into the layered strategy without
+log-grepping.
+
+| File | UI-side change (shipped) |
+|---|---|
+| `ui/strategy_dashboard_view.py` | New `_RiskGateStatusBar` (Phase 14F.4) and `_LayeredWiringIndicator` (Phase 14F.5) widgets, composited at the bottom of `StrategyDashboardView`. Both update via `update_block_status` / `update_wiring` proxy methods on the dashboard. The wiring indicator is one-way: a layer flips from grey `○ default` to green `● live` on its first successful setter call and stays live for the rest of the session, so transient C++ binding hiccups don't make the panel flicker grey. |
+| `ui/live_trading_session.py` | `record_block(reason, ts_ms)`, `block_status()`, `layered_push_status()`, `block_counts_by_reason` accessors added. These are pure Python — no Qt dependency — so they can be unit-tested headless. |
+| `ui/main_window.py` | `_on_ripple_received` calls `record_block(...)` when `intent_risk_block_reason` returns a reason. `_on_timer_tick` proxies the latest snapshot to the dashboard. |
+| `tests/test_strategy_dashboard.py` | +16 checks across both widgets (9 risk-gate + 7 wiring). Suite total: 113/113 passing under `QT_QPA_PLATFORM=offscreen`. |
+
+The wiring indicator closes the §15.1 follow-up ("Worth adding a small
+visual hint (e.g. '● live' vs '○ default') so the operator can see at
+a glance whether Tide/Wave/RV are being pushed live"). The risk-gate
+status bar closes the §15.3 V1.1 polish item. No additional UI work
+remains on the V1 plan.
+
+### 15.5 Phase 11D / 11E / 11F — Status Unchanged
 
 The deferred heatmap-cosmetics phases (§14.2 / §14.3 / §14.4) remain
 deferred per §14.5. They are **not** V1 closure work — `strategy.md`

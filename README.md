@@ -34,6 +34,7 @@ the full Phase 14 closure record.
 | 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | ✅ **DONE 2026-05-12** | 1 day (actual: ~0.5 day) |
 | 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) |
 | 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) |
+| 14F | V1 closure tail — deprecated `on_signal` removed, STRAT_PARAMS audit, `_push_layered_strategy` test coverage, V1.1 risk-gate diagnostics + wiring indicator, docs drift | 🟢 Polish | ✅ **DONE 2026-05-12** | 1 day (actual: ~0.75 day) |
 
 V2 / V3 scope (HMM Wave classifier, Hierarchical ES, Multi-symbol,
 Multi-factor PCA, Adaptive Kelly sizing, Live model retraining, LIMIT/OCO
@@ -485,6 +486,36 @@ audit pass during test writing did not surface any defect.
   Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades
   concurrent, cooldown active). Exits + happy-path negative-controls
   pin no over-suppression.
+- ✅ **14D — DONE 2026-05-11.** Cross-venue divergence + correlation
+  boost factors are now `WaveConfig.crossvenue_divergence_boost` /
+  `crossvenue_correlation_boost` parameters (previously hardcoded
+  `2.0` / `0.5`). Two new tests in `test_crossvenue_wave.py`.
+- ✅ **14E — DONE 2026-05-11.** `num_trades` is a third Pareto axis in
+  NSGA-II (`crowding_distance` iterates it; `non_dominated_sorting`
+  treats it as "higher is better" alongside `cagr` and `sharpe`).
+  Closes `strategy.md` §22.2 #15. Both `# TODO add num_trades` markers
+  removed from `optimiser.py`; 4 new tests in `test_optimiser.py`.
+- ✅ **14F — DONE 2026-05-12.** V1 closure tail:
+  - Deleted the deprecated `ExecutionManager.on_signal` /
+    `_execute_signal` surface and the `import time` it required.
+    Wall-clock reads on the decision path are now impossible by
+    construction (the `time` module is no longer in
+    `execution/execution_manager.py`'s namespace).
+  - Added `tests/test_strat_params_audit.py` (7 tests) to pin the
+    Wave/Tide `STRAT_PARAMS` ↔ dataclass-field contract (Phase 13Y
+    parity follow-up).
+  - Added 12 new tests for `LiveTradingSession._push_layered_strategy`
+    pinning RV/Wave/Tide cadences, snapshot translation, counter
+    stall on `get_ripple()` failure, and counter parity with the
+    headless `execution.live_runner._layered_push_step` (closes the
+    Phase 10 "untested `on_timer_tick`" known limitation).
+  - V1.1 diagnostics: the strategy dashboard now surfaces the latest
+    risk-gate block reason + age + session count (`_RiskGateStatusBar`)
+    and three `Tide ● / Wave ● / RV ●` indicators that flip to
+    `● live` on first successful push (`_LayeredWiringIndicator`).
+    16 new dashboard tests.
+  - Documentation drift sweep across `implementation_plan.md` /
+    `UI_STRATEGY_INTEGRATION_PLAN.md`.
 
 **Deferred to V2:**
 - LIMIT / OCO order support and partial-fill bookkeeping

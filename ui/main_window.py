@@ -1096,8 +1096,9 @@ class MainWindow(QMainWindow):
         # Phase 14A: Live execution if armed in live mode. Routes the
         # same Ripple intent through ``ExecutionManager.on_intent``
         # (event-time cooldown, Ripple-FSM-respecting). The legacy
-        # ``_on_engine_signal -> on_signal`` route is OBSERVATION-only
-        # now — see AGENT_STRATEGY_RULES.md §7.4.
+        # signal-driven route was deleted entirely in Phase 14F — see
+        # AGENT_STRATEGY_RULES.md §7.4. ``_on_engine_signal`` remains
+        # as a Qt observation slot only (no execution side-effects).
         # Phase 14C: re-apply the C++ engine Wave / RiskEngine gate on
         # the Python side so a real broker never sees an order when
         # the engine state already decided to block the trade
@@ -1125,6 +1126,11 @@ class MainWindow(QMainWindow):
                     logger.warning(
                         "V1 §22.2 #12 gate blocked live intent: %s (%s)",
                         intent.action, block)
+                    try:
+                        self._session.record_block(
+                            block, int(intent.timestamp or 0))
+                    except Exception:
+                        logger.exception("record_block failed")
                     return
                 try:
                     self._exec_manager.on_intent(intent)
@@ -1169,6 +1175,22 @@ class MainWindow(QMainWindow):
 
     def _on_timer_tick(self):
         self._session.on_timer_tick()
+        # Phase 14F.4 — surface the latest risk-gate block on the
+        # strategy dashboard so operators don't have to grep the log.
+        try:
+            reason, ts_ms, count = self._session.block_status()
+            self._strategy_dashboard.update_block_status(
+                reason, ts_ms, count)
+        except Exception:
+            logger.exception("strategy dashboard block-status update failed")
+        # Phase 14F.5 — flip the Tide/Wave/RV indicators to "● live"
+        # once the layered push loop has landed at least one
+        # successful setter call for each layer.
+        try:
+            self._strategy_dashboard.update_wiring(
+                self._session.layered_push_status())
+        except Exception:
+            logger.exception("strategy dashboard wiring update failed")
 
     def show(self):
         super().show()

@@ -4,7 +4,6 @@ import asyncio
 import logging
 import math
 import threading
-import time
 from typing import Callable, Deque, List, Optional
 from collections import deque
 
@@ -24,19 +23,17 @@ class ExecutionManager:
     Runs its own asyncio event loop in a background thread so the caller
     (Qt main thread or CLI) never blocks.
 
-    Phase 14A — Live execution topology contract (AGENT_STRATEGY_RULES.md
-    §7.4): the live path consumes ``RippleDecision`` intents via
-    :meth:`on_intent`, which already honour the Ripple lifecycle FSM,
-    Wave permissions, the ``RiskEngine`` ES throttle, and Tide budgets.
-    The legacy :meth:`on_signal` entry point remains as a deprecated
-    shim so that the prior signal-driven topology can still be tested,
-    but it is no longer wired by ``live_runner.py`` / ``main_window``.
+    Live execution topology contract (AGENT_STRATEGY_RULES.md §7.4): the
+    live path consumes ``RippleDecision`` intents via :meth:`on_intent`,
+    which already honour the Ripple lifecycle FSM, Wave permissions,
+    the ``RiskEngine`` ES throttle, and Tide budgets. The legacy
+    signal-driven entry point (``on_signal`` / ``_execute_signal``) was
+    removed in Phase 14F — it had been a deprecated shim since
+    Phase 14A and was not wired by any production caller.
 
     Cooldowns are enforced in **event time** (`intent.timestamp_ms`) per
     the V1 §22.2 / AGENT_STRATEGY_RULES.md §7.1 determinism contract.
-    The ``time.time()`` call inside ``_execute_signal`` (deprecated path)
-    is preserved only for the legacy on_signal flow; ``on_intent`` /
-    ``_execute_intent_entry`` use event time exclusively.
+    There is no wall-clock fallback anywhere on the decision path.
     """
 
     MIN_NOTIONAL = 105
@@ -63,11 +60,8 @@ class ExecutionManager:
         self._armed = False
         self._current_side: Optional[OrderSide] = None
         self._current_qty: float = 0.0
-        # Wall-clock seconds — only ever read/written by the deprecated
-        # ``on_signal`` path. Phase 14A guarantees decision logic on the
-        # canonical ``on_intent`` path uses event time only.
-        self._last_order_ts: float = 0.0
-        # Event-time milliseconds — used by ``on_intent``.
+        # Event-time milliseconds — used by ``on_intent``. No wall-clock
+        # counterpart exists post-14F.
         self._last_intent_ts_ms: int = 0
         self._last_signal_price: float = 0.0
         self._step_size: float = 0.0
@@ -77,7 +71,6 @@ class ExecutionManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self._on_signal_warning_logged = False
 
     @property
     def armed(self) -> bool:
@@ -137,49 +130,6 @@ class ExecutionManager:
         logger.info("Execution DISARMED for %s", self._symbol)
         if close_position and self._current_qty > 0:
             self._submit(self._close_position_coro())
-
-    def on_signal(self, signal) -> None:
-        """**DEPRECATED — Phase 14A.** Use :meth:`on_intent` instead.
-
-        This entry point still works to keep legacy callers (and the
-        Phase 12 regression suite) green, but it is no longer wired by
-        ``live_runner.py`` or ``main_window``. Signal-driven routing
-        bypasses the Ripple lifecycle FSM, Wave permissions, and the
-        ``RiskEngine`` ES throttle — see AGENT_STRATEGY_RULES.md §7.4.
-
-        Cooldown on this path is wall-clock based; that is intentional
-        for backwards compatibility and is part of the reason the
-        method is deprecated.
-        """
-        if not self._on_signal_warning_logged:
-            logger.warning(
-                "ExecutionManager.on_signal is deprecated (Phase 14A). "
-                "Wire engine.set_ripple_callback to on_intent instead. "
-                "Signal-driven routing bypasses Ripple FSM, Wave "
-                "permissions, and RiskEngine."
-            )
-            self._on_signal_warning_logged = True
-
-        if not self._armed or not self._loop:
-            return
-
-        now = time.time()
-        if now - self._last_order_ts < self._cooldown_s:
-            return
-
-        type_name = signal.type_name()
-        is_buy = "BUY" in type_name or "BULL" in type_name
-        desired_side = OrderSide.BUY if is_buy else OrderSide.SELL
-
-        if signal.price > 0:
-            self._last_signal_price = signal.price
-
-        if self._current_side == desired_side:
-            return
-
-        asyncio.run_coroutine_threadsafe(
-            self._execute_signal(desired_side, type_name), self._loop
-        )
 
     def on_intent(self, intent: ExecutionIntent) -> None:
         """Phase 14A — canonical live-execution entry point.
@@ -315,44 +265,6 @@ class ExecutionManager:
             self._current_side = None
             self._current_qty = 0.0
 
-    async def _execute_signal(self, desired_side: OrderSide, signal_type: str) -> None:
-        self._last_order_ts = time.time()
-        try:
-            if self._current_qty > 0 and self._current_side != desired_side:
-                close_order = await self._broker.close_position(self._symbol)
-                if close_order:
-                    close_order.signal_type = f"CLOSE_{signal_type}"
-                    self._record_order(close_order)
-                    if close_order.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
-                        logger.warning("Close order not filled: %s", close_order.status)
-                        return
-                    await self._refresh_account()
-                self._current_side = None
-                self._current_qty = 0.0
-
-            qty = self._compute_quantity(desired_side)
-            if qty <= 0:
-                return
-
-            if qty > self._sizing.max_position:
-                qty = self._sizing.max_position
-
-            order = await self._broker.place_order(
-                self._symbol, desired_side, qty, OrderType.MARKET
-            )
-            order.signal_type = signal_type
-            self._record_order(order)
-
-            if order.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
-                self._current_side = desired_side
-                self._current_qty = order.fill_quantity or qty
-                await self._refresh_account()
-            else:
-                logger.warning("Order %s: %s", order.status.value, order.error_message)
-
-        except Exception as e:
-            logger.error("Execution error: %s", e)
-
     async def _close_position_coro(self) -> None:
         order = await self._broker.close_position(self._symbol)
         if order:
@@ -367,11 +279,10 @@ class ExecutionManager:
     ) -> None:
         """Phase 14A — entry path driven by a Ripple ``ExecutionIntent``.
 
-        Mirrors :meth:`_execute_signal` but reads price hints from the
-        intent and tags orders with the Ripple action / reason for
-        downstream attribution. No wall-clock reads on the decision
-        path — :attr:`_last_intent_ts_ms` already captured event time
-        in :meth:`on_intent`.
+        Reads price hints from the intent and tags orders with the
+        Ripple action / reason for downstream attribution. No
+        wall-clock reads on the decision path — :attr:`_last_intent_ts_ms`
+        already captured event time in :meth:`on_intent`.
         """
         signal_type = intent.action or "RIPPLE_ENTRY"
         try:

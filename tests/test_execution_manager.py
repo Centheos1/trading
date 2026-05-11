@@ -136,17 +136,6 @@ class StubBroker(BrokerInterface):
 # ----------------------------------------------------------------------
 # Helpers
 
-def _signal(type_name: str = "BUY", price: float = 100.0):
-    """Tiny stand-in for the C++ signal object used by `on_signal`."""
-    class _Sig:
-        def __init__(self, t, p):
-            self._t = t
-            self.price = p
-        def type_name(self):
-            return self._t
-    return _Sig(type_name, price)
-
-
 def _make_manager(broker: StubBroker, *,
                   sizing: SizingConfig | None = None,
                   cooldown_s: float = 5.0,
@@ -240,100 +229,11 @@ class TestArmDisarm(_LoopBaseCase):
         self.assertEqual(broker.placed_orders[0].signal_type, "DISARM_CLOSE")
 
 
-class TestOnSignalGates(_LoopBaseCase):
-
-    def test_on_signal_when_disarmed_is_noop(self):
-        broker = StubBroker()
-        m = _make_manager(broker)
-        m._loop = self.loop  # so the schedule path could run, but armed=False
-        m.on_signal(_signal("BUY", 100.0))
-        self.assertEqual(broker.account_calls, 0)
-        self.assertEqual(len(broker.placed_orders), 0)
-
-    def test_on_signal_within_cooldown_dropped(self):
-        broker = StubBroker()
-        m = _make_manager(broker, cooldown_s=10.0)
-        m._loop = self.loop
-        m.arm()
-        m._last_order_ts = time.time()  # just fired
-        m.on_signal(_signal("BUY", 100.0))
-        # No coroutine scheduled because cooldown gate fired before
-        # asyncio.run_coroutine_threadsafe is reached.
-        self.assertEqual(len(broker.placed_orders), 0)
-
-    def test_on_signal_same_side_dropped(self):
-        broker = StubBroker()
-        m = _make_manager(broker, cooldown_s=0.0)
-        m._loop = self.loop
-        m.arm()
-        m._current_side = OrderSide.BUY
-        m._current_qty = 0.1
-        # Capture whether anything got scheduled.
-        scheduled: List = []
-
-        real_run_threadsafe = asyncio.run_coroutine_threadsafe
-
-        def fake_run_threadsafe(coro, loop):
-            scheduled.append(coro)
-            # Cancel the coroutine to avoid resource warnings.
-            coro.close()
-            class _F:
-                def result(self, timeout=None): return None
-            return _F()
-
-        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
-                   side_effect=fake_run_threadsafe):
-            m.on_signal(_signal("BUY", 100.0))
-
-        self.assertEqual(scheduled, [],
-                         "same-side signal must not schedule _execute_signal")
-
-
-class TestExecuteSignal(_LoopBaseCase):
-
-    def test_happy_path_places_order_and_updates_state(self):
-        broker = StubBroker()
-        m = _make_manager(broker)
-        m._last_signal_price = 100.0
-        # _execute_signal short-circuits the close branch when qty==0
-        self.run_async(m._execute_signal(OrderSide.BUY, "ENTER_LONG"))
-        self.assertEqual(len(broker.placed_orders), 1)
-        self.assertEqual(broker.placed_orders[0].signal_type, "ENTER_LONG")
-        self.assertEqual(m.current_side, OrderSide.BUY)
-        self.assertGreater(m.current_qty, 0.0)
-
-    def test_reverse_position_closes_first_then_places_new(self):
-        broker = StubBroker()
-        m = _make_manager(broker)
-        m._last_signal_price = 100.0
-        m._current_side = OrderSide.BUY
-        m._current_qty = 0.1
-        broker.position = Position(symbol="BTCUSDT", side=OrderSide.BUY,
-                                   quantity=0.1, entry_price=100.0)
-        self.run_async(m._execute_signal(OrderSide.SELL, "ENTER_SHORT"))
-        # close (BUY→SELL) + new order (SELL) = 2 orders
-        self.assertEqual(len(broker.placed_orders), 2)
-        self.assertEqual(broker.placed_orders[0].signal_type, "CLOSE_ENTER_SHORT")
-        self.assertEqual(broker.placed_orders[1].signal_type, "ENTER_SHORT")
-        self.assertEqual(m.current_side, OrderSide.SELL)
-
-    def test_close_not_filled_returns_early(self):
-        broker = StubBroker()
-        m = _make_manager(broker)
-        m._last_signal_price = 100.0
-        m._current_side = OrderSide.BUY
-        m._current_qty = 0.1
-        # Force close_position to return a non-filled order.
-        broker.next_close_order = Order(
-            symbol="BTCUSDT", side=OrderSide.SELL, quantity=0.1,
-            status=OrderStatus.REJECTED, error_message="exchange down")
-        self.run_async(m._execute_signal(OrderSide.SELL, "ENTER_SHORT"))
-        # Only the close attempt was recorded; no new order placed.
-        self.assertEqual(len(broker.placed_orders), 1)
-        self.assertEqual(broker.placed_orders[0].status, OrderStatus.REJECTED)
-        # State remains as it was (close did not flip the position).
-        self.assertEqual(m.current_side, OrderSide.BUY)
-        self.assertEqual(m.current_qty, 0.1)
+class TestRecordOrderCallback(_LoopBaseCase):
+    """Phase 14F: the legacy ``_execute_signal`` test that exercised
+    ``_record_order`` indirectly is now driven through the canonical
+    ``_execute_intent_entry`` path. Verifies the order-callback
+    exception is still swallowed end-to-end."""
 
     def test_record_order_callback_exception_swallowed(self):
         seen: List[Order] = []
@@ -345,8 +245,10 @@ class TestExecuteSignal(_LoopBaseCase):
         broker = StubBroker()
         m = _make_manager(broker, callback=boom)
         m._last_signal_price = 100.0
-        # Must not raise; deque still appends.
-        self.run_async(m._execute_signal(OrderSide.BUY, "ENTER_LONG"))
+        # Drive through the canonical intent entry path.
+        self.run_async(m._execute_intent_entry(
+            _intent("entry", OrderSide.BUY, action="ENTER_LONG"),
+            OrderSide.BUY))
         self.assertEqual(len(m.orders), 1)
         self.assertEqual(len(seen), 1)
 
@@ -401,9 +303,11 @@ class TestComputeQuantity(_LoopBaseCase):
         self.assertEqual(qty, 0.0)
 
 
-class TestExecuteSignalMaxPositionClamp(_LoopBaseCase):
-    """`_execute_signal` clamps quantity to `_sizing.max_position` after
-    `_compute_quantity` returns. This is verified at the order surface."""
+class TestExecuteIntentMaxPositionClamp(_LoopBaseCase):
+    """Phase 14F: ``_execute_intent_entry`` clamps quantity to
+    ``_sizing.max_position`` after ``_compute_quantity`` returns. This
+    is verified at the order surface (formerly tested through the
+    deleted ``_execute_signal`` path)."""
 
     def test_quantity_clamped_to_max_position(self):
         broker = StubBroker(step_size=0.0)
@@ -411,7 +315,9 @@ class TestExecuteSignalMaxPositionClamp(_LoopBaseCase):
             mode=SizingMode.FIXED_NOTIONAL, value=1_000_000.0,
             max_position=0.5))
         m._last_signal_price = 100.0
-        self.run_async(m._execute_signal(OrderSide.BUY, "ENTER_LONG"))
+        self.run_async(m._execute_intent_entry(
+            _intent("entry", OrderSide.BUY, action="ENTER_LONG"),
+            OrderSide.BUY))
         self.assertEqual(len(broker.placed_orders), 1)
         # raw qty = 10_000 → clamped to 0.5
         self.assertAlmostEqual(broker.placed_orders[0].quantity, 0.5)
@@ -791,38 +697,37 @@ class TestOnIntentEventTimeCooldown(_LoopBaseCase):
         self.assertEqual(m._last_intent_ts_ms, 15_001)
 
     def test_no_wall_clock_in_decision_logic(self):
-        """Patch ``time.time`` to RAISE: the on_intent decision path
-        must not call it at all. Confirms the V1 §22.2 contract that
-        live-execution decision logic is event-time only."""
+        """Phase 14F: the ``import time`` statement was removed from
+        ``execution_manager.py`` along with the deprecated ``on_signal``
+        / ``_execute_signal`` path. Wall-clock reads are now impossible
+        by construction — there is no ``time`` symbol in the module's
+        namespace. Confirms the V1 §22.2 contract that live-execution
+        decision logic is event-time only."""
+        import execution.execution_manager as em_mod
+        self.assertFalse(
+            hasattr(em_mod, "time"),
+            "execution_manager.py must not import `time` — wall-clock "
+            "reads on the decision path are forbidden by V1 §22.2."
+        )
+
+        # Additionally verify the on_intent cooldown gate still uses
+        # event time correctly across the boundary.
         broker = StubBroker()
         m = _make_manager(broker, cooldown_s=5.0)
         m._loop = self.loop
         m.arm()
-        # Seed a prior intent so we exercise the cooldown branch.
         m._last_intent_ts_ms = 10_000
 
-        def boom():
-            raise AssertionError(
-                "wall-clock time.time() called from on_intent decision logic")
-
-        # Intercept the schedule call so the dispatched coroutine is
-        # closed deterministically (no orphan-coroutine RuntimeWarning).
         def fake_run(coro, loop):
             coro.close()
             class _F:
                 def result(self, timeout=None): return None
             return _F()
 
-        with patch("execution.execution_manager.time.time",
-                   side_effect=boom), \
-             patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
                    side_effect=fake_run):
-            # Intent within cooldown — must be dropped without ever
-            # consulting wall-clock.
             m.on_intent(_intent("entry", OrderSide.SELL,
                                 timestamp_ms=11_000))
-            # Intent past cooldown — same constraint; the gate uses
-            # event time and must not touch time.time().
             m.on_intent(_intent("entry", OrderSide.SELL,
                                 timestamp_ms=20_000))
         # Schedule succeeded for the second intent: state advanced.
@@ -1004,66 +909,19 @@ class TestOnIntentSizingAndPriceHints(_LoopBaseCase):
         self.assertEqual(len(broker.placed_orders), 0)
 
 
-class TestOnSignalDeprecation(_LoopBaseCase):
-    """The legacy on_signal entry point still works (Phase 12 regression
-    suite must stay green) but it now logs a deprecation warning so
-    new callers know to migrate."""
+class TestOnSignalSurfaceRemoved(_LoopBaseCase):
+    """Phase 14F: the deprecated ``on_signal`` / ``_execute_signal``
+    surface was removed. This test pins the removal so a future
+    well-intentioned refactor cannot silently re-introduce a
+    wall-clock cooldown path on the live broker."""
 
-    def test_first_on_signal_logs_deprecation_warning(self):
+    def test_on_signal_attribute_does_not_exist(self):
         broker = StubBroker()
         m = _make_manager(broker)
-        m._loop = self.loop
-        m.arm()
-        # Close the dispatched coroutine cleanly to avoid orphan-
-        # coroutine RuntimeWarning (the loop isn't running here).
-        def fake_run(coro, loop):
-            coro.close()
-            class _F:
-                def result(self, timeout=None): return None
-            return _F()
-        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
-                   side_effect=fake_run), \
-             self.assertLogs("execution.execution_manager",
-                             level="WARNING") as cm:
-            m.on_signal(_signal("BUY", 100.0))
-        self.assertTrue(any("deprecated" in s.lower()
-                            for s in cm.output),
-                        f"expected deprecation warning, got {cm.output}")
-
-    def test_subsequent_on_signal_calls_do_not_re_warn(self):
-        broker = StubBroker()
-        m = _make_manager(broker)
-        m._loop = self.loop
-        m.arm()
-
-        def fake_run(coro, loop):
-            coro.close()
-            class _F:
-                def result(self, timeout=None): return None
-            return _F()
-
-        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
-                   side_effect=fake_run):
-            # First call emits the warning.
-            with self.assertLogs("execution.execution_manager",
-                                 level="WARNING"):
-                m.on_signal(_signal("BUY", 100.0))
-            # Second call: the warning is already latched, so no new
-            # WARNING records should be emitted.
-            self.assertTrue(m._on_signal_warning_logged)
-            try:
-                with self.assertLogs("execution.execution_manager",
-                                     level="WARNING") as cm:
-                    m.on_signal(_signal("BUY", 100.0))
-                # If we reach here, assertLogs captured something —
-                # verify it's not a re-warn.
-                self.assertFalse(
-                    any("deprecated" in s.lower() for s in cm.output),
-                    f"second on_signal should not re-warn: {cm.output}")
-            except AssertionError as e:
-                # assertLogs raises AssertionError when no logs match.
-                # That's the desired outcome.
-                self.assertIn("no logs", str(e).lower())
+        self.assertFalse(hasattr(m, "on_signal"))
+        self.assertFalse(hasattr(m, "_execute_signal"))
+        self.assertFalse(hasattr(m, "_last_order_ts"))
+        self.assertFalse(hasattr(m, "_on_signal_warning_logged"))
 
 
 class TestUpdateCooldown(_LoopBaseCase):

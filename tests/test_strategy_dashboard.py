@@ -21,6 +21,8 @@ from ui.strategy_dashboard_view import (
     StrategyDashboardView,
     _StrategyHistoryPanel,
     _RippleStateTable,
+    _RiskGateStatusBar,
+    _LayeredWiringIndicator,
 )
 from schemas import (
     StrategySnapshot, TideSnapshot, WaveSnapshot,
@@ -433,6 +435,200 @@ def test_history_panel_invalidate_cache_helper():
           "invalidate_cache() drops the cache key")
 
 
+# ─────────────────────── Phase 14F.4: risk-gate diagnostics
+
+
+def test_risk_gate_bar_idle_text():
+    bar = _RiskGateStatusBar()
+    check(bar.text == _RiskGateStatusBar._IDLE_TEXT,
+          f"idle bar shows placeholder (got '{bar.text}')")
+    check(bar.last_count == 0, "idle bar has count=0")
+    check(bar.last_reason == "", "idle bar has empty reason")
+
+
+def test_risk_gate_bar_renders_reason_and_count():
+    bar = _RiskGateStatusBar()
+    bar.update_block_status(
+        "ES_EXHAUSTED", ts_ms=1_000_000, count=3, now_ms=1_005_000)
+    txt = bar.text
+    check("ES_EXHAUSTED" in txt,
+          f"bar text contains reason (got '{txt}')")
+    check("5s ago" in txt, f"bar text shows age in seconds (got '{txt}')")
+    check("3" in txt, f"bar text shows count (got '{txt}')")
+    check(bar.last_reason == "ES_EXHAUSTED",
+          f"last_reason recorded (got '{bar.last_reason}')")
+    check(bar.last_count == 3,
+          f"last_count recorded (got {bar.last_count})")
+
+
+def test_risk_gate_bar_age_formats_minutes():
+    bar = _RiskGateStatusBar()
+    bar.update_block_status(
+        "WAVE_DISABLED", ts_ms=1_000_000, count=1,
+        now_ms=1_000_000 + 125_000)  # 125 s = 2m 5s
+    txt = bar.text
+    check("2m 5s ago" in txt,
+          f"bar formats minutes + seconds (got '{txt}')")
+
+
+def test_risk_gate_bar_recent_block_is_highlighted():
+    bar = _RiskGateStatusBar()
+    bar.update_block_status(
+        "TIDE_CRISIS", ts_ms=1_000_000, count=1, now_ms=1_002_000)
+    style = bar._label.styleSheet()
+    check("ffa53c" in style.lower(),
+          f"recent (<10s) block highlighted in orange (got '{style}')")
+
+
+def test_risk_gate_bar_old_block_is_muted():
+    bar = _RiskGateStatusBar()
+    bar.update_block_status(
+        "MAX_POSITION", ts_ms=1_000_000, count=1, now_ms=1_030_000)
+    style = bar._label.styleSheet()
+    check("c8c8d8" in style.lower(),
+          f"old (>10s) block uses muted color (got '{style}')")
+
+
+def test_risk_gate_bar_resets_to_idle_when_count_zero():
+    bar = _RiskGateStatusBar()
+    bar.update_block_status("X", 1_000, 1, now_ms=2_000)
+    check("X" in bar.text, "primed with a block")
+    bar.update_block_status("", 0, 0)
+    check(bar.text == _RiskGateStatusBar._IDLE_TEXT,
+          f"reset to idle when count=0 (got '{bar.text}')")
+
+
+def test_dashboard_proxies_block_status_to_bar():
+    ms = MarketState()
+    view = StrategyDashboardView(ms)
+    view.update_block_status("ES_EXHAUSTED", 100_000, 7)
+    check(view.risk_gate_bar.last_reason == "ES_EXHAUSTED",
+          "dashboard proxied reason to risk-gate bar")
+    check(view.risk_gate_bar.last_count == 7,
+          f"dashboard proxied count (got {view.risk_gate_bar.last_count})")
+
+
+def test_session_record_block_increments_counters():
+    """The session-level record_block tracks per-reason and total."""
+    from ui.live_trading_session import LiveTradingSession
+
+    class _FakeMW:
+        _websockets_module = None
+    session = LiveTradingSession(_FakeMW())
+    check(session.block_count == 0, "session starts with 0 blocks")
+    session.record_block("ES_EXHAUSTED", 100_000)
+    session.record_block("ES_EXHAUSTED", 101_000)
+    session.record_block("WAVE_DISABLED", 102_000)
+    reason, ts_ms, count = session.block_status()
+    check(reason == "WAVE_DISABLED",
+          f"last_reason latches most recent (got '{reason}')")
+    check(ts_ms == 102_000,
+          f"last_ts_ms matches most recent (got {ts_ms})")
+    check(count == 3, f"total count = 3 (got {count})")
+    by_reason = session.block_counts_by_reason
+    check(by_reason.get("ES_EXHAUSTED") == 2,
+          f"per-reason counter for ES_EXHAUSTED=2 "
+          f"(got {by_reason.get('ES_EXHAUSTED')})")
+    check(by_reason.get("WAVE_DISABLED") == 1,
+          f"per-reason counter for WAVE_DISABLED=1 "
+          f"(got {by_reason.get('WAVE_DISABLED')})")
+
+
+def test_session_record_block_ignores_empty_reason():
+    """Defensive: a None/empty reason is a no-op."""
+    from ui.live_trading_session import LiveTradingSession
+
+    class _FakeMW:
+        _websockets_module = None
+    session = LiveTradingSession(_FakeMW())
+    session.record_block("", 100_000)
+    session.record_block(None, 101_000)  # type: ignore[arg-type]
+    check(session.block_count == 0,
+          f"empty/None reasons are no-ops (got {session.block_count})")
+
+
+# ─────────────────────── Phase 14F.5: layered-wiring indicator
+
+
+def test_wiring_indicator_starts_in_default_state():
+    ind = _LayeredWiringIndicator()
+    for layer in ("tide", "wave", "rv"):
+        check(not ind.is_live(layer),
+              f"{layer} indicator starts as default")
+        txt = ind.labels[layer].text()
+        check("\u25cb" in txt,
+              f"{layer} label contains \u25cb glyph (got '{txt}')")
+
+
+def test_wiring_indicator_flips_to_live_once():
+    ind = _LayeredWiringIndicator()
+    ind.update_wiring({"tide": 1, "wave": 0, "rv": 0})
+    check(ind.is_live("tide"), "tide flipped to live")
+    check(not ind.is_live("wave"), "wave still default")
+    check(not ind.is_live("rv"), "rv still default")
+    txt = ind.labels["tide"].text()
+    check("\u25cf" in txt,
+          f"tide label uses filled \u25cf after flip (got '{txt}')")
+    style = ind.labels["tide"].styleSheet()
+    check("28dc82" in style.lower(),
+          f"tide label coloured green after flip (got '{style}')")
+
+
+def test_wiring_indicator_flips_all_three_layers():
+    ind = _LayeredWiringIndicator()
+    ind.update_wiring({"tide": 2, "wave": 5, "rv": 12})
+    for layer in ("tide", "wave", "rv"):
+        check(ind.is_live(layer), f"{layer} flipped to live")
+
+
+def test_wiring_indicator_does_not_revert_on_zero_after_live():
+    """A transient failure that stops incrementing the count must NOT
+    revert the indicator to default. Once live, always live (until
+    session restart)."""
+    ind = _LayeredWiringIndicator()
+    ind.update_wiring({"tide": 1, "wave": 1, "rv": 1})
+    # Now an update where counts unexpectedly drop (e.g. a stale read).
+    ind.update_wiring({"tide": 0, "wave": 0, "rv": 0})
+    for layer in ("tide", "wave", "rv"):
+        check(ind.is_live(layer),
+              f"{layer} stays live after subsequent zero count")
+
+
+def test_dashboard_proxies_wiring_to_indicator():
+    ms = MarketState()
+    view = StrategyDashboardView(ms)
+    view.update_wiring({"tide": 0, "wave": 1, "rv": 0})
+    check(view.wiring_indicator.is_live("wave"),
+          "dashboard proxied wave wiring to indicator")
+    check(not view.wiring_indicator.is_live("tide"),
+          "tide stays default")
+
+
+def test_session_layered_push_status_returns_zero_at_start():
+    from ui.live_trading_session import LiveTradingSession
+
+    class _FakeMW:
+        _websockets_module = None
+    session = LiveTradingSession(_FakeMW())
+    status = session.layered_push_status()
+    check(status == {"tide": 0, "wave": 0, "rv": 0},
+          f"layered_push_status starts at zero (got {status})")
+
+
+def test_session_layered_push_status_reflects_counters():
+    from ui.live_trading_session import LiveTradingSession
+
+    class _FakeMW:
+        _websockets_module = None
+    session = LiveTradingSession(_FakeMW())
+    session._layered_pushes_tide = 3
+    session._layered_pushes_wave = 7
+    session._layered_pushes_rv = 11
+    status = session.layered_push_status()
+    check(status == {"tide": 3, "wave": 7, "rv": 11},
+          f"layered_push_status mirrors counters (got {status})")
+
+
 # ─────────────────────── Phase 11: dashboard repaint-gate regression tests
 
 
@@ -508,6 +704,24 @@ if __name__ == '__main__':
         test_should_repaint_returns_false_when_window_hidden,
         test_should_repaint_only_on_strat_refresh,
         test_should_repaint_on_visibility_rising_edge,
+        # Phase 14F.4 — risk-gate diagnostics
+        test_risk_gate_bar_idle_text,
+        test_risk_gate_bar_renders_reason_and_count,
+        test_risk_gate_bar_age_formats_minutes,
+        test_risk_gate_bar_recent_block_is_highlighted,
+        test_risk_gate_bar_old_block_is_muted,
+        test_risk_gate_bar_resets_to_idle_when_count_zero,
+        test_dashboard_proxies_block_status_to_bar,
+        test_session_record_block_increments_counters,
+        test_session_record_block_ignores_empty_reason,
+        # Phase 14F.5 — layered-wiring indicator
+        test_wiring_indicator_starts_in_default_state,
+        test_wiring_indicator_flips_to_live_once,
+        test_wiring_indicator_flips_all_three_layers,
+        test_wiring_indicator_does_not_revert_on_zero_after_live,
+        test_dashboard_proxies_wiring_to_indicator,
+        test_session_layered_push_status_returns_zero_at_start,
+        test_session_layered_push_status_reflects_counters,
     ]
 
     for t in tests:
