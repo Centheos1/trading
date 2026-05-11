@@ -172,8 +172,11 @@ class Nsga2:
 
     def crowding_distance(self, population: List[BacktestResult]) -> List[BacktestResult]:
 
-        # TODO add num_trades
-        for objective in ["pnl", "max_dd", "sharpe_ratio"]:
+        # Phase 14E — ``num_trades`` is a first-class Pareto axis. It
+        # lets the optimiser distinguish "20 trades earning 1% PnL"
+        # from "1 trade earning 1% PnL" — a core robustness signal
+        # per strategy.md §22.2 #15.
+        for objective in ["pnl", "max_dd", "sharpe_ratio", "num_trades"]:
 
             population = sorted(population, key=lambda x: getattr(x, objective))
             min_value = getattr(min(population, key=lambda x: getattr(x, objective)), objective)
@@ -195,7 +198,13 @@ class Nsga2:
 
         fronts = []
 
-        # TODO add num_trades
+        # Phase 14E — three-axis Pareto dominance: cagr (↑), sharpe_ratio
+        # (↑), and num_trades (↑). All three "higher is better"; an
+        # individual dominates another only when it is at least as good
+        # on all three and strictly better on at least one. This
+        # promotes parameter sets that are not just profitable but also
+        # *active* enough to be statistically meaningful (strategy.md
+        # §22.2 #15 — robustness via sample-size).
         for id_1, indiv_1 in population.items():
             for id_2, indiv_2 in population.items():
                 # WIP - Original Code
@@ -215,13 +224,19 @@ class Nsga2:
                 if (
                     indiv_1.cagr >= indiv_2.cagr
                     and indiv_1.sharpe_ratio >= indiv_2.sharpe_ratio
-                    and ( indiv_1.cagr > indiv_2.cagr or indiv_1.sharpe_ratio > indiv_2.sharpe_ratio)
+                    and indiv_1.num_trades >= indiv_2.num_trades
+                    and (indiv_1.cagr > indiv_2.cagr
+                         or indiv_1.sharpe_ratio > indiv_2.sharpe_ratio
+                         or indiv_1.num_trades > indiv_2.num_trades)
                 ):
                     indiv_1.dominates.append(id_2)
                 elif (
                         indiv_2.cagr >= indiv_1.cagr
                         and indiv_2.sharpe_ratio >= indiv_1.sharpe_ratio
-                        and (indiv_2.cagr > indiv_1.cagr or indiv_2.sharpe_ratio > indiv_1.sharpe_ratio)
+                        and indiv_2.num_trades >= indiv_1.num_trades
+                        and (indiv_2.cagr > indiv_1.cagr
+                             or indiv_2.sharpe_ratio > indiv_1.sharpe_ratio
+                             or indiv_2.num_trades > indiv_1.num_trades)
                 ):
                     indiv_1.dominated_by += 1
 

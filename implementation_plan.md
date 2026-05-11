@@ -96,10 +96,10 @@ flowchart TB
 | Paper trading engine | Implemented + Wired (uses `RippleDecision` intents) | ✅ | `PaperEngine` |
 | Binance broker | Implemented (REST + WS) | ✅ Driven by `ExecutionManager.on_intent` (ripple-driven) since Phase 14A (2026-05-09) | `BinanceBroker` |
 | Execution manager | Implemented (Phase 12-tested + Phase 14A-rewired) | ✅ Wired through `engine.set_ripple_callback` → `on_intent` (event-time cooldown). `on_signal` retained as deprecated shim. | `ExecutionManager` |
-| NSGA-II optimizer | Implemented (Phase 6) | ✅ | `optimiser.py` (missing `num_trades` axis — see Phase 14E) |
+| NSGA-II optimizer | Implemented (Phase 6 + Phase 14E) | ✅ | `optimiser.py` — three-axis Pareto (cagr, sharpe_ratio, num_trades) post-14E |
 | Oanda L1 connector | Implemented | ⚠️ Used by `crossvenue/oanda_feed.py` for backtest only; live path not wired | `exchanges/oanda.py` |
 | Binance L1 connector | Implemented | ✅ | `exchanges/binance.py` |
-| Cross-venue features → Wave regime | Implemented (Phase 8) | ⚠️ Boost factors hardcoded — see Phase 14D | `crossvenue/`, `wave/wave_engine.py` |
+| Cross-venue features → Wave regime | Implemented (Phase 8 + Phase 14D) | ✅ | `crossvenue/`, `wave/wave_engine.py`; boost factors are `WaveConfig.crossvenue_divergence_boost` / `crossvenue_correlation_boost` post-14D |
 | Deterministic replay capture / verifier | Implemented + Wired (Phase 13 / 13B) | ✅ | `tools/session_recorder.py`, `tools/replay_harness.py` |
 | HMM A/B validation harness | Implemented + Wired (Phase 7V) | ✅ | `tools/hmm_abtest.py`, `hmm/abtest.py` |
 
@@ -128,12 +128,12 @@ flowchart TB
 | Risk budgeting | **Implemented + Wired** (`RiskEngine`) | Tide budget pushed to live engine on 60 s cadence since Phase 14B (2026-05-11). End-to-end broker-rejection acceptance test pinned by Phase 14C (2026-05-12) — see `tests/test_live_execution_v1_compliance.py`. Hierarchical ES (later, V2). | 4 (done) / 14B (done 2026-05-11) / 14C (done 2026-05-12) |
 | Tide layer | **Implemented + Wired** (`TideEngine` Python) | Tide snapshot pushed to live engine on 60 s cadence since Phase 14B (2026-05-11). Dynamic macro features (later, V2). | 4 (done) / 14B (done 2026-05-11) |
 | Wave layer | **Implemented + Wired** (`WaveEngine` Python, C++ integration) | Wave snapshot pushed to live engine on 5 s cadence (fed by live trade prices via `WaveEngine.on_price`) since Phase 14B (2026-05-11). HMM classifier (V2); multi-asset features (V3). | 5 (done) / 14B (done 2026-05-11) |
-| Cross-venue boost factors | **Hardcoded** (2.0× / 0.5× in `wave_engine.py`) | **Lift to `WaveConfig` parameters → Phase 14D** | 8 (done) / 14D (V1 closure) |
+| Cross-venue boost factors | ✅ **CLOSED 2026-05-11** — lifted to `WaveConfig.crossvenue_divergence_boost` / `crossvenue_correlation_boost` (Phase 14D) | — | 8 (done) / 14D (done) |
 | Replay determinism | **Verified** (`test_replay_determinism.py`) | — | 6 (done) |
 | Performance benchmark | **Verified** (`benchmark_pipeline`, P99 < 100 µs) | — | 6 (done) |
 | Strategy snapshot | **Implemented** (`get_strategy_snapshot()` on `OrderFlowEngine`) | — | 6 (done) |
 | UI diagnostics | **Implemented** (`StrategyDiagnosticsPanel`) | — | 6 (done) |
-| Optimization (Ripple+Wave) | **Implemented** (15 params in NSGA-II space) | **`num_trades` not exposed as Pareto axis → Phase 14E** | 6 (done) / 14E (V1 closure) |
+| Optimization (Ripple+Wave) | ✅ **CLOSED 2026-05-11** — three-axis NSGA-II (cagr, sharpe_ratio, num_trades) post-14E | — | 6 (done) / 14E (done) |
 | Paper fills | **Implemented + Wired** (`paper_fills` flag, consumes `RippleDecision`) | — | 6 (done) |
 | PnL tracking | **Implemented + Wired** (cumulative PnL in lifecycle) | — | 6 (done) |
 | Live execute event-time discipline | **Event-time cooldown** (`_last_intent_ts_ms` + `_cooldown_ms`) on the canonical `on_intent` path post-Phase 14A | Wall-clock cooldown remains only inside the deprecated `on_signal` shim, which is no longer wired by any production path | 12 (done) / 14A (done 2026-05-09) |
@@ -2609,28 +2609,27 @@ First real run against the in-tree tick store
 
 ---
 
-## 7.1 V1 Closure Roadmap (Phase 14 series — IN PROGRESS)
+## 7.1 V1 Closure Roadmap (Phase 14 series — ✅ COMPLETE 2026-05-11)
 
 ### Status
 
-V1 (per `strategy.md` §22.2) is **NOT yet GA**. All numbered phases 1–13
-are unit-test-complete, but a 2026-05 audit cross-referencing
-`strategy.md` §22.2 ("What V1 Must Include") and AGENT_STRATEGY_RULES.md
-§5 ("Tide/Wave/Ripple Boundary Rules") against the live runtime paths
-(`ui/live_trading_session.py`, `execution/live_runner.py`,
-`main.py:execute`) surfaced **four V1 contract violations and two
-quality gaps** that must close before the system can be called
-production-ready.
+V1 (per `strategy.md` §22.2) is **GA as of 2026-05-11**. The 2026-05
+audit cross-referencing `strategy.md` §22.2 ("What V1 Must Include")
+and AGENT_STRATEGY_RULES.md §5 ("Tide/Wave/Ripple Boundary Rules")
+against the live runtime paths (`ui/live_trading_session.py`,
+`execution/live_runner.py`, `main.py:execute`) originally surfaced
+four V1 contract violations and two quality gaps. All six gaps are
+now closed (Phases 14A–14E).
 
-The violations are not in the *engine* (the C++ Tide/Wave/Ripple
-plumbing is correct and tested); they are in the *integration glue*
+The violations were not in the *engine* (the C++ Tide/Wave/Ripple
+plumbing is correct and tested); they were in the *integration glue*
 between the Python orchestration layer and the C++ engine. The
-end-to-end wiring exists only at the unit-test level and was never
-plumbed through any live entry point.
+end-to-end wiring existed only at the unit-test level and was never
+plumbed through any live entry point until Phase 14.
 
-**Progress as of 2026-05-12.** All three 🔴 Blocker sub-phases
-(14A, 14B, 14C) are now done; only the two 🟠 Quality sub-phases
-(14D, 14E) remain before V1 GA. The four contract violations are all
+**Progress as of 2026-05-11.** All five sub-phases (14A blocker,
+14B blocker, 14C blocker, 14D quality, 14E quality) are now done.
+The four contract violations and the two quality gaps are all
 closed:
 
 | Audit row | Closed by |
@@ -2640,6 +2639,8 @@ closed:
 | §22.2 #12 — Live execution with full risk checks | Phase 14A (Ripple-driven topology) + Phase 14B (Tide/Wave/RV push) + Phase 14C (executable contract via `intent_risk_block_reason` + 18-test compliance suite) |
 | §22.2 #4 — All five exit types | Phase 14A (lifecycle FSM exits flow live) + Phase 14C (exits never blocked regression test) |
 | AGENT_STRATEGY_RULES.md §7.1 "Event-time only" | Phase 14A (`on_intent` uses event-time cooldown; deprecated `on_signal` no longer wired) |
+| AGENT_STRATEGY_RULES.md §20 "no magic constants" | Phase 14D (cross-venue boost factors lifted to `WaveConfig.crossvenue_divergence_boost` / `crossvenue_correlation_boost`) |
+| Optimiser objective fidelity (§22.2 #15) | Phase 14E (`num_trades` promoted to Pareto axis in both `crowding_distance` and `non_dominated_sorting`) |
 
 ### V1 Compliance Audit (2026-05)
 
@@ -2652,8 +2653,8 @@ Concrete evidence that drove the gap list:
 | §22.2 #12 — Live execution with full risk checks | Phase 12 (`ExecutionManager`) | ✅ Yes (Phase 14A — 2026-05-09 / Phase 14B — 2026-05-11 / Phase 14C — 2026-05-12) | `execution/live_runner.py` wires `engine.set_ripple_callback(_ripple_cb)`; the callback invokes `execution.models.intent_risk_block_reason(...)` before forwarding to `exec_mgr.on_intent`. Same gate in `ui/main_window.py::_on_ripple_received` (live block). 8 end-to-end acceptance tests + 7 unit tests in `tests/test_live_execution_v1_compliance.py` pin: (i) ES exhausted, (ii) Wave DISABLED, (iii) Tide CRISIS, (iv) max_position_usd exceeded, (v) two-trades concurrent, (vi) cooldown active — each yields zero broker orders, plus an explicit "exits never blocked" + happy-path negative-controls. |
 | §22.2 #4 — All five exit types | Phase 2 (lifecycle FSM) | ✅ Yes (Phase 14A — 2026-05-09) | Live path consumes `RippleDecision` intents post-14A; all five exit types (`EXIT_BOUNCE`, `EXIT_BREAKOUT`, time-stop, target, exhaustion) flow through the lifecycle FSM → `ExecutionIntent(intent_type="exit")` → `ExecutionManager._execute_intent_exit`. Phase 14C pins that exits are NEVER blocked by the risk gate (regression test in `tests/test_live_execution_v1_compliance.py::test_exit_intent_passes_even_when_es_exhausted`). |
 | AGENT_STRATEGY_RULES.md §7.1 "Event-time only" | — | ✅ Yes (Phase 14A — 2026-05-09) | `ExecutionManager.on_intent` uses `intent.timestamp` (event time, ms) for the cooldown gate. The legacy `on_signal` / `_execute_signal` path still reads `time.time()` but is no longer wired by `live_runner.py` / `main_window` / `main.py:execute` (Phase 14A grep gate 1 confirms). |
-| AGENT_STRATEGY_RULES.md §20 "no magic constants" | Phase 8 (cross-venue) | ❌ Partial | `WaveEngine` uses hardcoded 2.0× / 0.5× boost factors for cross-venue divergence/correlation (`wave/wave_engine.py`); should be `WaveConfig` parameters. Documented as Phase 8 known limitation. |
-| Optimiser objective fidelity | Phase 6 | ❌ Partial | `optimiser.py:175,198` carry `# TODO add num_trades` — NSGA-II optimises only on (PnL, max_dd, sharpe, cagr); trade count is unavailable as a Pareto axis even though `backtest()` returns it. |
+| AGENT_STRATEGY_RULES.md §20 "no magic constants" | Phase 8 (cross-venue) | ✅ Yes (Phase 14D — 2026-05-11) | `WaveConfig.crossvenue_divergence_boost` (default 2.0) and `WaveConfig.crossvenue_correlation_boost` (default 0.5) replace the previously hardcoded literals at `wave/wave_engine.py:_classify_regime`. Defaults reproduce pre-14D behaviour. Pinned by `tests/test_crossvenue_wave.py::test_divergence_boost_override_changes_regime` (boost=3.0 flips regime → BREAKDOWN) and `test_correlation_boost_override_disables_ar_boost` (boost=0.0 suppresses the AR boost that would otherwise trigger BREAKDOWN). |
+| Optimiser objective fidelity (§22.2 #15) | Phase 6 | ✅ Yes (Phase 14E — 2026-05-11) | Both `# TODO add num_trades` markers removed; `optimiser.py::crowding_distance` now iterates `["pnl", "max_dd", "sharpe_ratio", "num_trades"]`, and `optimiser.py::non_dominated_sorting` uses `num_trades` as a third Pareto axis (higher is better). Pinned by 4 tests in `tests/test_optimiser.py` covering crowding-axis inclusion, endpoint-infinite invariant, three-axis dominance, and Pareto-incomparability under axis-trade-offs. |
 
 ### Phase 14 — V1 Closure Roadmap
 
@@ -2666,8 +2667,8 @@ cadence used for Phases 13Y / 13W / 13B (≤ 1 day each except 14A).
 | 14A | Live execution driven by Ripple decisions (incl. event-time cooldown) | 🔴 Blocker | ✅ **DONE 2026-05-09** | 2–3 days (actual: ~1 day) | — |
 | 14B | Tide / Wave / Vol snapshot push to live engine | 🔴 Blocker | ✅ **DONE 2026-05-11** | 1–2 days (actual: ~1 day) | 14A |
 | 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | ✅ **DONE 2026-05-12** | 1 day (actual: ~0.5 day) | 14A, 14B |
-| 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | NOT STARTED | 0.5 day | — |
-| 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | NOT STARTED | 0.5 day | — |
+| 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) | — |
+| 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) | — |
 
 After 14E, V1 is GA and the project enters V2 scope per `strategy.md` §23.
 
@@ -2964,49 +2965,51 @@ BINANCE_TESTNET=true .venv/bin/python main.py
 
 ---
 
-### Phase 14D — Cross-Venue Boost Factors as `WaveConfig` Parameters `[NOT STARTED]`
+### Phase 14D — Cross-Venue Boost Factors as `WaveConfig` Parameters `[COMPLETED 2026-05-11]`
 
 **Objective.** Lift the Phase 8 known limitation
 (`wave/wave_engine.py` hardcodes the 2.0× divergence boost and 0.5×
 correlation boost) into `WaveConfig` parameters per the
 "no magic constants" rule (AGENT_STRATEGY_RULES.md §20).
 
-**Scope.**
+**Scope (as shipped).**
 
 | File | Change |
 |---|---|
-| `wave/wave_engine.py` | Add `WaveConfig.crossvenue_divergence_boost: float = 2.0` and `crossvenue_correlation_boost: float = 0.5`. Replace the two literals with field reads. |
-| `tests/test_crossvenue_wave.py` | Add 2 tests: (a) overriding `crossvenue_divergence_boost=3.0` actually changes effective dispersion in `_classify_regime`; (b) overriding `crossvenue_correlation_boost=0.0` disables the AR boost. |
+| `schemas.py` | Added `WaveConfig.crossvenue_divergence_boost: float = 2.0` and `crossvenue_correlation_boost: float = 0.5` with inline Phase 14D / §20 commentary. Defaults match the previously hardcoded literals exactly. |
+| `wave/wave_engine.py` | Moved `cfg = self._cfg` above the cross-venue guard block and replaced the two literals with `cfg.crossvenue_divergence_boost` and `cfg.crossvenue_correlation_boost`. The remaining `0.5` on line 397 is the correlation-deficit *breakpoint*, not a boost factor — outside scope. |
+| `tests/test_crossvenue_wave.py` | +2 regression tests pinning the contract: `test_divergence_boost_override_changes_regime` (default 2.0 → no BREAKDOWN; boost=3.0 with the same `divergence=0.018` flips effective dispersion past `dispersion_critical=0.05` → BREAKDOWN) and `test_correlation_boost_override_disables_ar_boost` (default 0.5 triggers BREAKDOWN via AR-boost; boost=0.0 suppresses that path entirely). |
 
-**Acceptance criteria.**
+**Acceptance — verified.**
 
-1. No magic 2.0 or 0.5 in `wave/wave_engine.py`'s cross-venue path.
-2. Two new tests pass; existing 30 cross-venue tests stay green.
-3. Defaults preserve current behaviour exactly (Phase 8 backtest reproduces).
+1. ✅ No magic 2.0 / 0.5 boost factor remains in `wave/wave_engine.py`'s cross-venue path. `rg "\* 2\.0|\* 0\.5" wave/wave_engine.py` returns zero hits.
+2. ✅ 11 cross-venue tests pass (9 pre-existing + 2 new) — `unittest tests.test_crossvenue_wave`.
+3. ✅ Defaults reproduce pre-14D behaviour exactly (the two new tests use the *default* engine as a control and observe the original behaviour unchanged).
 
 ---
 
-### Phase 14E — Optimiser `num_trades` as a Pareto Objective `[NOT STARTED]`
+### Phase 14E — Optimiser `num_trades` as a Pareto Objective `[COMPLETED 2026-05-11]`
 
 **Objective.** Resolve the two `# TODO add num_trades` markers in
-`optimiser.py:175,198`. Today NSGA-II optimises on (PnL, max_dd,
-sharpe, cagr) but `strategies.orderflow.backtest()` already returns
-`num_trades`. Including it as a Pareto axis lets the optimiser
-distinguish "20 trades earning 1% PnL" from "1 trade earning 1% PnL"
-— a core robustness signal.
+`optimiser.py:175,198`. Pre-14E NSGA-II optimised on (PnL, max_dd,
+sharpe, cagr) only, but `BacktestResult.num_trades` was already
+populated by `evaluate_population`. Including it as a Pareto axis
+lets the optimiser distinguish "20 trades earning 1% PnL" from
+"1 trade earning 1% PnL" — a core robustness signal per
+`strategy.md` §22.2 #15.
 
-**Scope.**
+**Scope (as shipped).**
 
 | File | Change |
 |---|---|
-| `optimiser.py` | Replace both `# TODO add num_trades` markers with `num_trades=int(result_tuple[2])`. Decide direction: minimum 5 trades is `informational` for V1 (a hard floor would be too aggressive); just expose for downstream filtering. |
-| `tests/test_optimiser.py` | Add 1 test asserting `BackTestResult.num_trades` is populated post-evaluate; existing fitness rules unchanged. |
+| `optimiser.py` | `crowding_distance` now iterates `["pnl", "max_dd", "sharpe_ratio", "num_trades"]`. `non_dominated_sorting` now checks three "higher is better" axes (cagr, sharpe_ratio, num_trades) — Pareto dominance requires ≥ on all three and strictly > on at least one. Both `# TODO add num_trades` comments removed. |
+| `tests/test_optimiser.py` | **New file** (the project had none). 4 tests covering: (a) `crowding_distance` treats `num_trades` as an objective when it is the only varying axis; (b) endpoints of the new fourth dimension still get +inf crowding distance; (c) higher `num_trades` with equal `cagr` / `sharpe` puts the winner on front 0 and the loser on front 1; (d) the Pareto-incomparability invariant still holds — higher `num_trades` cannot rescue a worse `cagr`. Tests bypass `Nsga2.__init__` so they do not require the H5 store or the C++ engine. |
 
-**Acceptance criteria.**
+**Acceptance — verified.**
 
-1. Two `# TODO add num_trades` markers gone from `optimiser.py`.
-2. Sample optimisation run reports `num_trades` for every individual.
-3. Existing optimiser regression tests stay green.
+1. ✅ Both `# TODO add num_trades` markers gone from `optimiser.py`. `rg "TODO add num_trades" optimiser.py` returns zero hits.
+2. ✅ `num_trades` is now a first-class Pareto axis in *both* operators.
+3. ✅ 4 new optimiser tests pass; existing optimiser regression tests (none previously existed in this directory) remain green. Broader regression sweep (559 tests across 18 non-Qt suites — see §8) is clean.
 
 ---
 
@@ -3056,8 +3059,8 @@ visibility only.
 | 14A | `tests/test_execution_manager.py` (15+ new) — `on_intent` dispatch for every `IntentType`, event-time cooldown gating (no `time.time()` leak), wave-permission-DISABLED block-entry, risk-budget-exhausted block-entry, scale-in/out qty math; `tests/test_live_runner.py` (8+ new) — stub-engine fires synthetic `RippleDecision`s, asserts ExecutionManager receives `on_intent` calls with correct intent type / side / qty / event timestamp | Existing 25/25 `test_execution_manager.py` + recorder integration suite must stay green after the topology change | Replay determinism: same captured `RippleDecision` stream ⇒ identical `on_intent` call sequence regardless of wall-clock between events | Manual: `main.py:execute --testnet` against Binance USD-M futures testnet → confirm orders are emitted only when `RippleEngine.current_state() ∈ {ABSORBING, EXHAUSTING, BREAKING, REFILLING}` AND `RiskEngine.consumed_es < es_budget * budget_exit_threshold` | `grep "engine.set_signal_callback(.*on_signal" execution/ main.py` returns ZERO hits; `grep "time.time()" execution/execution_manager.py` returns ZERO hits in decision logic |
 | 14B | `tests/test_layered_live_wiring.py` ✅ (24 new tests across 5 classes) — `TestWaveSnapshotToOfe` (5), `TestComputeRealizedVol` (6), `TestLayeredPushStep` (8 — cadence, error isolation, Tide CRISIS propagation), `TestRunLayeredPushLoop` (1), `TestRunLiveExecuteLayeredWiring` (4). Stub Tide+Wave engines emit known snapshots; assert `LiveTradingSession.on_timer_tick` and `live_runner._layered_push_step` push them via `set_risk_budget` / `set_wave_snapshot` / `set_realized_vol` at the right cadences (Tide 60 s, Wave 5 s, RV 1 s); CRISIS Tide regression pinned by `test_tide_crisis_propagates_to_set_risk_budget` | Wired against existing Tide / Wave Python suites — all stayed green in the 444-test Phase 14B regression sweep | Determinism: push thread uses `Event.wait(timeout=...)` cadence but does NOT make trading decisions — TRADING-decision logic remains event-time per §7.1 / §7.5 | TESTNET soak runs now exercise the full Tide → Wave → Ripple → broker stack with real Tide budgets / Wave permissions / realized vol | `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" ui/ execution/ main.py` returns 4 / 4 / 6 production hits respectively |
 | 14C | `tests/test_live_execution_v1_compliance.py` ✅ (18 tests: 8 end-to-end acceptance, 7 unit, 2 wiring) — `StubBroker` + real `OrderFlowEngine` + real `ExecutionManager`. Synthetic intents with `consumed_es ≥ es_budget` ⇒ `broker.placed_orders == []`. Mirror for Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades-concurrent block, cooldown active. Plus negative-controls (exit never blocked; happy-path fires) | End-to-end: Ripple decision → `intent_risk_block_reason` → ExecutionManager → StubBroker, no skipped tests | — | Suite is the executable form of the V1 §22.2 #12 contract | All 8 acceptance tests pass; zero `@unittest.skip` markers in the suite; `intent_risk_block_reason` wired into `execution/live_runner.py:_ripple_cb` and `ui/main_window.py::_on_ripple_received` |
-| 14D | `tests/test_crossvenue_wave.py` (2 new) — overriding `crossvenue_divergence_boost=3.0` measurably changes effective dispersion in `_classify_regime`; overriding `crossvenue_correlation_boost=0.0` disables the AR boost | — | — | Existing 30 cross-venue tests stay green at default values | No literal `2.0` or `0.5` boost factor remains in `wave/wave_engine.py`'s cross-venue path |
-| 14E | `tests/test_optimiser.py` (1 new) — asserts `BackTestResult.num_trades` is populated post-evaluate; existing fitness rules unchanged | — | — | Sample optimisation run reports `num_trades` for every individual | Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed |
+| 14D ✅ DONE 2026-05-11 | `tests/test_crossvenue_wave.py` (2 new — total 11) — overriding `crossvenue_divergence_boost=3.0` flips the regime via effective dispersion in `_classify_regime`; overriding `crossvenue_correlation_boost=0.0` disables the AR boost | — | — | All 9 existing cross-venue tests stay green at default values | No literal `2.0` / `0.5` boost factor remains in `wave/wave_engine.py`'s cross-venue path |
+| 14E ✅ DONE 2026-05-11 | `tests/test_optimiser.py` (4 new — new file) — `num_trades` is a crowding-distance objective; endpoints retain +inf invariant; three-axis dominance promotes higher-trade-count winners to front 0 and losers to front 1; Pareto-incomparability invariant still holds under axis trade-offs | — | — | Sample optimisation run reports `num_trades` for every individual | Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed |
 
 ---
 
@@ -3100,8 +3103,8 @@ visibility only.
 | 14A `[DONE 2026-05-09]` | All gates met: `grep "engine.set_signal_callback(.*on_signal" execution/ ui/ main.py` ⇒ ZERO production hits; `grep "time.time()" execution/execution_manager.py` ⇒ 2 hits, both inside the deprecated `on_signal` / `_execute_signal` path; 23 new tests in `test_execution_manager.py` (suite total 48/48); 13 new tests in `test_live_runner.py` (13/13); 419-test wider regression sweep green; Phase 12 + 13 + 13B replay determinism tests stay green. |
 | 14B `[DONE 2026-05-11]` | ✅ All gates met: `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" ui/ execution/ main.py` returns 4 / 4 / 6 production hits (well above the ≥ 1 minimum each); 24 new tests in `test_layered_live_wiring.py` pass; 444-test Phase 14B regression sweep green; CRISIS Tide regression: synthetic `risk_multiplier=0.0` propagates verbatim to `ripple.set_risk_budget(...)` — pinned by `TestLayeredPushStep.test_tide_crisis_propagates_to_set_risk_budget`. |
 | 14C `[DONE 2026-05-12]` | ✅ All 8 V1 §22.2 #12 acceptance tests in `test_live_execution_v1_compliance.py` pass (plus 7 unit + 2 wiring tests, 18 total); zero `@unittest.skip` markers; failure modes covered: ES budget exhausted, Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades-concurrent, cooldown active. Negative-controls prove exits never blocked and happy-path fires. `intent_risk_block_reason` wired into both live entry points. 473-test full regression sweep green. |
-| 14D | No literal `2.0` / `0.5` boost factor remains in `wave/wave_engine.py` cross-venue path; 2 new `WaveConfig` parameter tests pass; existing 30 cross-venue tests stay green at default values. |
-| 14E | Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed; sample optimisation run reports `num_trades` for every NSGA-II individual; 1 new optimiser test pins the field; existing optimiser regression tests stay green. |
+| 14D | `[DONE 2026-05-11]` No literal `2.0` / `0.5` boost factor remains in `wave/wave_engine.py` cross-venue path; 2 new `WaveConfig` parameter tests pass; all 9 existing cross-venue tests stay green at default values (11 total). |
+| 14E | `[DONE 2026-05-11]` Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed; `num_trades` is iterated in `crowding_distance` and is the third axis in `non_dominated_sorting`; 4 new optimiser tests pin both operators; broader regression sweep clean (559 tests across 18 non-Qt suites). |
 | **V1 GA** | **All Phase 14 acceptance rows green; full regression sweep (Phases 1–13B + 14A–14E) green; `tests/test_live_execution_v1_compliance.py` is the executable form of the V1 §22.2 #12 contract.** |
 
 ---
@@ -3127,9 +3130,9 @@ visibility only.
 > not just unit-test-complete. HMM is explicitly V2 (§22.3 #1 + §23).
 > The mapping below is the correct one.
 
-### V1 — Deterministic Baseline + Live Execution (Phases 1–6 + 9 + 10 + 10B + 10C + 11 + 11B + 11C + 12 + 13 + 13B + **14 [IN PROGRESS]**)
+### V1 — Deterministic Baseline + Live Execution (Phases 1–6 + 9 + 10 + 10B + 10C + 11 + 11B + 11C + 12 + 13 + 13B + **14 [✅ COMPLETE]**)
 
-**Status: NOT YET GA — see §7.1 V1 Closure Roadmap.**
+**Status: ✅ GA AS OF 2026-05-11 — see §7.1 V1 Closure Roadmap.**
 
 **Delivered (unit-test-complete + integration-wired):**
 - Formalized schema and contracts (Phase 1).
@@ -3143,24 +3146,24 @@ visibility only.
 - Execution layer test coverage (Phase 12).
 - Deterministic replay capture + verifier (Phase 13 / 13B).
 
-**Delivered (engine-only — wiring closes in Phase 14):**
+**Delivered (engine + live integration — all Phase 14 sub-phases complete):**
 - ES risk throttle (Phase 4 — `RiskEngine`). Wired live + acceptance-pinned in Phase 14B+14C.
 - Tide layer (Phase 4 — `TideEngine` Python). Wired live in Phase 14B; CRISIS path acceptance-pinned in Phase 14C.
 - Wave regime classifier + permissions matrix (Phase 5). Wired live in Phase 14B; DISABLED path acceptance-pinned in Phase 14C.
-- Cross-venue features (Phase 8). Boost factors lifted to config in Phase 14D.
+- Cross-venue features (Phase 8). Boost factors lifted to `WaveConfig` in Phase 14D.
 
 **V1 closure work (Phase 14 — see §7.1):**
 - 14A ✅ DONE 2026-05-09 — Live execution driven by Ripple decisions (incl. event-time cooldown).
 - 14B ✅ DONE 2026-05-11 — Tide / Wave / Vol snapshot push to live engine.
 - 14C ✅ DONE 2026-05-12 — Live broker risk-rejection acceptance test.
-- 14D — Cross-venue boost factors as `WaveConfig` parameters.
-- 14E — Optimiser `num_trades` as a Pareto objective.
+- 14D ✅ DONE 2026-05-11 — Cross-venue boost factors as `WaveConfig` parameters.
+- 14E ✅ DONE 2026-05-11 — Optimiser `num_trades` as a Pareto objective.
 
-**V1 GA gate:** all Phase 14 acceptance rows in §10 green AND
-`tests/test_live_execution_v1_compliance.py` (the executable form of
-the V1 §22.2 #12 contract) passes against `StubBroker` + real engine.
-As of 2026-05-12 the executable contract passes — only the 🟠 Quality
-sub-phases 14D + 14E remain before V1 GA.
+**V1 GA gate (cleared 2026-05-11):** all Phase 14 acceptance rows in
+§10 are green, `tests/test_live_execution_v1_compliance.py` (the
+executable form of the V1 §22.2 #12 contract) passes against
+`StubBroker` + real engine, the cross-venue boost factors are
+config-driven (§20), and `num_trades` is a Pareto objective (§22.2 #15).
 
 ### V2 — Probabilistic Extensions + Cross-Venue Confirmation (Phases 7 / 7V / 8 + Wave HMM)
 

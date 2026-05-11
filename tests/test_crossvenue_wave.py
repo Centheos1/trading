@@ -139,6 +139,62 @@ class TestCrossVenueWaveIntegration(unittest.TestCase):
         snap = engine.update(ts + 5000, TideBias.NEUTRAL)
         self.assertNotEqual(snap.regime, WaveRegime.BREAKDOWN)
 
+    def test_divergence_boost_override_changes_regime(self):
+        """Phase 14D — overriding `crossvenue_divergence_boost` from its
+        default (2.0) to a larger value measurably changes effective
+        dispersion in `_classify_regime`, flipping the regime decision.
+
+        Setup: divergence=0.018, dispersion_critical=0.05.
+        - Default boost 2.0  → effective_d ≈ 0.036 < 0.05  → NOT BREAKDOWN.
+        - Override boost 3.0 → effective_d ≈ 0.054 > 0.05  → BREAKDOWN.
+
+        Pins the V1 §22.2 #14 / AGENT_STRATEGY_RULES.md §20 "no magic
+        constants" contract: the boost factor MUST be a `WaveConfig`
+        parameter, not a hardcoded literal."""
+        # Default boost path → no dispersion crisis, no BREAKDOWN.
+        eng_default = self._make_engine()
+        ts1 = self._feed_neutral_prices(eng_default, n=30)
+        eng_default.set_crossvenue_snapshot(
+            correlation=1.0, divergence=0.018, lead_lag=0.0
+        )
+        snap_default = eng_default.update(ts1 + 5000, TideBias.NEUTRAL)
+        self.assertNotEqual(snap_default.regime, WaveRegime.BREAKDOWN)
+
+        # Override boost=3.0 → effective dispersion crosses critical → BREAKDOWN.
+        eng_boosted = self._make_engine(crossvenue_divergence_boost=3.0)
+        ts2 = self._feed_neutral_prices(eng_boosted, n=30)
+        eng_boosted.set_crossvenue_snapshot(
+            correlation=1.0, divergence=0.018, lead_lag=0.0
+        )
+        snap_boosted = eng_boosted.update(ts2 + 5000, TideBias.NEUTRAL)
+        self.assertEqual(snap_boosted.regime, WaveRegime.BREAKDOWN)
+
+    def test_correlation_boost_override_disables_ar_boost(self):
+        """Phase 14D — overriding `crossvenue_correlation_boost` to 0.0
+        disables the AR boost entirely. The exact scenario that
+        triggers BREAKDOWN in `test_low_correlation_boosts_breakdown`
+        (default boost=0.5) must NOT trigger BREAKDOWN when boost=0.0.
+
+        With boost=0.0:
+          effective_ar = ar + corr_deficit * 0.0 = ar (unchanged)
+          → 0.55 < ar_critical (0.7) → no extreme_stress → no BREAKDOWN."""
+        # Identical setup to `test_low_correlation_boosts_breakdown`
+        # except boost=0.0 — verifies the AR boost is the only thing
+        # that pushes the engine into BREAKDOWN in that scenario.
+        engine = self._make_engine(
+            ar_critical=0.7,
+            dispersion_threshold=0.02,
+            crossvenue_correlation_boost=0.0,
+        )
+        ts = self._feed_neutral_prices(engine, n=30)
+        engine.set_absorption_ratio(0.55)
+        engine.set_dispersion(0.03)
+        engine.set_crossvenue_snapshot(
+            correlation=-0.3, divergence=0.0, lead_lag=0.0
+        )
+        snap = engine.update(ts + 5000, TideBias.NEUTRAL)
+        self.assertNotEqual(snap.regime, WaveRegime.BREAKDOWN)
+
 
 if __name__ == "__main__":
     unittest.main()

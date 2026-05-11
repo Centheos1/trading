@@ -426,6 +426,12 @@ class WaveConfig:
     ar_critical: float = 0.85
     ar_recover: float = 0.70
     reduced_size_fraction: float = 0.5
+    # Phase 14D — cross-venue boost factors lifted from the
+    # hardcoded literals previously in wave_engine.py::_classify_regime.
+    # Defaults reproduce pre-14D behaviour exactly (see strategy.md §8.4
+    # and AGENT_STRATEGY_RULES.md §20 "no magic constants").
+    crossvenue_divergence_boost: float = 2.0
+    crossvenue_correlation_boost: float = 0.5
 
 
 @dataclass

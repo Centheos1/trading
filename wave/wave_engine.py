@@ -389,13 +389,14 @@ class WaveEngine:
         d = self._dispersion
         ar = self._absorption_ratio
         direction = self._trend_direction   # +1 up / -1 down / 0 unknown
+        cfg = self._cfg
 
         if self._cv_available:
+            # Phase 14D — boost factors lifted to WaveConfig. Defaults
+            # (2.0 / 0.5) reproduce pre-14D behaviour exactly.
             corr_deficit = max(0.0, 0.5 - self._cv_correlation)
-            d = d + abs(self._cv_divergence) * 2.0
-            ar = min(ar + corr_deficit * 0.5, 1.0)
-
-        cfg = self._cfg
+            d = d + abs(self._cv_divergence) * cfg.crossvenue_divergence_boost
+            ar = min(ar + corr_deficit * cfg.crossvenue_correlation_boost, 1.0)
 
         # ── Derived conditions ────────────────────────────────────────────
         trending_up   = eta > cfg.eta_bo_threshold and direction > 0

@@ -6,33 +6,34 @@ parameter optimisation (NSGA-II), and a C++ order flow engine.
 
 ---
 
-## V1 Status — NOT YET GA (as of 2026-05)
+## V1 Status — ✅ GA AS OF 2026-05-11
 
-**TL;DR.** Backtest, optimise, replay, and UI live-view modes are
-production-quality. The **`execute` (live trading) mode is V1-incomplete**
-and must not be relied on for capital deployment yet — the live execution
-path bypasses the Ripple lifecycle FSM, the Wave permissions matrix, and
-the Tide risk budget. See `implementation_plan.md` §7.1 for the
-**Phase 14 V1 Closure Roadmap**.
+**TL;DR.** All five Phase 14 sub-phases (14A–14E) are done. The live
+execute path is now V1-compliant: Ripple-driven (event-time), Tide /
+Wave / RV snapshots pushed on 60 s / 5 s / 1 s cadences, every intent
+gated by `intent_risk_block_reason`, cross-venue boost factors are
+`WaveConfig` parameters (no magic constants), and `num_trades` is a
+first-class NSGA-II Pareto axis. See `implementation_plan.md` §7.1 for
+the full Phase 14 closure record.
 
 | Mode | V1 Status | Safe to use? |
 |---|---|---|
 | `python main.py backtest` (orderflow / wave / tide) | ✅ V1-complete | Yes |
-| `python main.py optimise` (NSGA-II) | ✅ V1-complete (one polish item — Phase 14E) | Yes |
+| `python main.py optimise` (NSGA-II) | ✅ V1-complete (three-axis Pareto post-14E: cagr, sharpe, num_trades) | Yes |
 | `python main.py ui` (live view, paper fills via `paper_fills` flag) | ✅ V1-complete | Yes (paper only) |
-| `python main.py execute` (live Binance USD-M futures trading) | ⚠️ **V1-partial** — Phase 14A done (Ripple-driven, event-time cooldown); Phase 14B done (Tide budget, Wave snapshot, realized vol pushed to live engine on 60 s / 5 s / 1 s cadences); Phase 14C done (V1 §22.2 #12 contract pinned by 18-test compliance suite — broker provably sees zero orders under ES exhausted / Wave DISABLED / Tide CRISIS / max_position exceeded / two-trades-concurrent / cooldown active); two 🟠 Quality items remain (14D, 14E) | **TESTNET recommended** — All three 🔴 Blocker sub-phases done. Real-fund deployment is technically gated only on the 🟠 Quality items (14D/14E); we still recommend a final TESTNET soak before flipping `BINANCE_TESTNET=false`. |
+| `python main.py execute` (live Binance USD-M futures trading) | ✅ **V1-complete** — Phase 14A (Ripple-driven, event-time cooldown), 14B (Tide budget, Wave snapshot, RV pushed live), 14C (V1 §22.2 #12 contract pinned by 18-test compliance suite — broker provably sees zero orders under ES exhausted / Wave DISABLED / Tide CRISIS / max_position exceeded / two-trades-concurrent / cooldown active), 14D (cross-venue boost factors are `WaveConfig` parameters), 14E (`num_trades` is a Pareto axis) | **TESTNET soak recommended before flipping `BINANCE_TESTNET=false`** — all V1 contract violations and quality gaps are closed; ordinary pre-prod hygiene (broker key rotation, account isolation, position limits) still applies. |
 | `tools/replay_harness.py` (deterministic replay verifier) | ✅ V1-complete | Yes |
 | `tools/hmm_abtest.py` (Phase 7V HMM A/B harness) | ✅ V2 research tooling | Yes (research only) |
 
-**Outstanding V1 closure work (in priority order):**
+**V1 closure work — all done:**
 
 | Sub-phase | Title | Severity | Status | Est. effort |
 |---|---|---|---|---|
 | 14A | Live execution driven by Ripple decisions (incl. event-time cooldown) | 🔴 Blocker | ✅ **DONE 2026-05-09** | 2–3 days (actual: ~1 day) |
 | 14B | Tide / Wave / Vol snapshot push to live engine | 🔴 Blocker | ✅ **DONE 2026-05-11** | 1–2 days (actual: ~1 day) |
 | 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | ✅ **DONE 2026-05-12** | 1 day (actual: ~0.5 day) |
-| 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | NOT STARTED | 0.5 day |
-| 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | NOT STARTED | 0.5 day |
+| 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) |
+| 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | ✅ **DONE 2026-05-11** | 0.5 day (actual: ~0.25 day) |
 
 V2 / V3 scope (HMM Wave classifier, Hierarchical ES, Multi-symbol,
 Multi-factor PCA, Adaptive Kelly sizing, Live model retraining, LIMIT/OCO
