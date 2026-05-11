@@ -1797,3 +1797,228 @@ deferred per §14.5. They are **not** V1 closure work — `strategy.md`
 §22.2 has no UI rendering items, and the bubble drop-out regression
 guards are already in place from `tests/test_bubble_pipeline.py`.
 Resume only on user request or after V1 GA.
+
+---
+
+## 16. Phase 8 — UI Accuracy & First-Impression Polish `[NOT STARTED]`
+
+### 16.1 Overview
+
+Three user-identified gaps remain after V1 GA that make the live UI
+misleading or incomplete:
+
+1. **Candlestick chart has no historical data on connect.** The chart
+   shows "Waiting for candle data…" until enough live ticks arrive —
+   up to 80 minutes for 80 visible candles at 1 m. This makes the chart
+   useless as a trading reference on launch.
+
+2. **PnL and trade counts are not tied to strategy execution.**
+   `AccountPanel` computes realized PnL using naive FIFO order
+   matching (any BUY→SELL pair) rather than strategy-attributed entry/
+   exit pairs from `ExecutionManager`. The `uPnL` field in
+   `StrategyDiagnosticsPanel` derives from the C++ engine's internal
+   position tracking, which may diverge from actual paper/live fills
+   when orders are rejected or partially filled.
+
+3. **Signal log shows legacy engine signals unrelated to the strategy.**
+   `_on_signal_received` in `main_window.py` is still wired to the old
+   `ScoreBasedInference` signal path and adds `LEGACY_RAW` signals
+   (`STACKED_IMBALANCE_*`, `BULLISH_*`, `BEARISH_*`, etc.) to the
+   blotter at the same rate as live market events. These are NOT Ripple
+   decisions — they are raw scoring outputs from the pre-architecture
+   signal engine. Additionally, Tide bias changes and Wave regime
+   changes are never emitted as explicit log events, so operators
+   cannot see macro/regime context inline.
+
+Three sub-phases address these gaps independently:
+
+| Sub-phase | Name | Dependency |
+|---|---|---|
+| **8A** | Candlestick Historical Preload | Phase 6 (DONE) |
+| **8B** | Strategy-Attributed PnL & Trade Tracking | Phase 14A (DONE) |
+| **8C** | Signal Log Accuracy — Gate Legacy + Tide/Wave Events | Phase 14B (DONE) |
+
+**Phase 8 GA gate:** All three sub-phases complete and regression suite green.
+
+---
+
+### 16.2 Phase 8A — Candlestick Historical Preload `[NOT STARTED]`
+
+**Problem in detail.** `CandleChartView._candles` is populated
+exclusively by `process_trade(ts, price, qty, is_buy)` calls from
+`MainWindow._on_timer_tick`. On connect, the deque starts empty. At
+1 m timeframe with `_visible_candles = 80`, the user must wait 80
+minutes of live data before the visible window is filled. Changing
+timeframe clears the deque (`set_bucket_duration` calls
+`self._candles.clear()`), repeating the wait.
+
+**Proposed solution.**
+
+On `_on_connect` (and on `_on_chart_tf_changed` while connected),
+fetch historical OHLCV klines from the Binance Futures REST API
+(`GET /fapi/v1/klines`) and pre-populate the chart. The fetch must
+be non-blocking (async background task) to avoid freezing the UI.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `ui/candle_chart_view.py` | Add `preload_candles(candles: list[tuple[int, float, float, float, float, float]])` method accepting `(ts_ms, open, high, low, close, volume)` tuples. Inserted as a batch at the front of `_candles` so live ticks append naturally after them. Add `_loading: bool` flag — while True, `paintEvent` draws "Loading historical candles…" instead of "Waiting for data…". Add `set_loading(bool)` toggler. |
+| `ui/live_trading_session.py` | Add `fetch_historical_klines(symbol: str, interval_ms: int, limit: int = 200) -> list[tuple]` async method. Uses `python-binance` futures REST (`client.futures_klines`) or a direct `aiohttp` GET to Binance `/fapi/v1/klines`. Returns `[(ts_ms, o, h, l, c, v), …]` sorted oldest-first. Fails gracefully: catches all exceptions and returns `[]`. |
+| `ui/main_window.py` | In `_on_connect`, after session.start_live succeeds: call `candle_view.set_loading(True)`, then launch `asyncio.create_task` (or `threading.Thread`) to call `session.fetch_historical_klines(symbol, bucket_ms, limit=200)`. On result, call `candle_view.preload_candles(result)` and `candle_view.set_loading(False)`. In `_on_chart_tf_changed` while connected, repeat the same async fetch/preload pattern at the new bucket duration. |
+| `tests/test_candle_preload.py` | NEW. Tests: `preload_candles` with 100 tuples populates `_candles` with correct OHLC; live `process_trade` after preload extends the deque correctly (no duplicate bucket); `preload_candles([])` is a no-op; `set_loading(True)` causes `paintEvent` to render loading text, not data. |
+
+**Acceptance criteria.**
+
+1. On connect with symbol BTCUSDT at 1 m timeframe, chart shows ≥ 80
+   pre-populated candles within 5 seconds of connection (async REST
+   fetch completes).
+2. `process_trade` calls arriving during or after the fetch correctly
+   extend / update the pre-populated candles without creating
+   duplicates or gaps.
+3. Chart shows "Loading historical candles…" while fetch is in
+   progress; reverts to normal rendering on completion.
+4. If the REST fetch fails (network error, rate-limit), chart falls
+   back to "Waiting for live data" with no crash and no error dialog.
+5. On timeframe change while connected, chart re-fetches at the new
+   interval and replaces the preloaded set.
+6. All existing `tests/test_candle_chart_view.py` tests pass unchanged.
+
+---
+
+### 16.3 Phase 8B — Strategy-Attributed PnL & Trade Tracking `[NOT STARTED]`
+
+**Problem in detail.** `AccountPanel` maintains its own FIFO PnL
+accumulator (`_last_entry_price` / `_last_entry_side` /
+`_realized_pnl`), computed by matching any filled BUY order against
+the next SELL order regardless of whether those orders originated from
+Ripple decisions. This produces PnL numbers that:
+
+- May include non-strategy fills (manual orders, liquidations, other
+  bots) in live mode.
+- Are recalculated independently of `ExecutionManager`, which already
+  tracks `_current_side`, `_current_qty`, and (post-Phase 8B)
+  `_session_realized_pnl` authoritatively.
+- Show "ENTRY" for every BUY regardless of archetype or Ripple reason,
+  losing strategic context.
+
+In paper mode, `StrategyDiagnosticsPanel.uPnL` reads from
+`engine.get_strategy_snapshot().trade.unrealized_pnl` — the C++
+engine's position — which reflects the engine's internal simulation
+rather than the `PaperEngine`'s actual paper fills. If an order is
+suppressed by `PaperEngine` (e.g. inventory gate), the two values
+diverge silently.
+
+**Proposed solution.**
+
+Wire `AccountPanel` and `StrategyDiagnosticsPanel` to
+`ExecutionManager` state (and `PaperEngine` metrics for paper mode)
+as the single authoritative source for strategy-attributed PnL and
+trade counts.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `execution/execution_manager.py` | Add `_session_realized_pnl: float = 0.0` accumulator. Increment in `_execute_intent_exit` when `order.status == FILLED`: `pnl = (fill_price - entry_price) * qty * side_sign`. Add read-only property `session_realized_pnl -> float`. Add `_session_trade_count: int = 0`; increment on each completed exit fill. Add `session_trade_count -> int` property. Add `reset_session_stats()` to clear both (called on ARM). |
+| `execution/paper_engine.py` | Expose `session_realized_pnl -> float` (alias to `_metrics.realized_pnl`). Expose `session_trade_count -> int` (alias to `_metrics.exits_filled`). |
+| `ui/account_panel.py` | Replace the FIFO accumulator (`_last_entry_price`, `_last_entry_side`, `_realized_pnl`) with a new `update_strategy_stats(side, qty, entry_price, upnl, realized_pnl, trade_count, mode_label)` method driven by caller. Add "Mode" label (Paper / Live / —). Add "Strategy Trades" counter row. Rename "Realized PnL" to "Session PnL (strategy)" to make the source explicit. Order table: add `Reason` column (populated from `order.ripple_reason`). |
+| `ui/main_window.py` | In `_on_timer_tick`, call `account_panel.update_strategy_stats(...)` from `_exec_manager` state (live mode) or `_paper_engine` metrics (paper mode). Pass `mode_label="Paper"` or `"Live"`. When in OBSERVE mode or disarmed, pass zeros + mode label `"Observe"` so the panel shows a clean zero-state rather than stale FIFO data. |
+| `tests/test_account_panel.py` | NEW. Tests: `update_strategy_stats` renders side/qty/upnl/realized/count correctly; mode label shows Paper/Live/Observe; "Strategy Trades" counter increments; `Reason` column populated from `ripple_reason`; FIFO accumulator is absent (assert `_last_entry_price` attribute does not exist). |
+
+**Acceptance criteria.**
+
+1. Account panel "Realized PnL" is sourced exclusively from
+   `ExecutionManager.session_realized_pnl` (live) or
+   `PaperEngine.session_realized_pnl` (paper); never from FIFO
+   order matching.
+2. "Strategy Trades" counter increments by 1 for each completed
+   strategy round-trip (one entry fill + one exit fill).
+3. "Mode" label shows "Paper", "Live", or "Observe" depending on
+   `StrategyMode`.
+4. Order rows show `order.ripple_reason` in the Reason column (e.g.
+   `EXIT_TARGET`, `BOUNCE_SETUP`).
+5. In OBSERVE mode (no execution), account panel shows "Strategy not
+   armed" placeholder; no stale PnL numbers.
+6. All existing `tests/test_strategy_store.py` and
+   `tests/test_integration_e2e.py` tests pass unchanged.
+
+---
+
+### 16.4 Phase 8C — Signal Log Accuracy `[NOT STARTED]`
+
+**Problem in detail.** Three distinct issues pollute or thin the
+signal log in the current implementation:
+
+**Issue 1 — Legacy raw signals flood the log when strategy is armed.**
+`MainWindow._on_signal_received` is connected to the C++ engine's
+`set_signal_callback` (wired at `session.start_live`). The C++ engine
+emits a signal for every `ScoreBasedInference` decision, including
+`STACKED_IMBALANCE_*`, `BULLISH_*`, `BEARISH_*` events that fire at
+trade frequency (potentially hundreds per minute). These are NOT Ripple
+decisions — they are pre-architecture internal scoring events. The
+`_on_signal_received` handler adds them as `LEGACY_RAW` entries to the
+blotter at full speed. With strategy mode set to PAPER or LIVE, these
+entries drown out the strategy-relevant events.
+
+**Issue 2 — Tide and Wave state changes are not emitted as log events.**
+Tide bias and Wave regime changes are the most strategically significant
+events in the system, yet the signal log never shows them. An operator
+watching the log cannot see "Wave flipped to BREAKDOWN" without
+switching to the diagnostics panel. Tide/Wave states are available from
+`_last_strategy_snap` (cached in `main_window.py`), but no logic
+compares current vs. previous values and emits a structured entry.
+
+**Issue 3 — No trade outcome annotation on exit signals.**
+When a `TRADE_LIFECYCLE` EXIT signal is emitted, the Description column
+shows the exit type and Ripple reason but not the realized PnL for that
+trade. Operators must cross-reference the Account Panel separately.
+
+**Proposed solution.**
+
+| Issue | Fix |
+|---|---|
+| 1 — Legacy signal flood | Gate `_on_signal_received` additions to blotter: when `_strategy_ui_state != DISARMED`, skip `blotter.add_signal` for `LEGACY_RAW` entries. Raw signals remain available in a new "Debug" filter (for diagnostics) but are hidden in all other filters when strategy is active. |
+| 2 — No Tide/Wave events | Add `_last_tide_bias` / `_last_wave_regime` caches in `MainWindow`. In `_on_timer_tick`, after updating `_last_strategy_snap`, compare bias/regime against last values. On change, call `_broadcast_entry` with a `TIDE` or `WAVE` category `SignalEntry` describing the old → new transition. |
+| 3 — No exit PnL annotation | Add `realized_pnl: float = 0.0` to `SignalEntry` dataclass. When emitting an EXIT `TRADE_LIFECYCLE` entry in `_on_ripple_received`, populate `realized_pnl` from `ExecutionManager.session_realized_pnl` delta (snapshot before/after intent). Add a PnL column to `TradeBlotter` (visible only when non-zero). |
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `execution/models.py` | Add `realized_pnl: float = 0.0` optional field to `SignalEntry`. No default change to existing fields. |
+| `ui/main_window.py` | **Issue 1:** In `_on_signal_received`, gate `blotter.add_signal` on `self._strategy_ui_state == StrategyUIState.DISARMED` — when armed, suppress raw-legacy additions. **Issue 2:** Add `_last_tide_bias: Optional[str] = None` and `_last_wave_regime: Optional[str] = None` instance vars. In `_on_timer_tick`, after snapshot update: compare `snap.tide.bias` / `snap.wave.regime` to cached values; on change, emit `SignalEntry(category=TIDE, signal_type="BIAS_CHANGE", description="NEUTRAL → LONG", ...)` / `SignalEntry(category=WAVE, signal_type="REGIME_CHANGE", ...)` via `_broadcast_entry`. **Issue 3:** In EXIT handling inside `_on_ripple_received`, record `pnl_before = exec_manager.session_realized_pnl`, process intent, then set `entry.realized_pnl = exec_manager.session_realized_pnl - pnl_before`. |
+| `ui/trade_blotter.py` | Add `_btn_trades_only` filter checkbox (label "Trades") that shows only `TRADE_LIFECYCLE` + `EXECUTION` entries. Add a "PnL" display column after "Strength" — renders `entry.realized_pnl` formatted `+x.xx` / `-x.xx` when non-zero, blank otherwise. Add `_FILTER_DEBUG` set (`LEGACY_RAW` + `DIAGNOSTIC`) activated by a "Debug" checkbox (replaces old "Raw" checkbox). Update color scheme: new "Debug" button is dim grey; "Trades" button is bold white. |
+| `tests/test_signal_log_accuracy.py` | NEW. Tests: legacy `LEGACY_RAW` signal suppressed when strategy armed; legacy signal appears when strategy disarmed; Tide `BIAS_CHANGE` entry emitted on bias transition; Wave `REGIME_CHANGE` entry emitted on regime transition; no spurious event when bias/regime unchanged; exit `TRADE_LIFECYCLE` entry has non-zero `realized_pnl` after fill; Trades Only filter hides non-trade entries; Debug filter shows `LEGACY_RAW`; PnL column renders formatted value. |
+
+**Acceptance criteria.**
+
+1. With strategy mode PAPER or LIVE, `_on_signal_received` no longer
+   adds `LEGACY_RAW` entries to the blotter; existing Ripple entry/exit
+   and EXECUTION entries are unaffected.
+2. A Tide bias change detected from `_last_strategy_snap` emits a
+   `TIDE` category `SignalEntry` with `signal_type="BIAS_CHANGE"` and
+   description `"<OLD> → <NEW>"` within one timer tick.
+3. A Wave regime change emits a `WAVE` category `SignalEntry` with
+   `signal_type="REGIME_CHANGE"`.
+4. No duplicate events: if bias/regime is stable across ticks, no
+   additional entries are emitted.
+5. EXIT `TRADE_LIFECYCLE` signals populate `realized_pnl` with the
+   correct delta from `ExecutionManager`.
+6. "Trades" filter shows only `TRADE_LIFECYCLE` + `EXECUTION` entries.
+7. "Debug" filter shows `LEGACY_RAW` + `DIAGNOSTIC` entries.
+8. All existing `tests/test_strategy_ui.py` (163 checks) pass unchanged.
+
+---
+
+### 16.5 Phase 8 Dependency Graph
+
+```
+Phase 8A (Candlestick Preload) — independent of 8B and 8C
+Phase 8B (Strategy PnL) ─── depends on Phase 14A ExecutionManager state
+Phase 8C (Signal Log) ─────── depends on Phase 14B Tide/Wave snapshot push
+                               (need _last_strategy_snap to have live data)
+
+8A + 8B + 8C can run in parallel once their individual dependencies are met.
+Phase 8 GA requires all three sub-phases complete.
+```

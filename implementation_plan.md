@@ -3064,23 +3064,266 @@ Phase 14F closes all five without re-opening V2/V3 scope.
 
 ---
 
-## 7.2 Post-V1 (V2 / V3) Roadmap
+## 7.2 V2 Closure Roadmap (Phase 15 series)
 
-Per `strategy.md` §23 ("Later Extensions"), V2 and V3 are scoped as
-follows. None of these are V1 closure work; they exist for forward
-visibility only.
+V2 extends the deterministic V1 baseline with probabilistic inference,
+faithful order-type routing, hierarchical risk decomposition, and
+calibrated liquidity models. All V2 phases target the items explicitly
+listed as V2 scope in `strategy.md` §23.
+
+**V2 GA gate:** Phases 15–20 all complete. Phase 16 campaign verdict
+(`CampaignVerdict.promote`) must be evaluated before Phase 17 begins;
+see gate note in Phase 17.
+
+| Phase | Name | Status | strategy.md ref | Dependency |
+|---|---|---|---|---|
+| **15** | LIMIT / OCO Order Type Support | `NOT STARTED` | §22.1, §13.3.2 | Phase 14A (DONE) |
+| **16** | HMM A/B Campaign at Scale | `NOT STARTED` | §9.10, §23 | Phase 7V (DONE) |
+| **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 verdict |
+| **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
+| **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
+| **20** | Liquidity-Map Logistic Hold/Break Calibration | `NOT STARTED` | §10.3, §23 | Phase 3 (DONE) + labelled data |
+
+---
+
+### Phase 15 — LIMIT / OCO Order Type Support `[NOT STARTED]`
+
+**Objective.** `strategy.md` §22.1 specifies bounce entries use LIMIT
+orders and target/exhaustion exits use LIMIT orders. Currently
+`BinanceBroker` sends only MARKET orders regardless of urgency, and
+`PaperEngine` simulates all fills at market price. Phase 15 makes the
+order-type routing faithful to the spec, adds partial-fill simulation
+in `PaperEngine`, and enables OCO (One-Cancels-Other) pairs for
+simultaneous stop-loss + target orders.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `execution/models.py` | Add optional `price: float = 0.0` field to `ExecutionIntent` (limit price for `NORMAL` urgency intents). Extend `OrderType` routing table: `IMMEDIATE` → MARKET; `NORMAL` → LIMIT. |
+| `execution/broker_interface.py` | Add optional `price: float = 0.0` parameter to `place_order()` abstract signature. Add `cancel_order(broker_order_id: str) -> bool` abstract method. Add `place_oco(symbol, side, qty, price, stop_price) -> tuple[Order, Order]` abstract method. |
+| `execution/binance_broker.py` | Route LIMIT orders with `price` and `timeInForce=GTC` parameters. Implement `cancel_order` via Binance futures cancel endpoint. Implement `place_oco` via Binance LIMIT + STOP_MARKET pair. Partial-fill tracking: `_poll_order_fill` returns partial status and `fill_quantity < quantity`. |
+| `execution/paper_engine.py` | LIMIT fill simulation: record open limit orders in a priority queue; fill at limit price when the next incoming trade price crosses the limit; reject if IOC and market does not immediately cross. Partial-fill tracking: expose `fill_quantity` < full `quantity` when simulated volume is insufficient. |
+| `execution/execution_manager.py` | Route intent urgency → order type before `broker.place_order`: `IMMEDIATE` → `OrderType.MARKET`; `NORMAL` → `OrderType.LIMIT` at `intent.reference_price`. Scale-out intents (§13.3.2) send LIMIT at the target level. |
+| `tests/test_paper_engine.py` | New tests: LIMIT fill on market cross; IOC rejection; partial fill tracking; open-order queue management. |
+| `tests/test_binance_broker.py` | New tests: LIMIT order routing (mock Binance API); OCO pair creation; `cancel_order` call path. |
+| `tests/test_execution_manager.py` | New tests: `urgency=IMMEDIATE` → `OrderType.MARKET`; `urgency=NORMAL` → `OrderType.LIMIT`; scale-out uses LIMIT with target price. |
+
+**Acceptance criteria.**
+
+1. Bounce entry intents (`urgency=NORMAL`) route to `BinanceBroker.place_order(order_type=LIMIT, price=intent.reference_price)`.
+2. Breakout entry intents (`urgency=IMMEDIATE`) route to `BinanceBroker.place_order(order_type=MARKET)`.
+3. `ExitType.TARGET` and `ExitType.EXHAUSTION` intents → LIMIT.
+4. `ExitType.INVALIDATION`, `ExitType.TIME`, `ExitType.RISK_BUDGET` intents → MARKET.
+5. `PaperEngine` fills a LIMIT BUY at limit price when the next trade price is ≤ limit price.
+6. `PaperEngine` LIMIT order is cancelled (not filled) if market never crosses before timeout.
+7. All existing Phase 14 acceptance tests pass unchanged.
+
+---
+
+### Phase 16 — HMM A/B Campaign at Scale `[NOT STARTED]`
+
+**Objective.** Phase 7V delivered a single-symbol smoke run with a
+mixed verdict (K=3, BIC=-31.09; HMM wins 1, rule-based wins 1, ties 2).
+Phase 16 promotes the harness to full campaign scale: multiple symbols,
+multiple date windows (≥ 30 d each), aggregate verdict logic. The
+campaign output is the evidence gate for Phase 17 (Wave HMM).
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `tools/hmm_abtest.py` | Add `--symbols` CLI arg (comma-separated, e.g. `BTCUSDT,ETHUSDT,SOLUSDT`). Add `--windows` CLI arg (list of `YYYY-MM-DD:YYYY-MM-DD` ranges or shorthand `30d`, `60d`, `90d` counting back from today). Add aggregate campaign report: one row per (symbol, window) + summary win-ratio and median Sharpe delta. Add `--verdict-threshold` (default: `win_ratio ≥ 0.60 AND median_sharpe_delta ≥ 0.10`). |
+| `hmm/abtest.py` | Add `run_campaign(symbols, windows, config) -> list[AbtestSummary]`. Add `aggregate_verdict(results) -> CampaignVerdict` where `CampaignVerdict(promote: bool, win_ratio: float, median_sharpe_delta: float)`. |
+| `reports/` | Campaign outputs: `hmm_campaign_SYMBOL_WINDOW_*.md` per (symbol, window) + `hmm_campaign_summary_*.md` aggregate. |
+| `tests/test_hmm_abtest.py` | New tests: `run_campaign` with stub backtest runners; `aggregate_verdict` win-ratio calculation; `CampaignVerdict` promote threshold logic; `--symbols`/`--windows` CLI arg parsing. |
+
+**Acceptance criteria.**
+
+1. `python tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT --windows 30d,60d` completes without error and writes campaign + summary reports to `reports/`.
+2. `aggregate_verdict(results)` returns `CampaignVerdict(promote=True)` only when `win_ratio ≥ 0.60 AND median_sharpe_delta ≥ 0.10`.
+3. Per-(symbol, window) result rows each contain `pnl`, `max_drawdown`, `sharpe`, `cagr`, `winner` columns.
+4. Rule-based baseline is preserved; HMM is always opt-in.
+5. All existing `tests/test_hmm_abtest.py` tests pass alongside new tests.
+
+**Phase 17 gate note.** If `CampaignVerdict.promote is False`, Phase 17
+(Wave HMM) is blocked. Record the verdict in this plan and seek
+project-owner decision before proceeding. Phase 17's own acceptance
+criteria include a repeat A/B check for the Wave HMM path.
+
+---
+
+### Phase 17 — HMM-based Wave Regime Classifier `[NOT STARTED]`
+
+**Objective.** Replace (optionally — toggle preserved) the deterministic
+rule-based Wave regime classifier (`WaveEngine._classify_regime`) with
+an HMM trained on V1 backtest regime labels. Mirrors the Phase 7
+`HMMBasedInference` pattern but for Wave's 5-state regime space. Gates
+on Phase 16 verdict.
+
+**Dependency gate.** Phase 16 `CampaignVerdict.promote is True`
+required before implementation begins.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `schemas.py` | Add `WaveConfig.wave_hmm_enabled: bool = False` and `wave_hmm_model_path: str = ""` (mirrors `RippleConfig.hmm_enabled`). |
+| `hmm/wave_hmm_model.py` | NEW. `WaveHMMModel` dataclass: `K`, emission `mu`/`Sigma` per state, transition matrix `A`, state labels. JSON save/load. |
+| `hmm/wave_hmm_trainer.py` | NEW. `WaveHMMTrainer`: Baum-Welch EM on Wave feature sequences (trend_efficiency, dispersion, absorption_ratio, residual_dislocation). `select_model(k_range=[3,4,5]) -> WaveHMMModel` using BIC. |
+| `wave/wave_engine.py` | Add `HMMWaveInference` path in `_classify_regime`: when `wave_hmm_enabled`, compute posterior `γ_t(k)` over Wave regime states; MAP state → `WaveRegime` enum. Rule-based path unmodified and default when `wave_hmm_enabled=False`. |
+| `tools/wave_hmm_train.py` | NEW CLI: trains a `WaveHMMModel` on stored backtest regime labels; writes JSON to `models/`. |
+| `tests/test_wave_hmm.py` | NEW. Tests: `WaveHMMModel` round-trip; `WaveHMMTrainer.select_model` BIC selection; `WaveEngine` toggle; posterior sums to 1.0; rule-based fallback preserved when `wave_hmm_enabled=False`. |
+
+**Acceptance criteria.**
+
+1. `wave_hmm_enabled=False` (default) → `WaveEngine` behaviour byte-identical to V1 rule-based.
+2. `wave_hmm_enabled=True` with valid model path → regime label changes per HMM posterior.
+3. HMM posterior distribution sums to 1.0 (within 1 × 10⁻⁶) at every time step.
+4. `WaveHMMModel` save/load round-trips without numerical loss.
+5. A/B backtest: Wave HMM ≥ rule-based on at least one key metric (Sharpe or win_rate) across ≥ 2 of the Phase 16 campaign (symbol, window) pairs.
+6. All existing `tests/test_wave_engine.py` and `tests/test_crossvenue_wave.py` tests pass unchanged.
+
+---
+
+### Phase 18 — Cross-Venue Features in C++ Ripple `[NOT STARTED]`
+
+**Objective.** Cross-venue data (Oanda L1) currently flows only into the
+Python `WaveEngine`. Phase 18 wires the same `CrossVenueSnapshot` into
+the C++ `RippleEngine` so that Ripple's evidence scoring can additionally
+leverage cross-venue divergence and correlation (§23 "Cross-venue
+confirmation"). The Python WaveEngine path is unchanged.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `backtestingCpp/orderflow/Schemas.h` | Add `struct CrossVenueSnapshot { double venue_price; double correlation_30m; double divergence_pct; bool available; };`. |
+| `backtestingCpp/orderflow/RippleEngine.h/.cpp` | Add `set_crossvenue_snapshot(CrossVenueSnapshot)` setter. Integrate `cv.divergence_pct` (additive boost to absorption evidence) and `cv.correlation_30m` (inverse boost to exhaustion evidence) in the evidence scoring path, gated on `cv.available`. When `cv.available=false` path is identical to V1. |
+| `backtestingCpp/bindings.cpp` | Expose `CrossVenueSnapshot` struct and `RippleEngine.set_crossvenue_snapshot` via pybind11. |
+| `execution/live_runner.py` | Call `engine.set_crossvenue_snapshot(cv_snap)` inside `_layered_push_step` on each Oanda L1 update (cadence matches Wave: ≤ 5 s). |
+| `ui/live_trading_session.py` | Same push inside `_push_layered_strategy`. |
+| `crossvenue/oanda_feed.py` | Extend `OandaL1Feed.last_snapshot() -> CrossVenueSnapshot` accessor consumed by the push loops. |
+| `tests/test_ripple_crossvenue.py` | NEW. Tests: `set_crossvenue_snapshot` with `available=False` → V1-identical evidence; `available=True` + high `divergence_pct` → absorption evidence increases; replay determinism with stored cross-venue CSV; pybind11 binding round-trip for `CrossVenueSnapshot`. |
+
+**Acceptance criteria.**
+
+1. `set_crossvenue_snapshot(CrossVenueSnapshot{available=False})` → Ripple evidence scores byte-identical to V1.
+2. `available=True` with `divergence_pct > dispersion_critical` → absorption evidence score increases.
+3. Replay with stored cross-venue CSV produces deterministic decisions.
+4. pybind11 binding test for `CrossVenueSnapshot` passes in `tests/test_crossvenue_wave.py` or new file.
+5. All existing Phase 8 cross-venue Wave tests pass unchanged.
+
+---
+
+### Phase 19 — Hierarchical ES / Euler Decomposition `[NOT STARTED]`
+
+**Objective.** Replace the single global ES bucket with the full Euler
+risk decomposition described in `strategy.md` §7.4.5. Tide publishes
+per-cell risk contributions (RC_i = w_i · ∂ρ/∂w_i); `RiskEngine`
+enforces per-cell limits in addition to the global throttle. V1 single-
+cell behaviour is preserved as the default (one cell covers the whole
+global budget).
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `schemas.py` | Add `EulerRiskCell(strategy: str, asset: str, target_weight: float)` dataclass. Add `TideConfig.euler_cells: list[EulerRiskCell] = []` (empty list → single-cell V1 behaviour). |
+| `backtestingCpp/orderflow/Schemas.h` | Add `struct EulerBudgetSnapshot { std::vector<double> cell_budgets; std::vector<std::string> cell_labels; double global_budget; };`. |
+| `backtestingCpp/orderflow/RiskEngine.h/.cpp` | Add `set_euler_budget(EulerBudgetSnapshot)` setter. Enforce per-cell `consumed_es[i] < cell_budgets[i]` in `check_new_order` in addition to global budget check. When `cell_budgets` is empty, falls back to V1 global-only check. |
+| `backtestingCpp/bindings.cpp` | Expose `EulerBudgetSnapshot` and `RiskEngine.set_euler_budget` via pybind11. |
+| `tide/tide_engine.py` | Compute Euler risk contributions: for each `EulerRiskCell` compute RC_i = target_weight × global_es_budget; publish `EulerBudgetSnapshot`. |
+| `execution/live_runner.py` + `ui/live_trading_session.py` | Push `EulerBudgetSnapshot` to `engine.set_euler_budget()` on Tide update cadence (60 s). |
+| `tests/test_euler_risk.py` | NEW. Tests: single-cell V1-equivalent; multi-cell per-cell rejection; Euler RC_i sum equals global budget; push cadence wiring; pybind11 binding round-trip. |
+
+**Acceptance criteria.**
+
+1. `euler_cells=[]` (default) → `RiskEngine` behaviour byte-identical to V1 global-ES path; all Phase 14C acceptance tests pass unchanged.
+2. Multi-cell: `RiskEngine` rejects orders from cells exceeding their individual budget even if the global budget is not exhausted.
+3. Euler RC contributions (`sum(cell_budgets)`) equal `global_budget` within 1 × 10⁻⁹.
+4. `EulerBudgetSnapshot` pybind11 binding round-trips without loss.
+5. Push cadence matches Tide: `set_euler_budget` called on every 60 s Tide tick in both headless and UI paths.
+
+---
+
+### Phase 20 — Liquidity-Map Logistic Hold/Break Calibration `[NOT STARTED]`
+
+**Objective.** Replace the deterministic threshold-based
+`LiquidityMapEngine` hold/break/destination scores with a calibrated
+logistic model trained on V1 backtest labelled outcomes. Rule-based
+fallback preserved as default (`logistic_enabled=False`). See
+`strategy.md` §10.3 and §23.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `schemas.py` | Add `LiquidityMapConfig.logistic_enabled: bool = False` and `logistic_model_path: str = ""`. |
+| `lmap/logistic_calibrator.py` | NEW. `LogisticCalibrator`: extract `(feature_vector, hold_label)` and `(feature_vector, break_label)` pairs from V1 backtest trade logs. Train `sklearn.linear_model.LogisticRegression` for `hold_score`, `break_score`, `destination_score`. `LiquidityMapLogisticModel` JSON save/load. |
+| `backtestingCpp/orderflow/LiquidityMapEngine.h/.cpp` | Add `load_logistic_model(json_str)` setter. When loaded and `logistic_enabled`, replace deterministic score computations with logistic evaluation; gated on `logistic_enabled`, deterministic path unchanged when disabled. |
+| `backtestingCpp/bindings.cpp` | Expose `LiquidityMapEngine.load_logistic_model` via pybind11. |
+| `tools/lmap_calibrate.py` | NEW CLI: `python tools/lmap_calibrate.py --symbol BTCUSDT --from 2024-01-01 --to 2025-01-01 --out models/lmap_BTCUSDT.json`. |
+| `tests/test_lmap_logistic.py` | NEW. Tests: `LogisticCalibrator` fit/predict; model save/load round-trip; `LiquidityMapEngine` toggle; deterministic fallback preserved; logistic scores in [0, 1]. |
+
+**Acceptance criteria.**
+
+1. `logistic_enabled=False` (default) → `LiquidityMapEngine` behaviour byte-identical to V1; all existing lmap tests pass unchanged.
+2. `logistic_enabled=True` with valid model → `hold_score`, `break_score`, `destination_score` change per logistic output.
+3. All logistic output scores are in [0, 1].
+4. Model save/load round-trips without numerical loss.
+5. A/B backtest comparison shows logistic calibration ≥ deterministic thresholds on at least one key metric (hold accuracy or break accuracy) for the training symbol.
+
+---
+
+## 7.3 V2 UI Accuracy & First-Impression Polish (Phase 8)
+
+Three user-identified UI gaps remain after V1 GA that make the live
+interface misleading or incomplete. These are V2-era UI polish items —
+independent of the strategy algorithm phases (15–20) but sharing the
+same "V2 work" milestone. Full spec in `UI_STRATEGY_INTEGRATION_PLAN.md` §16.
+
+**Phase 8 GA gate:** Sub-phases 8A + 8B + 8C all complete.
+
+| Sub-phase | Name | Status | Dependency |
+|---|---|---|---|
+| **8A** | Candlestick Historical Preload | `NOT STARTED` | Phase 6 UI (DONE) |
+| **8B** | Strategy-Attributed PnL & Trade Tracking | `NOT STARTED` | Phase 14A `ExecutionManager` (DONE) |
+| **8C** | Signal Log Accuracy — Gate Legacy + Tide/Wave Events | `NOT STARTED` | Phase 14B snapshot push (DONE) |
+
+**Problems addressed (summary):**
+
+- **8A — Candlestick preload:** `CandleChartView` starts empty on
+  connect; no historical REST or HDF5 load. Chart shows "Waiting for
+  candle data…" for up to 80 minutes at 1 m timeframe. Fix: async
+  Binance klines REST fetch on connect and on timeframe change.
+- **8B — Strategy PnL:** `AccountPanel` computes realized PnL via
+  naive FIFO order matching (any BUY → SELL pair), not strategy-
+  attributed fills from `ExecutionManager`. Order rows show no
+  Ripple reason context. Fix: wire account panel to
+  `ExecutionManager.session_realized_pnl` and `session_trade_count`.
+- **8C — Signal log accuracy:** Legacy `ScoreBasedInference` raw
+  signals (`STACKED_IMBALANCE_*`, `BULLISH_*`, etc.) flood the
+  blotter at market-event frequency when strategy is armed. Tide bias
+  changes and Wave regime changes are never emitted as explicit log
+  entries. Exit signals carry no realized PnL annotation. Fix: gate
+  legacy signals on disarmed state, emit structured `TIDE`/`WAVE`
+  change events, annotate exits with PnL delta.
+
+---
+
+## 7.4 V3 Forward Visibility
+
+Per `strategy.md` §23, V3 items depend on V2 HMM posteriors and
+multi-asset data. None of these are V2 closure work; they exist for
+forward visibility only.
 
 | Phase candidate | Strategy section | Status | Dependency |
 |---|---|---|---|
-| Wave HMM regime classifier | §8.6 / §23 | NOT STARTED | Phase 7V (DONE) — pending HMM A/B campaign at scale |
-| Hierarchical Euler ES decomposition | §7.4.5 / §23 | NOT STARTED | Phase 4 (DONE) |
-| Liquidity-map logistic hold/break calibration | §10.3 | NOT STARTED | Phase 3 (DONE) — needs labelled training data |
-| Cross-venue features in C++ Ripple (not just Wave) | §8.4 / §23 | NOT STARTED | Phase 8 (DONE) |
 | Multi-factor PCA for Wave | §8.4.2 / §23 | NOT STARTED | Multi-asset L1 data |
-| Adaptive Kelly-like position sizing | §23 | NOT STARTED | Wave HMM |
-| Live model retraining pipeline | §23 | NOT STARTED | Wave HMM + optimisation framework |
-| Multi-symbol portfolio management | §22.3 / §23 | NOT STARTED | All of V1 |
-| LIMIT / OCO / partial-fill order support | §22.1 / §23 | NOT STARTED | Phase 14A |
+| Adaptive Kelly-like position sizing | §23 | NOT STARTED | Phase 17 Wave HMM posteriors |
+| Live model retraining pipeline | §23 | NOT STARTED | Phase 17 + optimisation framework |
+| Multi-symbol portfolio management | §22.3 / §23 | NOT STARTED | All of V2 |
 
 ---
 
@@ -3217,22 +3460,22 @@ executable form of the V1 §22.2 #12 contract) passes against
 `StubBroker` + real engine, the cross-venue boost factors are
 config-driven (§20), and `num_trades` is a Pareto objective (§22.2 #15).
 
-### V2 — Probabilistic Extensions + Cross-Venue Confirmation (Phases 7 / 7V / 8 + Wave HMM)
+### V2 — Probabilistic Extensions + Cross-Venue Confirmation (Phases 15–20)
 
-**Status: PARTIALLY DELIVERED — engine-side only, end-to-end wiring is V2 work.**
+**Status: PARTIALLY DELIVERED — engine-side only, end-to-end wiring + GA phases are V2 work.**
 
-**Delivered (engine-only):**
+**Delivered (engine-only, pre-V2 phases):**
 - HMM-based Ripple state inference (Phase 7).
 - HMM A/B validation harness (Phase 7V — Phase 7 marked validated).
 - Cross-venue features → Wave regime input (Phase 8 — Python WaveEngine only; not yet in C++ Ripple).
 
-**Outstanding for V2 GA:**
-- HMM-based Wave regime classifier (currently rule-based only).
-- HMM A/B validation campaign at scale (multi-symbol, multi-window, ≥ 30-day windows for honest CAGR).
-- Cross-venue features inside C++ Ripple (today they only flow through Python WaveEngine).
-- Hierarchical ES decomposition (Euler) — currently single global ES bucket.
-- Liquidity-map logistic hold/break calibration — currently deterministic thresholds.
-- LIMIT / OCO / partial-fill order types in `BinanceBroker` (today MARKET only).
+**Outstanding for V2 GA (see §7.2 for detailed phase specs):**
+- Phase 15 ⬜ — LIMIT / OCO / partial-fill order types in `BinanceBroker` (today MARKET only).
+- Phase 16 ⬜ — HMM A/B campaign at scale (multi-symbol, multi-window, ≥ 30-day windows).
+- Phase 17 ⬜ — HMM-based Wave regime classifier (gates on Phase 16 verdict).
+- Phase 18 ⬜ — Cross-venue features inside C++ Ripple (today Python WaveEngine only).
+- Phase 19 ⬜ — Hierarchical ES decomposition (Euler) — currently single global ES bucket.
+- Phase 20 ⬜ — Liquidity-map logistic hold/break calibration — currently deterministic thresholds.
 
 ### V3 — Multi-Asset / Multi-Symbol / Adaptive Sizing
 
