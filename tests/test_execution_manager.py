@@ -610,6 +610,96 @@ class TestOnIntentDispatch(_LoopBaseCase):
         # above which must NOT advance it).
         self.assertEqual(m._last_intent_ts_ms, 42_000)
 
+    def test_exit_with_rejected_close_preserves_position_state(self):
+        """Regression — Phase 14A bug: ``_execute_intent_exit`` used to
+        unconditionally clear ``_current_side`` / ``_current_qty`` even
+        when the broker rejected the close order, silently orphaning a
+        real open position. Mirrors the entry path's fill-status guard
+        (``_execute_intent_entry`` lines 385-389)."""
+        broker = StubBroker()
+        broker.position = Position(symbol="BTCUSDT", side=OrderSide.BUY,
+                                   quantity=0.5, entry_price=100.0)
+        broker.next_close_order = Order(
+            symbol="BTCUSDT", side=OrderSide.SELL, quantity=0.5,
+            status=OrderStatus.REJECTED, error_message="exchange down")
+        m = self._arm_with_loop(broker)
+        m._current_side = OrderSide.BUY
+        m._current_qty = 0.5
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (self.run_async(c),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("exit", side=None,
+                                action="EXIT_BOUNCE",
+                                timestamp_ms=42_000,
+                                reason="invalidation"))
+
+        # Broker did receive the close attempt and recorded it...
+        self.assertEqual(len(broker.placed_orders), 1)
+        self.assertEqual(broker.placed_orders[0].status,
+                         OrderStatus.REJECTED)
+        # ...but local state MUST be preserved so the next exit intent
+        # can retry. Pre-fix this would have wrongly read
+        # (None, 0.0) and the manager would have permanently lost
+        # track of a still-open broker position.
+        self.assertEqual(m.current_side, OrderSide.BUY)
+        self.assertEqual(m.current_qty, 0.5)
+
+    def test_exit_with_cancelled_close_preserves_position_state(self):
+        """Same invariant as the rejected-close case, but with a
+        ``CANCELLED`` status. Catches the (rejected, cancelled,
+        pending, submitted) tuple as a class rather than just the
+        most common failure."""
+        broker = StubBroker()
+        broker.position = Position(symbol="BTCUSDT", side=OrderSide.SELL,
+                                   quantity=0.3, entry_price=100.0)
+        broker.next_close_order = Order(
+            symbol="BTCUSDT", side=OrderSide.BUY, quantity=0.3,
+            status=OrderStatus.CANCELLED)
+        m = self._arm_with_loop(broker)
+        m._current_side = OrderSide.SELL
+        m._current_qty = 0.3
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (self.run_async(c),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("exit", side=None,
+                                action="EXIT_BREAKOUT",
+                                timestamp_ms=42_000,
+                                reason="invalidation"))
+
+        self.assertEqual(len(broker.placed_orders), 1)
+        self.assertEqual(broker.placed_orders[0].status,
+                         OrderStatus.CANCELLED)
+        self.assertEqual(m.current_side, OrderSide.SELL)
+        self.assertEqual(m.current_qty, 0.3)
+
+    def test_exit_with_no_broker_position_still_clears_state(self):
+        """Counter-control: when the broker reports no open position
+        (``close_position`` returns ``None``), local state SHOULD be
+        cleared — the broker is the source of truth and there's
+        nothing to retry. Pre-fix this happened to be correct by
+        accident; post-fix the helper must still preserve this
+        behaviour."""
+        broker = StubBroker()
+        # ``StubBroker.close_position`` returns ``None`` when
+        # ``broker.position`` is ``None`` AND no override is queued.
+        broker.position = None
+        m = self._arm_with_loop(broker)
+        m._current_side = OrderSide.BUY
+        m._current_qty = 0.5
+
+        with patch("execution.execution_manager.asyncio.run_coroutine_threadsafe",
+                   side_effect=lambda c, l: (self.run_async(c),
+                                             type("F", (), {"result": lambda *a, **k: None})())[1]):
+            m.on_intent(_intent("exit", side=None,
+                                action="EXIT_BOUNCE",
+                                timestamp_ms=42_000))
+
+        self.assertEqual(len(broker.placed_orders), 0)
+        self.assertIsNone(m.current_side)
+        self.assertEqual(m.current_qty, 0.0)
+
     def test_cancel_intent_is_noop(self):
         broker = StubBroker()
         m = self._arm_with_loop(broker)

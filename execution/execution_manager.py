@@ -417,13 +417,33 @@ class ExecutionManager:
             logger.error("Execution error (intent entry): %s", e)
 
     async def _execute_intent_exit(self, intent: ExecutionIntent) -> None:
-        """Phase 14A — exit path driven by a Ripple ``ExecutionIntent``."""
+        """Phase 14A — exit path driven by a Ripple ``ExecutionIntent``.
+
+        Mirrors :meth:`_execute_intent_entry`'s fill-status contract:
+        local position state is cleared only when the broker confirms
+        the close actually executed (``FILLED`` / ``PARTIALLY_FILLED``)
+        or reports no open position. A rejected / cancelled / expired
+        close MUST leave ``_current_side`` / ``_current_qty`` intact so
+        the next Ripple exit intent can retry — otherwise we silently
+        lose track of a real open position on the broker.
+        """
         try:
             order = await self._broker.close_position(self._symbol)
             if order:
                 order.signal_type = intent.action or "RIPPLE_EXIT"
                 order.ripple_reason = intent.reason or ""
                 self._record_order(order)
+                if order.status not in (
+                        OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+                    logger.warning(
+                        "Exit order not filled: %s — local position "
+                        "state preserved (side=%s qty=%s) for retry",
+                        order.status,
+                        self._current_side,
+                        self._current_qty,
+                    )
+                    await self._refresh_account()
+                    return
             self._current_side = None
             self._current_qty = 0.0
             await self._refresh_account()

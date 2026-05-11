@@ -124,6 +124,12 @@ if __name__ == "__main__":
             exec_mgr=exec_mgr,
             ofe_module=ofe,
             websockets_module=websockets,
+            # Phase 14B — push Tide budget, Wave permissions, and
+            # realized vol into the C++ engine on the cadences in
+            # `strategy.md` §5.3 + AGENT_STRATEGY_RULES.md §7.5.
+            # Without this the engine runs against DefaultTideSnapshot /
+            # DefaultWaveSnapshot for the entire session.
+            enable_layered_strategy=True,
         )
         exit(rc)
 

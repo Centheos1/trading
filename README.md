@@ -20,7 +20,7 @@ the Tide risk budget. See `implementation_plan.md` §7.1 for the
 | `python main.py backtest` (orderflow / wave / tide) | ✅ V1-complete | Yes |
 | `python main.py optimise` (NSGA-II) | ✅ V1-complete (one polish item — Phase 14E) | Yes |
 | `python main.py ui` (live view, paper fills via `paper_fills` flag) | ✅ V1-complete | Yes (paper only) |
-| `python main.py execute` (live Binance USD-M futures trading) | ⚠️ **V1-partial** — Phase 14A done (Ripple-driven, event-time cooldown); Tide / Wave / Risk wiring still pending (Phase 14B + 14C) | **TESTNET only** — testnet OK to soak-test Ripple FSM end-to-end. Real funds: still NO until Phase 14C ships the broker risk-rejection acceptance suite. |
+| `python main.py execute` (live Binance USD-M futures trading) | ⚠️ **V1-partial** — Phase 14A done (Ripple-driven, event-time cooldown); Phase 14B done (Tide budget, Wave snapshot, realized vol pushed to live engine on 60 s / 5 s / 1 s cadences); Phase 14C done (V1 §22.2 #12 contract pinned by 18-test compliance suite — broker provably sees zero orders under ES exhausted / Wave DISABLED / Tide CRISIS / max_position exceeded / two-trades-concurrent / cooldown active); two 🟠 Quality items remain (14D, 14E) | **TESTNET recommended** — All three 🔴 Blocker sub-phases done. Real-fund deployment is technically gated only on the 🟠 Quality items (14D/14E); we still recommend a final TESTNET soak before flipping `BINANCE_TESTNET=false`. |
 | `tools/replay_harness.py` (deterministic replay verifier) | ✅ V1-complete | Yes |
 | `tools/hmm_abtest.py` (Phase 7V HMM A/B harness) | ✅ V2 research tooling | Yes (research only) |
 
@@ -29,8 +29,8 @@ the Tide risk budget. See `implementation_plan.md` §7.1 for the
 | Sub-phase | Title | Severity | Status | Est. effort |
 |---|---|---|---|---|
 | 14A | Live execution driven by Ripple decisions (incl. event-time cooldown) | 🔴 Blocker | ✅ **DONE 2026-05-09** | 2–3 days (actual: ~1 day) |
-| 14B | Tide / Wave / Vol snapshot push to live engine | 🔴 Blocker | NOT STARTED | 1–2 days |
-| 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | NOT STARTED | 1 day |
+| 14B | Tide / Wave / Vol snapshot push to live engine | 🔴 Blocker | ✅ **DONE 2026-05-11** | 1–2 days (actual: ~1 day) |
+| 14C | Live broker risk-rejection acceptance test | 🔴 Blocker | ✅ **DONE 2026-05-12** | 1 day (actual: ~0.5 day) |
 | 14D | Cross-venue boost factors as `WaveConfig` parameters | 🟠 Quality | NOT STARTED | 0.5 day |
 | 14E | Optimiser `num_trades` as a Pareto objective | 🟠 Quality | NOT STARTED | 0.5 day |
 
@@ -373,12 +373,27 @@ both paper and live paths consume `RippleDecision` intents (which
 already pass through the lifecycle FSM, scaling logic, exit taxonomy,
 and `RiskEngine`).
 
-> **Tide / Wave wiring is still pending** (`Phase 14B` + `14C` —
-> `implementation_plan.md` §7.1). The C++ `RippleEngine` runs against
-> `DefaultTideSnapshot` / `DefaultWaveSnapshot` until those phases
-> ship, so the local `RiskEngine` receives no budget on the live path
-> and Wave permissions are all `FULL`. **TESTNET soak runs are safe;
-> real-fund deployment must wait for Phase 14C.**
+> **Phase 14B (Tide / Wave / Vol wiring) shipped 2026-05-11.** Both
+> live entry points (`ui` and `execute`) now push Tide budget on a 60 s
+> cadence, Wave snapshot on a 5 s cadence, and realized vol on a 1 s
+> cadence into the C++ `RippleEngine` via the three setters
+> `set_risk_budget` / `set_wave_snapshot` / `set_realized_vol`. The
+> local `RiskEngine` is therefore now armed with real budgets on the
+> live path and Wave permissions reflect real regime classification.
+>
+> **Phase 14C (V1 §22.2 #12 contract acceptance) shipped 2026-05-12.**
+> The Python live path now invokes a single-source-of-truth
+> `intent_risk_block_reason(intent, engine, current_position_usd=...,
+> ofe_module=ofe)` gate inside `_ripple_cb` (headless runner) and
+> `_on_ripple_received` (UI) BEFORE forwarding to
+> `ExecutionManager.on_intent`. The gate mirrors the C++ engine's
+> Wave/Risk gate so the broker provably sees zero orders when
+> (i) ES is exhausted, (ii) Wave is DISABLED, (iii) Tide is CRISIS,
+> (iv) `max_position_usd` is exceeded, (v) two trades are concurrent,
+> or (vi) cooldown is active. Pinned by 18 tests in
+> `tests/test_live_execution_v1_compliance.py` (8 end-to-end acceptance,
+> 7 unit, 2 wiring), including explicit negative-controls that prove
+> exits are NEVER blocked and the happy-path entry does fire.
 
 ```
 RippleEngine (C++)
@@ -387,11 +402,14 @@ RippleEngine (C++)
     │    ├─ paper:  PaperEngine.on_intent          ← unchanged from Phase 12
     │    │            → _handle_entry / _handle_exit
     │    │            → order_callback → TradeBlotter / AccountPanel
-    │    └─ live:   ExecutionManager.on_intent     ← Phase 14A
-    │                 (event-time cooldown via intent.timestamp)
-    │                 → asyncio worker loop
-    │                   → BinanceBroker.place_order (REST, MARKET)
-    │                     → _poll_order_fill until FILLED
+    │    └─ live:   intent_risk_block_reason       ← Phase 14C (V1 §22.2 #12 gate)
+    │                 (Wave permissions, ES budget, Tide risk_multiplier,
+    │                  max_position_usd — exits + cancels always pass)
+    │                 → ExecutionManager.on_intent ← Phase 14A
+    │                     (event-time cooldown via intent.timestamp)
+    │                     → asyncio worker loop
+    │                       → BinanceBroker.place_order (REST, MARKET)
+    │                         → _poll_order_fill until FILLED
     └─ recorder.record_ripple_decision (sidecar — Phase 13)
 
 SignalEngine (C++)
@@ -450,12 +468,22 @@ audit pass during test writing did not surface any defect.
   (`intent.timestamp` → `_last_intent_ts_ms`). 23 new tests in
   `tests/test_execution_manager.py`, 13 new tests in
   `tests/test_live_runner.py`. Both grep gates pass.
-- 14B — Push `TideSnapshot` / `WaveSnapshot` / realized vol into the
-  C++ engine on every live tick.
-- 14C — End-to-end V1 §22.2 #12 contract test: `StubBroker` sees zero
-  orders when `consumed_es ≥ es_budget`, Wave is `DISABLED`, Tide is
-  `CRISIS`, `max_position` is exceeded, two trades are concurrent, or
-  cooldown is active.
+- ✅ **14B — DONE 2026-05-11.** UI live session and headless
+  `run_live_execute` now push `TideSnapshot` (60 s), `WaveSnapshot` (5 s),
+  and realized vol (1 s) into the C++ engine via the three
+  `RippleEngine` setters. WS trade callback feeds `WaveEngine.on_price`
+  and a rolling RV buffer. 24 new tests in
+  `tests/test_layered_live_wiring.py`. All three grep gates pass with
+  multiple production hits each.
+- ✅ **14C — DONE 2026-05-12.** End-to-end V1 §22.2 #12 contract pinned
+  by `tests/test_live_execution_v1_compliance.py` (18 tests).
+  `intent_risk_block_reason` re-applies the C++ Wave/Risk gate on the
+  Python side from inside `execution/live_runner.py:_ripple_cb` and
+  `ui/main_window.py:_on_ripple_received` so a real broker provably
+  receives zero orders under all six failure modes (ES exhausted,
+  Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades
+  concurrent, cooldown active). Exits + happy-path negative-controls
+  pin no over-suppression.
 
 **Deferred to V2:**
 - LIMIT / OCO order support and partial-fill bookkeeping

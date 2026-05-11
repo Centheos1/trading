@@ -25,6 +25,7 @@ from execution.models import (
     RippleMode, SignalCategory, SignalEntry,
     SizingConfig, SizingMode, StrategyMode, StrategyUIState,
     SuppressionReason,
+    intent_risk_block_reason,
     ripple_decision_to_entry, ripple_decision_to_intent,
     _parse_intent_name,
 )
@@ -1097,12 +1098,34 @@ class MainWindow(QMainWindow):
         # (event-time cooldown, Ripple-FSM-respecting). The legacy
         # ``_on_engine_signal -> on_signal`` route is OBSERVATION-only
         # now — see AGENT_STRATEGY_RULES.md §7.4.
+        # Phase 14C: re-apply the C++ engine Wave / RiskEngine gate on
+        # the Python side so a real broker never sees an order when
+        # the engine state already decided to block the trade
+        # (`strategy.md` §22.2 #12 / `AGENT_STRATEGY_RULES.md` §7.6).
         if (self._strategy_mode == StrategyMode.LIVE and
                 self._exec_manager is not None and
                 self._exec_manager.armed):
             intent = ripple_decision_to_intent(decision, state_name,
                                                intent_name=intent_name)
             if intent and intent.intent_type in ("entry", "exit"):
+                try:
+                    qty = float(getattr(self._exec_manager,
+                                        "current_qty", 0.0) or 0.0)
+                    ref = float(intent.reference_price or 0.0)
+                    pos_usd = abs(qty) * ref
+                    block = intent_risk_block_reason(
+                        intent, self._engine,
+                        current_position_usd=pos_usd,
+                        ofe_module=ofe,
+                    )
+                except Exception:
+                    logger.exception("intent_risk_block_reason failed")
+                    block = None
+                if block is not None:
+                    logger.warning(
+                        "V1 §22.2 #12 gate blocked live intent: %s (%s)",
+                        intent.action, block)
+                    return
                 try:
                     self._exec_manager.on_intent(intent)
                 except Exception:

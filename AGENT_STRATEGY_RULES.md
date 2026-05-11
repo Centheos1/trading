@@ -271,7 +271,7 @@ grep -rn "engine\.set_signal_callback(.*on_signal" execution/ ui/ main.py
 grep -n "time\.time()" execution/execution_manager.py
 ```
 
-### 7.5 Layered Strategy Wiring Contract `[V1 — Phase 14B]`
+### 7.5 Layered Strategy Wiring Contract `[V1 — Phase 14B — ENFORCED IN CODE 2026-05-11]`
 
 Every live runtime entry point (`ui/live_trading_session.py`,
 `execution/live_runner.py`, `main.py:execute`) MUST push the latest
@@ -291,13 +291,95 @@ The setters that MUST be called:
 silently disables the entire upper architecture. Unit tests for the
 setters do NOT exempt a runtime path from calling them.
 
-**Enforcement check (CI-friendly):**
+**Implementation reference (post-2026-05-11):** The translator
+`execution.models.wave_snapshot_to_ofe(snap, ofe_module)` converts a
+Python `schemas.WaveSnapshot` to an `ofe.WaveSnapshot`; the helper
+`execution.models.compute_realized_vol_from_prices(prices)` produces
+the RV scalar. Both are pure functions (no side effects, no
+wall-clock reads) and are unit-tested in
+`tests/test_layered_live_wiring.py`. The free functions
+`execution.live_runner._layered_push_step(...)` and
+`execution.live_runner._run_layered_push_loop(...)` are the canonical
+push primitives — new live entry points MUST reuse them rather than
+re-implement.
+
+**Determinism note.** The push thread uses `Event.wait(timeout=...)`
+for its loop cadence (wall-clock interval, default 1 s). This is
+acceptable because the push thread does NOT make trading decisions —
+it merely keeps the engine's Tide / Wave / RV state fresh. All
+TRADING-decision logic (lifecycle FSM, cooldown gating, RiskEngine
+checks) is still event-time, per §7.1. Do NOT route trading
+decisions through this thread.
+
+**Enforcement check (CI-friendly — all three MUST return ≥1
+production hit outside `tests/`):**
 
 ```bash
-# Each must return at least one production hit (excluding tests/).
-grep -rn "set_risk_budget" ui/ execution/ main.py
+grep -rn "set_risk_budget"   ui/ execution/ main.py
 grep -rn "set_wave_snapshot" ui/ execution/ main.py
-grep -rn "set_realized_vol" ui/ execution/ main.py
+grep -rn "set_realized_vol"  ui/ execution/ main.py
+```
+
+### 7.6 Live Risk-Gate Contract `[V1 — Phase 14C — ENFORCED IN CODE 2026-05-12]`
+
+Every Python live entry point that forwards a Ripple intent to a real
+broker MUST first call
+`execution.models.intent_risk_block_reason(intent, engine,
+current_position_usd=..., ofe_module=ofe)` and short-circuit when the
+helper returns a non-`None` reason string.
+
+**Why.** The C++ `RippleEngine` applies its Wave permission gate and
+`RiskEngine::check_new_order` gate *inside*
+`on_trigger_decision` (RippleEngine.cpp:282–307) — but only to
+suppress the **internal** lifecycle setup and any paper fill. The
+`set_ripple_callback` channel still fires for every non-`NO_ACTION`
+decision, so unless the Python side re-applies the gate, a real
+broker would receive an order even when the engine itself decided
+NOT to open a trade. That is exactly the V1 §22.2 #12 contract
+violation Phase 14C closes.
+
+**The gates that MUST be mirrored, in order:**
+1. **Wave permission** — `wave_snap.permissions.size_fraction(arch, side) > 0` for the (`TradeArchetype`, `TradeSide`) implied by the intent's `action` field. A `DISABLED` permission must drop the intent.
+2. **Tide CRISIS** — `risk.risk_multiplier > 0`. A zero multiplier means `compute_position_size` would return 0 in the C++ path.
+3. **ES exhaustion** — when `risk.es_budget > 0`, require `risk.consumed_es < risk.es_budget`.
+4. **Max position** — when `risk.max_position_usd > 0`, require the caller-supplied `current_position_usd` to be strictly less than the cap.
+
+**Exits are NEVER blocked.** Intent types `"exit"`, `"cancel"`,
+`"rearm"`, `"prepare"`, and intents with an unmapped action all
+short-circuit the helper with `None`. V1 must always allow
+risk-reducing flows to fire so open positions can be unwound even
+when the engine is otherwise locked down.
+
+**Where the helper MUST be wired (V1):**
+- `execution/live_runner.py::_ripple_cb` — both the recorder-attached
+  and the no-recorder branches must call it before `exec_mgr.on_intent`.
+- `ui/main_window.py::_on_ripple_received` — the `StrategyMode.LIVE`
+  branch must call it before `self._exec_manager.on_intent`.
+
+**Determinism note.** The gate is a pure function over the strategy
+snapshot at the moment the decision arrives — no wall-clock reads,
+no random number generation, no shared mutable state besides the
+engine the caller already owns. This preserves the §7.1
+deterministic-replay contract: replaying the same Ripple decision
+stream against the same Tide/Wave/RV history will produce the same
+gate decisions every time.
+
+**Enforcement check (CI-friendly — must return ≥1 production hit
+outside `tests/` for each callsite):**
+
+```bash
+grep -rn "intent_risk_block_reason" execution/ ui/ main.py
+# Expected production hits (post-2026-05-12):
+#   execution/models.py        — def intent_risk_block_reason
+#   execution/live_runner.py   — import + 1 call from _gate_and_dispatch
+#   ui/main_window.py          — import + 1 call from _on_ripple_received (LIVE branch)
+```
+
+**And the acceptance suite must run without skips:**
+
+```bash
+grep -nE "@(pytest\.mark\.skip|unittest\.skip)\(" tests/test_live_execution_v1_compliance.py
+# Expected: empty.
 ```
 
 ---

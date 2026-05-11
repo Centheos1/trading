@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Iterable, List, Optional
 
 
 class OrderSide(Enum):
@@ -224,6 +225,188 @@ def ripple_decision_to_entry(decision, state_name: str = "",
         description=decision.reason,
         state_summary=state_name,
     )
+
+
+def compute_realized_vol_from_prices(prices: Iterable[float]) -> float:
+    """Phase 14B — rolling realized vol from a price buffer.
+
+    Computes the sample standard deviation of log returns. Returns 0.0
+    if fewer than two log returns are computable (i.e. fewer than 2
+    valid prices), so callers can call this unconditionally on a
+    short buffer without special-casing the startup window.
+
+    This is intentionally simple for V1 (matches the live UI
+    realized-vol estimator). V2 (strategy.md §23) replaces it with a
+    proper intraday vol model fed by ``tide.tide_features``.
+    """
+    plist = [p for p in prices if p > 0]
+    if len(plist) < 2:
+        return 0.0
+    logrets = []
+    for i in range(1, len(plist)):
+        logrets.append(math.log(plist[i] / plist[i - 1]))
+    if len(logrets) < 2:
+        return 0.0
+    mean = sum(logrets) / len(logrets)
+    var = sum((r - mean) ** 2 for r in logrets) / (len(logrets) - 1)
+    return math.sqrt(max(var, 0.0))
+
+
+def wave_snapshot_to_ofe(snap, ofe_module):
+    """Phase 14B — translate a Python ``schemas.WaveSnapshot`` into an
+    ``ofe.WaveSnapshot`` (C++ pybind type) for ``RippleEngine.set_wave_snapshot``.
+
+    Enum members on both sides share the same names (Python ``schemas.WaveRegime``
+    / ``schemas.PermissionLevel`` were authored to match the C++ enums in
+    ``backtestingCpp/orderflow/Schemas.h``), so we translate by ``.name``
+    rather than by integer value. This stays robust if the C++ side ever
+    reorders the underlying integers.
+
+    Returns the constructed ``ofe.WaveSnapshot`` (never ``None``). Raises if
+    the snapshot carries an unknown enum member — callers should wrap in a
+    try/except, since the live push path is best-effort.
+    """
+    ws = ofe_module.WaveSnapshot()
+    ws.timestamp = int(getattr(snap, "timestamp", 0) or 0)
+    ws.regime = getattr(ofe_module.WaveRegime, snap.regime.name)
+    ws.trend_efficiency = float(snap.trend_efficiency)
+    ws.dispersion = float(snap.dispersion)
+    ws.absorption_ratio = float(snap.absorption_ratio)
+    for attr in ("long_bounce", "short_bounce",
+                 "long_breakout", "short_breakout"):
+        py_lvl = getattr(snap.permissions, attr)
+        setattr(ws.permissions, attr,
+                getattr(ofe_module.PermissionLevel, py_lvl.name))
+    ws.permissions.reduced_size_fraction = float(
+        snap.permissions.reduced_size_fraction)
+    return ws
+
+
+# ----------------------------------------------------------------------
+# Phase 14C — V1 §22.2 #12 live execution risk gate.
+#
+# The C++ `RippleEngine::on_trigger_decision` applies Wave permissions
+# + RiskEngine gates BEFORE it opens an internal lifecycle setup or
+# emits a paper fill, but `set_ripple_callback` fires for every
+# non-NO_ACTION decision regardless of risk state (it is a pure
+# observation channel from the C++ side's perspective). The live
+# Python execution path (`execution.live_runner._ripple_cb` and
+# `ui.main_window._on_ripple_received`) MUST therefore re-apply the
+# same gate before forwarding the intent to a real broker — otherwise
+# `consumed_es >= es_budget`, Wave DISABLED, Tide CRISIS, and over-cap
+# positions would all result in real orders despite the engine having
+# decided NOT to open a trade internally.
+#
+# This helper is the single source of truth for the gate. The wiring
+# is checked by `tests/test_live_execution_v1_compliance.py`.
+
+# Map RippleIntent action names → (TradeArchetype name, TradeSide name).
+# Mirrors `RippleEngine::on_trigger_decision` (RippleEngine.cpp:274-280).
+_INTENT_ARCH_SIDE = {
+    "ENTER_BOUNCE_LONG":    ("BOUNCE",   "LONG"),
+    "ENTER_BOUNCE_SHORT":   ("BOUNCE",   "SHORT"),
+    "ENTER_BREAKOUT_LONG":  ("BREAKOUT", "LONG"),
+    "ENTER_BREAKOUT_SHORT": ("BREAKOUT", "SHORT"),
+}
+
+
+def intent_risk_block_reason(
+    intent: Optional[ExecutionIntent],
+    ofe_engine: Any,
+    *,
+    current_position_usd: float = 0.0,
+    ofe_module: Optional[Any] = None,
+) -> Optional[str]:
+    """Phase 14C — return a non-None reason string when an
+    ``ExecutionIntent`` would be suppressed by the C++ engine's
+    Wave permissions, ES budget, Tide risk multiplier, or
+    max_position cap. Returns ``None`` when the intent should pass
+    through to the broker.
+
+    This mirrors the gating logic in
+    ``backtestingCpp/orderflow/ripple/RippleEngine.cpp`` lines
+    282-307 (Wave permission gate + `RiskEngine::check_new_order` +
+    `compute_position_size`). Both gates exist in the C++ engine to
+    suppress the internal lifecycle setup; this Python mirror exists
+    to suppress real broker orders on the live execute path. See
+    `AGENT_STRATEGY_RULES.md` §7.6 and `strategy.md` §22.2 #12.
+
+    **Exits are NEVER blocked.** V1 must always allow risk-reducing
+    flows to fire so an open position can be unwound. Likewise
+    cancel/rearm/prepare intents short-circuit immediately.
+
+    Parameters
+    ----------
+    intent
+        The decoded ``ExecutionIntent`` (from
+        :func:`ripple_decision_to_intent`).
+    ofe_engine
+        The ``orderflow_engine.OrderFlowEngine`` instance — used to
+        query :py:meth:`get_strategy_snapshot` for Wave permissions
+        and the live risk-budget snapshot.
+    current_position_usd
+        Caller-supplied estimate of the current position in USD
+        (e.g. ``exec_mgr.current_qty * intent.reference_price``).
+        Used only for the ``MAX_POSITION_EXCEEDED`` check. Defaults
+        to ``0.0`` so callers without a position view skip that gate
+        cleanly.
+    ofe_module
+        The imported ``orderflow_engine`` module. Needed to resolve
+        the ``TradeArchetype`` / ``TradeSide`` enums when performing
+        the Wave permission lookup. When ``None`` the Wave gate is
+        skipped (best-effort behaviour preserved).
+    """
+    if intent is None:
+        return None
+    if intent.intent_type != "entry":
+        return None
+    if intent.side is None:
+        return None
+
+    arch_side = _INTENT_ARCH_SIDE.get(intent.action or "")
+    if arch_side is None:
+        return None
+
+    try:
+        snap = ofe_engine.get_strategy_snapshot()
+    except Exception:
+        # Engine cannot give us a snapshot — let the intent through.
+        # C++ engine remains the source of truth.
+        return None
+
+    arch_name, side_name = arch_side
+
+    if ofe_module is not None:
+        try:
+            perms = snap.wave.permissions
+            arch_enum = getattr(ofe_module.TradeArchetype, arch_name)
+            side_enum = getattr(ofe_module.TradeSide, side_name)
+            frac = perms.size_fraction(arch_enum, side_enum)
+            if frac <= 0.0:
+                return f"WAVE_DISABLED({arch_name}/{side_name})"
+        except Exception:
+            pass
+
+    try:
+        risk = snap.risk
+    except Exception:
+        return None
+
+    risk_mult = float(getattr(risk, "risk_multiplier", 1.0) or 0.0)
+    if risk_mult <= 0.0:
+        return "TIDE_CRISIS"
+
+    es_budget = float(getattr(risk, "es_budget", 0.0) or 0.0)
+    consumed = float(getattr(risk, "consumed_es", 0.0) or 0.0)
+    if es_budget > 0.0 and consumed >= es_budget:
+        return "ES_EXHAUSTED"
+
+    max_pos_usd = float(getattr(risk, "max_position_usd", 0.0) or 0.0)
+    if (max_pos_usd > 0.0
+            and abs(float(current_position_usd or 0.0)) >= max_pos_usd):
+        return "MAX_POSITION_EXCEEDED"
+
+    return None
 
 
 def ripple_decision_to_intent(decision, state_name: str = "",

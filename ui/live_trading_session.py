@@ -24,6 +24,12 @@ from data_feed import (
 )
 from data_feed.binance_futures_ws import run_binance_usdm_futures_ws_feed
 from data_feed.stream_health import FeedState, FeedStreamHealth
+from execution.models import (
+    compute_realized_vol_from_prices,
+    wave_snapshot_to_ofe,
+)
+from tide.tide_engine import TideEngine
+from wave.wave_engine import WaveEngine
 
 if TYPE_CHECKING:
     from ui.main_window import MainWindow
@@ -84,6 +90,16 @@ class LiveTradingSession:
     _BOOK_HEALTH_LOG_INTERVAL = 50
     _BUBBLE_DEAD_THRESHOLD_TICKS = 50
 
+    # Phase 14B — layered-strategy push cadences. UI timer fires every
+    # 100 ms, so the per-tick multipliers below resolve to wall-clock
+    # cadences that match `strategy.md` §5.3 + AGENT_STRATEGY_RULES.md
+    # §7.5. The Wave/Tide engines remain in event-time internally; this
+    # cadence is only the *push* throttle from Python → C++ engine.
+    _RV_PUSH_EVERY = 10     # 100 ms × 10 = 1 s — realized vol → engine
+    _WAVE_PUSH_EVERY = 50   # 100 ms × 50 = 5 s — Wave snapshot → engine
+    _TIDE_PUSH_EVERY = 600  # 100 ms × 600 = 60 s — Tide budget → engine
+    _RV_PRICE_BUF_LEN = 60  # rolling window for realized-vol estimate
+
     _FEED_BADGE_STYLES = {
         FeedState.LIVE: "color: #00cc66;",
         FeedState.STALE: "color: #ffaa00;",
@@ -129,6 +145,27 @@ class LiveTradingSession:
         # When set, ``on_timer_tick`` calls ``recorder.record_session_tick``
         # at end-of-tick with deterministic state scalars.
         self._recorder: Any = None
+
+        # Phase 14B — layered-strategy state. The C++ engine pulls real
+        # Tide budgets, Wave permissions, and realized vol via the three
+        # `RippleEngine` setters; without these calls the engine runs
+        # against `DefaultTideSnapshot` / `DefaultWaveSnapshot` for the
+        # entire session (V1 §22.2 #8 / #9 contract violation).
+        #
+        # Defaults are fine for V1: `TideConfig` ships with NEUTRAL bias
+        # and NORMAL vol_regime; `WaveConfig` ships with V1 thresholds
+        # documented in `wave/wave_engine.py`. Dynamic bias / vol_regime
+        # sourcing from macro data is V2 scope per strategy.md §23.
+        self._tide_engine: TideEngine = TideEngine()
+        self._wave_engine: WaveEngine = WaveEngine()
+        self._enable_layered_strategy: bool = True
+        self._rv_push_counter: int = 0
+        self._wave_push_counter: int = 0
+        self._tide_push_counter: int = 0
+        self._rv_price_buf: deque = deque(maxlen=self._RV_PRICE_BUF_LEN)
+        self._layered_pushes_tide: int = 0
+        self._layered_pushes_wave: int = 0
+        self._layered_pushes_rv: int = 0
 
     def attach_recorder(self, recorder: Any) -> None:
         """Phase 13B — attach a ``SessionRecorder`` so each timer tick
@@ -261,6 +298,87 @@ class LiveTradingSession:
             return False
         return strat_refreshed or not prev_visible
 
+    def _compute_realized_vol(self) -> float:
+        """Phase 14B — rolling realized vol from the last N trade prices
+        in ``_rv_price_buf``. Returns 0.0 if fewer than 2 prices have
+        arrived (cannot compute a stdev yet).
+
+        Thin wrapper around :func:`execution.models.compute_realized_vol_from_prices`
+        so the session and ``execution/live_runner.py`` share one
+        implementation.
+        """
+        return compute_realized_vol_from_prices(self._rv_price_buf)
+
+    def _push_layered_strategy(self) -> None:
+        """Phase 14B — push Tide budget, Wave snapshot, and realized vol
+        into the live C++ engine on the cadences defined by
+        ``_RV_PUSH_EVERY`` / ``_WAVE_PUSH_EVERY`` / ``_TIDE_PUSH_EVERY``.
+
+        Each setter is wrapped in its own try/except so a single
+        binding-error (e.g. the live engine was rebuilt with stale
+        bindings) cannot cascade and disable the others. Counts of
+        successful pushes are tracked on ``_layered_pushes_*`` for
+        diagnostics + tests.
+
+        Called exclusively from ``on_timer_tick``; this method does NOT
+        consult wall-clock time (the counter cadence is the only gate)
+        so the determinism contract (AGENT_STRATEGY_RULES.md §7.1) is
+        preserved.
+        """
+        if not self._enable_layered_strategy or not self._engine:
+            return
+        if ofe is None:
+            return
+        try:
+            ripple = self._engine.get_ripple()
+        except Exception as exc:
+            logger.warning("get_ripple failed (layered push skipped): %s", exc)
+            return
+
+        self._rv_push_counter += 1
+        self._wave_push_counter += 1
+        self._tide_push_counter += 1
+
+        last_ts = self._last_drained_trade_ts or self._latest_ws_trade_ts
+
+        if self._rv_push_counter >= self._RV_PUSH_EVERY:
+            self._rv_push_counter = 0
+            try:
+                rv = self._compute_realized_vol()
+                self._tide_engine.set_realized_vol(rv)
+                ripple.set_realized_vol(rv)
+                self._layered_pushes_rv += 1
+            except Exception as exc:
+                logger.warning("set_realized_vol failed: %s", exc)
+
+        if self._wave_push_counter >= self._WAVE_PUSH_EVERY:
+            self._wave_push_counter = 0
+            try:
+                tide_snap = self._tide_engine.get_snapshot()
+                wave_snap = self._wave_engine.get_snapshot(bias=tide_snap.bias)
+                if last_ts > 0:
+                    self._wave_engine.update(last_ts, bias=tide_snap.bias)
+                ofe_ws = wave_snapshot_to_ofe(wave_snap, ofe)
+                ripple.set_wave_snapshot(ofe_ws)
+                self._layered_pushes_wave += 1
+            except Exception as exc:
+                logger.warning("set_wave_snapshot failed: %s", exc)
+
+        if self._tide_push_counter >= self._TIDE_PUSH_EVERY:
+            self._tide_push_counter = 0
+            try:
+                if last_ts > 0:
+                    self._tide_engine.update(last_ts)
+                snap = self._tide_engine.get_snapshot()
+                ripple.set_risk_budget(
+                    snap.es_budget,
+                    snap.max_position_usd,
+                    snap.risk_multiplier,
+                )
+                self._layered_pushes_tide += 1
+            except Exception as exc:
+                logger.warning("set_risk_budget failed: %s", exc)
+
     def set_volume_profile_window(self, window_ms: int) -> None:
         if self._engine:
             self._engine.get_volume_profile().set_window(window_ms)
@@ -387,6 +505,14 @@ class LiveTradingSession:
                     mw._candle_view.process_trade(ts, price, qty, is_buy)
                 except Exception:
                     pass
+                if self._enable_layered_strategy:
+                    try:
+                        self._wave_engine.on_price(price, ts)
+                        self._rv_price_buf.append(price)
+                    except Exception as exc:
+                        drain_errors += 1
+                        if drain_errors <= 3:
+                            logger.warning("wave_engine.on_price error: %s", exc)
                 self._last_drained_trade_ts = ts
                 drained += 1
             if drain_errors > 0:
@@ -601,6 +727,15 @@ class LiveTradingSession:
             mw._strategy_dashboard.update_from_state()
             mw._strategy_dashboard.update()
         self._strat_was_visible = strat_visible
+
+        # Phase 14B — push the latest Tide/Wave/RV snapshots into the C++
+        # engine on the cadences in `strategy.md` §5.3 + AGENT_STRATEGY_RULES.md
+        # §7.5. Wrapped in try/except so a layered-strategy failure cannot
+        # break the live UI loop.
+        try:
+            self._push_layered_strategy()
+        except Exception:
+            logger.exception("layered-strategy push failed")
 
         elapsed = (time.monotonic() - t0) * 1000.0
         self._health.record_tick(elapsed)

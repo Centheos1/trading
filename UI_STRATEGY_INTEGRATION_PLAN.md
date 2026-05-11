@@ -1754,7 +1754,21 @@ changes is the data the manager consumes:
 | `ui/main_window.py` | `_on_ripple_received` already converts `RippleDecision` → `ExecutionIntent` (via `ripple_decision_to_intent`) for the paper path. Phase 14A makes the live path consume the same intent stream. The UI surface change is essentially zero — `Arm Execution` continues to gate, the diagnostics panel continues to show counts. The "live wiring" indicator from §15.1 should also reflect the routing topology (`signal-driven (legacy)` vs `ripple-driven (V1)`). |
 | `ui/strategy_dashboard_view.py` | Optional: a small "routing: ripple-driven" badge in the strategy panel. Cosmetic — not blocking V1. |
 
-### 15.3 Phase 11D / 11E / 11F — Status Unchanged
+### 15.3 Phase 14C — Live Risk-Gate Wiring `[COMPLETED 2026-05-12]`
+
+**UI-side impact: minor but operationally important.** The same
+`intent_risk_block_reason` gate that lives inside the headless runner
+also lives inside `ui/main_window.py::_on_ripple_received` (the
+`StrategyMode.LIVE` branch). The UI itself does not need a new
+widget; the gate operates silently and logs a `V1 §22.2 #12 gate
+blocked live intent: ...` warning when it fires.
+
+| File | UI-side change (shipped) |
+|---|---|
+| `ui/main_window.py` | Imports `intent_risk_block_reason`. The `StrategyMode.LIVE` branch of `_on_ripple_received` computes a coarse `current_position_usd = abs(exec_mgr.current_qty) * intent.reference_price`, runs the gate, and short-circuits with a warning log when blocked. Exits + cancels short-circuit the gate so risk-reducing flows are never suppressed. |
+| Diagnostics panel | No widget change required for V1. **Future polish (V1.1):** surface the most recent block reason / count to the operator on the strategy dashboard so suppressed live-trades are visible without grepping the log. Out of scope for V1 GA per `strategy.md` §22.3. |
+
+### 15.4 Phase 11D / 11E / 11F — Status Unchanged
 
 The deferred heatmap-cosmetics phases (§14.2 / §14.3 / §14.4) remain
 deferred per §14.5. They are **not** V1 closure work — `strategy.md`
