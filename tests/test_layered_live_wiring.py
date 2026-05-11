@@ -456,6 +456,99 @@ class TestLayeredPushStep(unittest.TestCase):
         self.assertEqual(len(ripple.risk_budget_calls), 0)
 
     @unittest.skipIf(ofe is None, "orderflow_engine module not built")
+    def test_counters_stall_on_get_ripple_failure(self):
+        """Regression — ``_layered_push_step`` used to increment the
+        cadence counters BEFORE the ``get_ripple()`` check, drifting
+        ahead of ``LiveTradingSession._push_layered_strategy`` (which
+        increments AFTER). A failure cluster followed by recovery
+        could fire a Wave/Tide push N iterations earlier than the UI
+        path. Counters must only advance when work was attempted."""
+        ripple = _SpyRipple()
+        engine = _SpyEngine(ripple=ripple, get_ripple_raises=True)
+        tide = _StubTideEngine()
+        wave = _StubWaveEngine()
+        buf = deque([100.0, 101.0], maxlen=60)
+        state: dict = {}
+
+        # 4 failed iterations (e.g. C++ engine handle briefly invalid).
+        for _ in range(4):
+            _layered_push_step(
+                state=state, engine=engine, tide_engine=tide,
+                wave_engine=wave, rv_price_buf=buf, ofe_module=ofe,
+                last_trade_ts_holder=[1_700_000_000_000])
+
+        # All three counters MUST still be 0 — pre-fix they would have
+        # advanced to 4 even though no push fired, then triggered a
+        # spurious early push on the first recovered iteration.
+        self.assertEqual(state.get("rv_counter", 0), 0)
+        self.assertEqual(state.get("wave_counter", 0), 0)
+        self.assertEqual(state.get("tide_counter", 0), 0)
+        self.assertEqual(len(ripple.realized_vol_calls), 0)
+        self.assertEqual(len(ripple.wave_snapshot_calls), 0)
+        self.assertEqual(len(ripple.risk_budget_calls), 0)
+
+        # Now recover: get_ripple() starts succeeding.
+        engine._get_ripple_raises = False
+        _layered_push_step(
+            state=state, engine=engine, tide_engine=tide,
+            wave_engine=wave, rv_price_buf=buf, ofe_module=ofe,
+            last_trade_ts_holder=[1_700_000_000_000])
+
+        # First recovered iteration: rv_counter rolls from 0→1, hits
+        # rv_every (=1), fires the RV push. Wave/Tide counters tick
+        # but do NOT cross their thresholds. Pre-fix the headless
+        # counters would have been 5 / 5 / 5 here and a spurious Wave
+        # push would have fired (5 >= wave_every=5).
+        self.assertEqual(state.get("rv_counter", 0), 0)  # reset after push
+        self.assertEqual(state.get("wave_counter", 0), 1)
+        self.assertEqual(state.get("tide_counter", 0), 1)
+        self.assertEqual(len(ripple.realized_vol_calls), 1)
+        self.assertEqual(len(ripple.wave_snapshot_calls), 0)
+        self.assertEqual(len(ripple.risk_budget_calls), 0)
+
+    @unittest.skipIf(ofe is None, "orderflow_engine module not built")
+    def test_counter_parity_with_ui_path_after_failure_cluster(self):
+        """Cross-path invariant: after the same sequence of (FAIL × N
+        then OK × M) iterations, the headless ``_layered_push_step``
+        must produce the same push counts as the UI's
+        ``_push_layered_strategy`` would.
+
+        The pre-fix headless path would have fired a Wave push within
+        the first 5 successful iterations of recovery (because the
+        counter was drifted up by N during the failure cluster); the
+        UI path would not. This test pins them to agree."""
+        ripple = _SpyRipple()
+        engine = _SpyEngine(ripple=ripple, get_ripple_raises=True)
+        tide = _StubTideEngine()
+        wave = _StubWaveEngine()
+        buf = deque([100.0, 101.0], maxlen=60)
+        state: dict = {}
+
+        # 3-iteration failure cluster.
+        for _ in range(3):
+            _layered_push_step(
+                state=state, engine=engine, tide_engine=tide,
+                wave_engine=wave, rv_price_buf=buf, ofe_module=ofe,
+                last_trade_ts_holder=[1_700_000_000_000])
+
+        # Recover and run 4 successful iterations (NOT yet 5 — the
+        # cadence threshold). Pre-fix the wave counter would have been
+        # 3 (FAIL drift) + 4 (success) = 7 → spurious wave push fired
+        # at iteration 5 of recovery. Post-fix the wave counter is
+        # only 4 → no push yet.
+        engine._get_ripple_raises = False
+        for _ in range(4):
+            _layered_push_step(
+                state=state, engine=engine, tide_engine=tide,
+                wave_engine=wave, rv_price_buf=buf, ofe_module=ofe,
+                last_trade_ts_holder=[1_700_000_000_000])
+
+        self.assertEqual(len(ripple.realized_vol_calls), 4)
+        self.assertEqual(len(ripple.wave_snapshot_calls), 0)
+        self.assertEqual(len(ripple.risk_budget_calls), 0)
+        self.assertEqual(state.get("wave_counter", 0), 4)
+
+    @unittest.skipIf(ofe is None, "orderflow_engine module not built")
     def test_per_setter_exception_isolated(self):
         """A failure on one setter must not suppress the other two."""
         ripple = _SpyRipple()

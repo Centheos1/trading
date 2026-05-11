@@ -67,15 +67,25 @@ def _layered_push_step(
         compute_realized_vol_from_prices, wave_snapshot_to_ofe,
     )
 
-    state["rv_counter"] = state.get("rv_counter", 0) + 1
-    state["wave_counter"] = state.get("wave_counter", 0) + 1
-    state["tide_counter"] = state.get("tide_counter", 0) + 1
-
+    # Phase 14B note: counter increments MUST come AFTER the
+    # ``get_ripple()`` check so a transient binding/handle failure
+    # does not drift the cadence relative to ``LiveTradingSession.
+    # _push_layered_strategy`` (which has the same invariant). If we
+    # incremented before the check, a cluster of N failed
+    # ``get_ripple()`` calls would advance the headless counters by N
+    # without firing any pushes, then trigger a spurious early push on
+    # the first recovered iteration — putting the two live entry
+    # points permanently out of phase. See
+    # `tests/test_layered_live_wiring.py::test_counters_stall_on_get_ripple_failure`.
     try:
         ripple = engine.get_ripple()
     except Exception as exc:
         logger.warning("get_ripple failed (layered push skipped): %s", exc)
         return
+
+    state["rv_counter"] = state.get("rv_counter", 0) + 1
+    state["wave_counter"] = state.get("wave_counter", 0) + 1
+    state["tide_counter"] = state.get("tide_counter", 0) + 1
 
     last_ts = int(last_trade_ts_holder[0]) if last_trade_ts_holder else 0
 
