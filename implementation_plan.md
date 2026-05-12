@@ -3094,7 +3094,8 @@ evaluated before Phase 17 work begins.
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
-| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING` | §9.10, §23 | Phase 7V (DONE) |
+| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `NOT STARTED` | — | None (infrastructure prerequisite) |
+| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (blocked by Phase 16P)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (NOT STARTED) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
 | **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
@@ -3211,7 +3212,77 @@ test case to `test_replay_determinism.py` verifying this.
 
 ---
 
+### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[NOT STARTED]`
+
+**Objective.** The Phase 16 HMM A/B campaign requires ≥ 30 days of continuous tick data (trades + L2 depth) per symbol. Running `main.py` in `data` mode on a developer laptop for 30+ days is not viable. Phase 16P makes the data collection path deployment-ready for a headless Linux EC2 instance with data persisted to AWS S3.
+
+**Why S3 and not direct cloud HDF5.** The C++ `TickStore` writes to a local HDF5 file via `libhdf5`. Rewriting it for direct S3 I/O would require significant C++ work and is out of scope. The correct pattern is: write to a local EBS volume → sync the HDF5 file to S3 hourly via cron → download to the developer machine before running the HMM campaign locally.
+
+**Phase 16P is not a strategy change.** Nothing in `strategy.md`, the Tide/Wave/Ripple pipeline, or any execution path is touched. This phase is purely operational infrastructure.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `collect_ticks.py` | **NEW** — Non-interactive CLI entrypoint for headless data collection. Args: `--symbol` (default `BTCUSDT`), `--exchange` (default `binance`), `--futures` (flag, default true), `--duration` (seconds, 0 = until Ctrl+C / SIGTERM), `--s3-bucket` (optional; if set, uploads HDF5 to S3 on clean exit), `--s3-key` (default `data/binance_ticks.h5`), `--log-level` (default `INFO`). Replaces the interactive `main.py` prompt chain for the `data → ticks` path. Handles `SIGTERM` gracefully (same as `KeyboardInterrupt` — flush, close, upload). |
+| `requirements-collector.txt` | **NEW** — Stripped dependency set for EC2 (no Qt, no matplotlib, no oandapyV20). Includes: `websockets`, `requests`, `h5py`, `numpy`, `python-binance`, `python-dotenv`, `boto3`. |
+| `backtestingCpp/orderflow/build.sh` | **MODIFY** — Add Linux code path: detect `$(uname)`, use `/usr/local` prefix on Linux instead of `/opt/homebrew`. Remove `-DCMAKE_PREFIX_PATH="/opt/homebrew"` on Linux. Add `nproc` fallback already present; ensure `sysctl` is only called on macOS. |
+| `backtestingCpp/orderflow/CMakeLists.txt` | **MODIFY** — Wrap `set(HOMEBREW_PREFIX "/opt/homebrew")` and `list(PREPEND ...)` in `if(APPLE)` guard. On Linux, rely on standard `find_package` search paths (`/usr`, `/usr/local`). |
+| `scripts/setup_ec2.sh` | **NEW** — Full EC2 bootstrap script for Ubuntu 24.04. Steps: `apt-get update`, install `build-essential cmake libhdf5-dev libboost-dev libssl-dev nlohmann-json3-dev python3 python3-venv python3-dev`; clone/pull repo; create `.venv`; `pip install -r requirements-collector.txt`; build C++ engine via `build.sh`; create `data/` and `logs/` dirs; install `systemd` service. |
+| `scripts/collector.service` | **NEW** — systemd unit file. `[Service] Type=simple`, `Restart=on-failure`, `RestartSec=30`, `ExecStart=/app/.venv/bin/python /app/collect_ticks.py --symbol BTCUSDT --s3-bucket ${S3_BUCKET} --log-level INFO`. `EnvironmentFile=/app/.env`. `StandardOutput=journal`, `StandardError=journal`. |
+| `scripts/s3_sync.sh` | **NEW** — Cron-compatible sync script. Runs `aws s3 cp data/binance_ticks.h5 s3://${S3_BUCKET}/ticks/binance_ticks.h5 --only-show-errors`. Checks exit code and logs to `logs/s3_sync.log`. Designed to be called from `/etc/cron.hourly/` or a systemd timer. |
+| `scripts/download_ticks.sh` | **NEW** — Developer-side download helper. `aws s3 cp s3://${S3_BUCKET}/ticks/binance_ticks.h5 data/binance_ticks.h5`. Used before running `tools/hmm_abtest.py` locally. |
+| `scripts/add_symbol.sh` | **NEW** — Helper to start collecting a second symbol (e.g. ETHUSDT) as a second systemd service instance. Instantiates `collector@ETHUSDT.service` from a template unit. |
+| `docs/DEPLOYMENT.md` | **NEW** — Step-by-step deployment guide: EC2 instance selection, IAM role, EBS sizing, running `setup_ec2.sh`, enabling the service, setting up the hourly S3 sync cron, and downloading data to dev machine. |
+
+**Recommended EC2 configuration.**
+
+| Parameter | Value | Rationale |
+|---|---|---|
+| Instance type | `t3.small` (2 vCPU, 2 GB RAM) | Data collection is I/O-bound, not compute-bound |
+| OS | Ubuntu 24.04 LTS | Matches Phase 9 deployment target |
+| Root volume | EBS `gp3` 30 GB | HDF5 grows ~200–400 MB/day at 2 symbols × 2 streams |
+| S3 bucket | Standard storage class, versioning enabled | Versioning protects against accidental overwrites |
+| IAM | EC2 instance profile with `s3:PutObject` + `s3:GetObject` on the specific bucket prefix — no access keys in code or env files |
+| S3 sync frequency | Hourly via `/etc/cron.hourly/` | Limits data loss window to 1 hour on instance failure |
+
+**Acceptance criteria.**
+
+1. `python collect_ticks.py --symbol BTCUSDT --duration 60` runs for 60 s headlessly on both macOS and Ubuntu 24.04, collects trades and depth, writes to `data/binance_ticks.h5`, exits 0 with `flush + close` logged.
+2. `python collect_ticks.py --symbol BTCUSDT --duration 60 --s3-bucket my-bucket` uploads the HDF5 to S3 on clean exit; `aws s3 ls s3://my-bucket/ticks/` confirms the file.
+3. `SIGTERM` to the collector process triggers graceful shutdown (flush → close → S3 upload if `--s3-bucket` set) within 10 s.
+4. `scripts/setup_ec2.sh` runs end-to-end on a clean Ubuntu 24.04 EC2 instance without manual intervention and leaves a working `collect_ticks.py` invocation.
+5. `systemctl start collector` starts the service; `systemctl status collector` shows `active (running)`; `journalctl -u collector -f` shows trade/depth count log lines every 10 s.
+6. After 1 hour, `scripts/s3_sync.sh` (run from cron) uploads the HDF5; `scripts/download_ticks.sh` on the developer machine retrieves it; `python -c "import h5py; print(list(h5py.File('data/binance_ticks.h5').keys()))"` confirms BTCUSDT group present.
+7. C++ build (`build.sh`) completes without errors on Ubuntu 24.04 with only `apt`-installed dependencies (no Homebrew).
+8. Existing macOS build (`build.sh`) continues to work unchanged — the Linux path is an additive branch.
+
+**Phase 16 real-data campaign procedure (after Phase 16P is DONE).**
+
+Once the EC2 collector has been running for ≥ 30 days with ≥ 2 symbols:
+
+```bash
+# 1. Download latest tick data to dev machine
+bash scripts/download_ticks.sh
+
+# 2. Run the real Phase 16 campaign
+source .venv/bin/activate
+python tools/hmm_abtest.py \
+    --symbols BTCUSDT,ETHUSDT \
+    --windows 30d,60d \
+    --seed 42
+
+# 3. Copy the CampaignVerdict block from reports/hmm_campaign_summary_*.md
+#    and paste it into implementation_plan.md §7.2, replacing the
+#    "to be recorded" block. Then flip Phase 16 status to [DONE — YYYY-MM-DD].
+#    If promote: true, Phase 17 is unblocked.
+```
+
+---
+
 ### Phase 16 — HMM A/B Campaign at Scale `[HARNESS DELIVERED 2026-05-12 — CAMPAIGN RECORDING PENDING]`
+
+> **Blocked by Phase 16P.** The campaign harness is fully built and smoke-tested (dry-run verified 2026-05-12). Recording the real `CampaignVerdict` requires ≥ 30 days of live tick data, which requires Phase 16P (EC2 / S3 infrastructure) to be deployed first. Phase 17 stays hard-gated until the real verdict is recorded.
 
 > **Status nuance — read this first.** Phase 16 is split into two
 > halves: *(a) the campaign harness*, which is software (CLI flags,
@@ -3906,8 +3977,9 @@ config-driven (§20), and `num_trades` is a Pareto objective (§22.2 #15).
 
 **Outstanding for V2 GA (see §7.2 for detailed phase specs):**
 - Phase 15 ✅ — LIMIT / OCO / partial-fill order types in `BinanceBroker` and `PaperEngine` (2026-05-12).
-- Phase 16 ⬜ — HMM A/B campaign at scale: **harness delivered 2026-05-12** (`hmm/abtest.py::run_campaign`/`aggregate_verdict`/`CampaignVerdict` + `tools/hmm_abtest.py --symbols/--windows/--seed/--verdict-threshold/--config-path/--now/--dry-run`); campaign recording pending — needs a real-data run + `CampaignVerdict` paste-back into §7.2 before Phase 17 can begin.
-- Phase 17 ⬜ — HMM-based Wave regime classifier (gates on Phase 16 verdict).
+- Phase 16P ⬜ — EC2 / S3 tick data collection infrastructure. **Blocker for Phase 16 real-data campaign.** Requires Linux-aware C++ build (`build.sh` + `CMakeLists.txt`), non-interactive `collect_ticks.py` CLI, `requirements-collector.txt`, systemd service, hourly S3 sync cron, `setup_ec2.sh`, and `docs/DEPLOYMENT.md`. Spec: §7.2 Phase 16P.
+- Phase 16 🟡 — HMM A/B campaign harness delivered 2026-05-12. Real-data `CampaignVerdict` recording **blocked by Phase 16P** (need ≥ 30 days continuous tick data from EC2 before `tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT --windows 30d,60d --seed 42` can run meaningfully). Phase 17 hard-gated until verdict recorded.
+- Phase 17 ⬜ — HMM-based Wave regime classifier (hard-gated on Phase 16 real-data verdict).
 - Phase 18 ⬜ — Cross-venue features inside C++ Ripple (today Python WaveEngine only).
 - Phase 19 ⬜ — Hierarchical ES decomposition (Euler) — currently single global ES bucket.
 - Phase 20 ⬜ — Liquidity-map logistic hold/break calibration — currently deterministic thresholds.
