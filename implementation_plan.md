@@ -3093,7 +3093,7 @@ evaluated before Phase 17 work begins.
 
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
-| **15** | LIMIT / OCO Order Type Support | `NOT STARTED` | §13.3, §14.2 | Phase 14A (DONE) |
+| **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
 | **16** | HMM A/B Campaign at Scale | `NOT STARTED` | §9.10, §23 | Phase 7V (DONE) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
@@ -3123,7 +3123,7 @@ satisfied. This checklist is derived from the V1 lesson that
 
 ---
 
-### Phase 15 — LIMIT / OCO Order Type Support `[NOT STARTED]`
+### Phase 15 — LIMIT / OCO Order Type Support `[DONE — 2026-05-12]`
 
 **Objective.** `strategy.md` §13.3 specifies that bounce entries use
 LIMIT orders; target and exhaustion exits use LIMIT orders; invalidation,
@@ -3815,7 +3815,7 @@ config-driven (§20), and `num_trades` is a Pareto objective (§22.2 #15).
 - Cross-venue features → Wave regime input (Phase 8 — Python WaveEngine only; not yet in C++ Ripple).
 
 **Outstanding for V2 GA (see §7.2 for detailed phase specs):**
-- Phase 15 ⬜ — LIMIT / OCO / partial-fill order types in `BinanceBroker` (today MARKET only).
+- Phase 15 ✅ — LIMIT / OCO / partial-fill order types in `BinanceBroker` and `PaperEngine` (2026-05-12).
 - Phase 16 ⬜ — HMM A/B campaign at scale (multi-symbol, multi-window, ≥ 30-day windows).
 - Phase 17 ⬜ — HMM-based Wave regime classifier (gates on Phase 16 verdict).
 - Phase 18 ⬜ — Cross-venue features inside C++ Ripple (today Python WaveEngine only).

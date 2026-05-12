@@ -27,6 +27,23 @@ class OrderStatus(Enum):
     REJECTED = "REJECTED"
 
 
+class OrderLifecycle(Enum):
+    """Phase 15 — lifecycle states for LIMIT and OCO orders."""
+    OPEN = "OPEN"
+    PARTIAL = "PARTIAL"
+    CANCELLED = "CANCELLED"
+    FILLED = "FILLED"
+
+
+class ExitType(Enum):
+    """Phase 15 — exit type carried on ExecutionIntent for order-type routing."""
+    INVALIDATION = "INVALIDATION"
+    TARGET = "TARGET"
+    EXHAUSTION = "EXHAUSTION"
+    TIME = "TIME"
+    RISK_BUDGET = "RISK_BUDGET"
+
+
 class SizingMode(Enum):
     FIXED_QTY = "fixed_qty"
     FIXED_NOTIONAL = "fixed_notional"
@@ -156,6 +173,9 @@ class ExecutionIntent:
     reason: str = ""
     state_summary: str = ""
     wall_id: int = 0
+    # Phase 15 — order-type routing fields
+    urgency: str = "NORMAL"     # "IMMEDIATE" | "NORMAL"
+    exit_type: Optional[ExitType] = None  # set on exit intents
 
 
 @dataclass
@@ -173,6 +193,11 @@ class Order:
     signal_type: str = ""
     error_message: str = ""
     ripple_reason: str = ""
+    # Phase 15 — LIMIT / OCO fields
+    price: float = 0.0                  # limit price (0.0 for MARKET)
+    limit_order_id: str = ""            # OCO sibling cross-reference
+    lifecycle: OrderLifecycle = OrderLifecycle.FILLED  # default for MARKET orders
+    placed_ms: int = 0                  # event-time when order was placed (for timeout)
 
 
 @dataclass

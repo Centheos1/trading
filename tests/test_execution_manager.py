@@ -84,7 +84,8 @@ class StubBroker(BrokerInterface):
 
     async def place_order(self, symbol: str, side: OrderSide,
                           quantity: float,
-                          order_type: OrderType = OrderType.MARKET) -> Order:
+                          order_type: OrderType = OrderType.MARKET,
+                          price: float = 0.0) -> Order:
         if self.next_place_order is not None:
             order = self.next_place_order
             self.next_place_order = None
@@ -101,6 +102,16 @@ class StubBroker(BrokerInterface):
 
     async def cancel_order(self, symbol: str, broker_order_id: str) -> bool:
         return self.cancel_returns
+
+    async def place_oco(self, symbol: str, side: OrderSide,
+                        quantity: float, target_price: float,
+                        stop_price: float):
+        target = Order(symbol=symbol, side=side, quantity=quantity,
+                       order_type=OrderType.LIMIT, status=OrderStatus.SUBMITTED)
+        stop_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+        stop = Order(symbol=symbol, side=stop_side, quantity=quantity,
+                     order_type=OrderType.MARKET, status=OrderStatus.SUBMITTED)
+        return target, stop
 
     async def get_open_orders(self, symbol: str) -> List[Order]:
         return []

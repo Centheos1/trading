@@ -462,6 +462,8 @@ class RippleConfig:
     wall_cancel_window: int = 20
     state_activation_threshold: float = 0.6
     state_margin: float = 0.15
+    # Phase 15 — LIMIT price validation band (σ from microprice)
+    limit_price_band_sigma: float = 3.0
 
 
 @dataclass
@@ -482,6 +484,8 @@ class ExecutionConfig:
     bounce_order_type: str = "LIMIT"
     breakout_order_type: str = "MARKET"
     slippage_tolerance_bps: float = 5.0
+    # Phase 15 — LIMIT / OCO order parameters
+    limit_timeout_ms: int = 30_000  # cancel OPEN LIMIT after this event-time age
 
 
 @dataclass

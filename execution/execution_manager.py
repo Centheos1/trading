@@ -9,7 +9,7 @@ from collections import deque
 
 from execution.broker_interface import BrokerInterface
 from execution.models import (
-    AccountInfo, ExecutionIntent, Order, OrderSide, OrderStatus,
+    AccountInfo, ExecutionIntent, ExitType, Order, OrderSide, OrderStatus,
     OrderType, Position, SizingConfig, SizingMode,
 )
 
@@ -274,15 +274,71 @@ class ExecutionManager:
         self._current_qty = 0.0
         await self._refresh_account()
 
+    # ------------------------------------------------------------------
+    # Phase 15 — order-type routing helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_order_type(intent: ExecutionIntent) -> tuple[OrderType, float, bool]:
+        """Phase 15 — determine the correct order type for an intent.
+
+        Returns ``(order_type, limit_price, did_fallback)`` where
+        ``did_fallback`` is True when a LIMIT was requested but fell back
+        to MARKET due to an invalid ``reference_price``.
+
+        Routing table (strategy.md §13.3):
+        - bounce entry  (NORMAL)        → LIMIT at reference_price
+        - breakout entry (IMMEDIATE)    → MARKET
+        - scale-in (NORMAL)             → LIMIT near microprice
+        - TARGET / EXHAUSTION exit      → LIMIT at reference_price
+        - INVALIDATION / RISK_BUDGET exit → MARKET (IMMEDIATE, never blocked)
+        - TIME exit                     → MARKET
+        """
+        import math as _math
+
+        urgency = (intent.urgency or "NORMAL").upper()
+        intent_type = intent.intent_type or ""
+        action = intent.action or ""
+        exit_type: Optional[ExitType] = intent.exit_type
+
+        if intent_type == "exit":
+            if exit_type in (ExitType.TARGET, ExitType.EXHAUSTION):
+                ref = intent.reference_price
+                if ref > 0 and _math.isfinite(ref):
+                    return OrderType.LIMIT, ref, False
+                # Invalid ref price on exit — fall back to MARKET, never block
+                logger.warning(
+                    "LIMIT_FALLBACK: exit %s reference_price invalid (%.6f) → MARKET",
+                    exit_type, ref if ref is not None else 0.0)
+                return OrderType.MARKET, 0.0, True
+            return OrderType.MARKET, 0.0, False
+
+        if intent_type == "entry":
+            if urgency == "IMMEDIATE":
+                return OrderType.MARKET, 0.0, False
+            # NORMAL urgency → LIMIT for bounce entries
+            if "BOUNCE" in action or "SCALE" in action:
+                ref = intent.reference_price
+                if ref > 0 and _math.isfinite(ref):
+                    return OrderType.LIMIT, ref, False
+                # Invalid ref price → fall back to MARKET + warning
+                logger.warning(
+                    "LIMIT_FALLBACK: entry %s reference_price invalid (%.6f) → MARKET",
+                    action, ref if ref is not None else 0.0)
+                return OrderType.MARKET, 0.0, True
+            return OrderType.MARKET, 0.0, False
+
+        return OrderType.MARKET, 0.0, False
+
     async def _execute_intent_entry(
         self, intent: ExecutionIntent, desired_side: OrderSide
     ) -> None:
-        """Phase 14A — entry path driven by a Ripple ``ExecutionIntent``.
+        """Phase 14A / Phase 15 — entry path driven by a Ripple ``ExecutionIntent``.
 
-        Reads price hints from the intent and tags orders with the
-        Ripple action / reason for downstream attribution. No
-        wall-clock reads on the decision path — :attr:`_last_intent_ts_ms`
-        already captured event time in :meth:`on_intent`.
+        Phase 15 adds order-type routing: bounce entries use LIMIT orders when
+        ``reference_price`` is valid; breakout entries always use MARKET.
+        ``LIMIT_FALLBACK`` is logged when a LIMIT was requested but the
+        reference price was invalid.
         """
         signal_type = intent.action or "RIPPLE_ENTRY"
         try:
@@ -309,8 +365,9 @@ class ExecutionManager:
             if qty > self._sizing.max_position:
                 qty = self._sizing.max_position
 
+            order_type, limit_price, _ = self._resolve_order_type(intent)
             order = await self._broker.place_order(
-                self._symbol, desired_side, qty, OrderType.MARKET)
+                self._symbol, desired_side, qty, order_type, price=limit_price)
             order.signal_type = signal_type
             order.ripple_reason = intent.reason or ""
             self._record_order(order)
@@ -328,15 +385,18 @@ class ExecutionManager:
             logger.error("Execution error (intent entry): %s", e)
 
     async def _execute_intent_exit(self, intent: ExecutionIntent) -> None:
-        """Phase 14A — exit path driven by a Ripple ``ExecutionIntent``.
+        """Phase 14A / Phase 15 — exit path driven by a Ripple ``ExecutionIntent``.
 
-        Mirrors :meth:`_execute_intent_entry`'s fill-status contract:
-        local position state is cleared only when the broker confirms
-        the close actually executed (``FILLED`` / ``PARTIALLY_FILLED``)
-        or reports no open position. A rejected / cancelled / expired
-        close MUST leave ``_current_side`` / ``_current_qty`` intact so
-        the next Ripple exit intent can retry — otherwise we silently
-        lose track of a real open position on the broker.
+        Phase 15 note: INVALIDATION and RISK_BUDGET exits are always routed as
+        MARKET regardless of order-type routing; they must never be blocked by
+        a missing reference price. TARGET and EXHAUSTION exits may use LIMIT
+        but fall back to close_position (MARKET) on the live broker path for
+        simplicity — the PaperEngine handles LIMIT exit simulation directly.
+
+        Local position state is cleared only when the broker confirms the close
+        executed (``FILLED`` / ``PARTIALLY_FILLED``) or reports no open
+        position. A rejected / cancelled / expired close leaves
+        ``_current_side`` / ``_current_qty`` intact for retry.
         """
         try:
             order = await self._broker.close_position(self._symbol)

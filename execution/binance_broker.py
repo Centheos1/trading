@@ -3,13 +3,13 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
 from execution.broker_interface import BrokerInterface
 from execution.models import (
-    AccountInfo, Order, OrderSide, OrderStatus, OrderType, Position,
+    AccountInfo, Order, OrderLifecycle, OrderSide, OrderStatus, OrderType, Position,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,11 +103,18 @@ class BinanceBroker(BrokerInterface):
         side: OrderSide,
         quantity: float,
         order_type: OrderType = OrderType.MARKET,
+        price: float = 0.0,
     ) -> Order:
-        order = Order(symbol=symbol, side=side, quantity=quantity, order_type=order_type)
+        """Phase 15 — routes LIMIT orders with ``price`` + ``timeInForce=GTC``."""
+        order = Order(
+            symbol=symbol, side=side, quantity=quantity,
+            order_type=order_type, price=price,
+            lifecycle=OrderLifecycle.OPEN if order_type == OrderType.LIMIT else OrderLifecycle.FILLED,
+        )
         if not self._client:
             order.status = OrderStatus.REJECTED
             order.error_message = "Not connected"
+            self._sync_lifecycle(order)
             return order
 
         try:
@@ -115,15 +122,26 @@ class BinanceBroker(BrokerInterface):
             if rounded_qty <= 0:
                 order.status = OrderStatus.REJECTED
                 order.error_message = f"Quantity {quantity} rounds to 0 for {symbol}"
+                self._sync_lifecycle(order)
                 return order
 
-            params = dict(
+            params: Dict[str, str] = dict(
                 symbol=symbol,
                 side=side.value,
                 type=order_type.value,
                 quantity=str(rounded_qty),
                 newOrderRespType="RESULT",
             )
+            if order_type == OrderType.LIMIT:
+                if price <= 0:
+                    logger.warning("LIMIT order requested with price<=0; falling back to MARKET")
+                    params["type"] = OrderType.MARKET.value
+                    order.order_type = OrderType.MARKET
+                    order.lifecycle = OrderLifecycle.FILLED
+                else:
+                    params["price"] = str(price)
+                    params["timeInForce"] = "GTC"
+
             logger.info("Placing order: %s", params)
             result = await self._client.futures_create_order(**params)
 
@@ -138,16 +156,75 @@ class BinanceBroker(BrokerInterface):
             if order.status == OrderStatus.SUBMITTED and order.fill_quantity == 0:
                 await self._poll_order_fill(order, symbol)
 
-            logger.info("Order %s: id=%s price=%.2f qty=%.6f",
+            self._sync_lifecycle(order)
+            logger.info("Order %s: id=%s price=%.2f qty=%.6f lifecycle=%s",
                         order.status.value, order.broker_order_id,
-                        order.fill_price, order.fill_quantity)
+                        order.fill_price, order.fill_quantity, order.lifecycle.value)
             return order
 
         except Exception as e:
             order.status = OrderStatus.REJECTED
             order.error_message = str(e)
+            self._sync_lifecycle(order)
             logger.error("place_order failed: %s", e)
             return order
+
+    async def place_oco(
+        self,
+        symbol: str,
+        side: OrderSide,
+        quantity: float,
+        target_price: float,
+        stop_price: float,
+    ) -> Tuple[Order, Order]:
+        """Phase 15 — OCO pair: LIMIT target + STOP_MARKET stop-loss.
+
+        Places two independent orders and cross-references them via
+        ``limit_order_id``. On either leg filling, the caller must cancel the
+        sibling via :meth:`cancel_order`.
+        """
+        target_order = await self.place_order(
+            symbol, side, quantity, OrderType.LIMIT, price=target_price)
+        stop_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+        stop_order = Order(
+            symbol=symbol, side=stop_side, quantity=quantity,
+            order_type=OrderType.MARKET, price=stop_price,
+            lifecycle=OrderLifecycle.OPEN,
+        )
+        if not self._client:
+            stop_order.status = OrderStatus.REJECTED
+            stop_order.error_message = "Not connected"
+            self._sync_lifecycle(stop_order)
+        else:
+            try:
+                rounded_qty = self._round_quantity(symbol, quantity)
+                params: Dict[str, str] = dict(
+                    symbol=symbol,
+                    side=stop_side.value,
+                    type="STOP_MARKET",
+                    quantity=str(rounded_qty),
+                    stopPrice=str(stop_price),
+                    newOrderRespType="RESULT",
+                )
+                result = await self._client.futures_create_order(**params)
+                stop_order.broker_order_id = str(result.get("orderId", ""))
+                stop_order.status = self._map_status(result.get("status", ""))
+                stop_order.fill_quantity = _safe_float(result.get("executedQty"))
+                self._sync_lifecycle(stop_order)
+            except Exception as e:
+                stop_order.status = OrderStatus.REJECTED
+                stop_order.error_message = str(e)
+                self._sync_lifecycle(stop_order)
+                logger.error("place_oco stop leg failed: %s", e)
+
+        if target_order.broker_order_id:
+            stop_order.limit_order_id = target_order.broker_order_id
+        if stop_order.broker_order_id:
+            target_order.limit_order_id = stop_order.broker_order_id
+
+        logger.info("OCO placed: target=%s stop=%s",
+                    target_order.broker_order_id, stop_order.broker_order_id)
+        return target_order, stop_order
 
     async def _poll_order_fill(self, order: Order, symbol: str, max_attempts: int = 5) -> None:
         import asyncio
@@ -160,6 +237,7 @@ class BinanceBroker(BrokerInterface):
                 order.status = self._map_status(result.get("status", ""))
                 order.fill_price = _safe_float(result.get("avgPrice"))
                 order.fill_quantity = _safe_float(result.get("executedQty"))
+                self._sync_lifecycle(order)
                 if order.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
                     return
             except Exception as e:
@@ -175,6 +253,19 @@ class BinanceBroker(BrokerInterface):
         except Exception as e:
             logger.error("cancel_order failed: %s", e)
             return False
+
+    @staticmethod
+    def _sync_lifecycle(order: Order) -> None:
+        """Phase 15 — keep ``lifecycle`` in step with ``status`` after a poll."""
+        if order.status == OrderStatus.FILLED:
+            order.lifecycle = OrderLifecycle.FILLED
+        elif order.status == OrderStatus.PARTIALLY_FILLED:
+            order.lifecycle = OrderLifecycle.PARTIAL
+        elif order.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
+            order.lifecycle = OrderLifecycle.CANCELLED
+        elif order.status in (OrderStatus.SUBMITTED, OrderStatus.PENDING):
+            if order.lifecycle not in (OrderLifecycle.PARTIAL,):
+                order.lifecycle = OrderLifecycle.OPEN
 
     async def get_open_orders(self, symbol: str) -> List[Order]:
         if not self._client:
