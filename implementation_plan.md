@@ -3071,217 +3071,455 @@ faithful order-type routing, hierarchical risk decomposition, and
 calibrated liquidity models. All V2 phases target the items explicitly
 listed as V2 scope in `strategy.md` §23.
 
+**V2 guard rails (apply to every phase 15–20):**
+
+- `strategy.md` is the source of truth. If a phase spec conflicts with
+  `strategy.md`, update the spec, not the strategy.
+- V2 features are **opt-in only**. Every new capability must be behind
+  a config flag whose default preserves V1 behaviour identically.
+- The Tide → Wave → Ripple boundary is inviolable: Tide allocates risk
+  only; Wave filters/permits only; Ripple makes the only execution
+  decision; `ExecutionManager`/Broker execute intents and mirror live
+  risk gates.
+- **No wall-clock time in trading decision logic.**
+- **Exits must never be blocked by entry-only risk gates.**
+- **No unbounded hot-path buffers.**
+- All phase specs must include a "Wired live?" acceptance row, grep
+  gates, replay determinism tests, and a "default/off path" assertion.
+
 **V2 GA gate:** Phases 15–20 all complete. Phase 16 campaign verdict
-(`CampaignVerdict.promote`) must be evaluated before Phase 17 begins;
-see gate note in Phase 17.
+(`CampaignVerdict.promote`) must be recorded in this document and
+evaluated before Phase 17 work begins.
 
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
-| **15** | LIMIT / OCO Order Type Support | `NOT STARTED` | §22.1, §13.3.2 | Phase 14A (DONE) |
+| **15** | LIMIT / OCO Order Type Support | `NOT STARTED` | §13.3, §14.2 | Phase 14A (DONE) |
 | **16** | HMM A/B Campaign at Scale | `NOT STARTED` | §9.10, §23 | Phase 7V (DONE) |
-| **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 verdict |
+| **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
 | **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
 | **20** | Liquidity-Map Logistic Hold/Break Calibration | `NOT STARTED` | §10.3, §23 | Phase 3 (DONE) + labelled data |
 
 ---
 
+### V2 Phase Completion Checklist
+
+Every V2 phase (15–20) is **NOT DONE** until all of the following are
+satisfied. This checklist is derived from the V1 lesson that
+"unit-test complete ≠ phase complete" (`AGENT_STRATEGY_RULES.md §3.5`).
+
+| # | Requirement | How to Verify |
+|---|---|---|
+| 1 | **Docs updated** | `strategy.md` unchanged (or updated if spec drifts); `implementation_plan.md` phase status updated to `DONE`; `TESTING_GUIDE.md §19.1` table updated. |
+| 2 | **Unit tests added** | New test file(s) in `tests/` and/or `backtestingCpp/.../tests/` covering all new code paths. |
+| 3 | **Wiring tests added** | A test that instantiates `live_runner.py` or `live_trading_session.py` (or a stub equivalent) and asserts the new API surface is called on the engine. |
+| 4 | **Runtime wiring proven** | `grep -r "<new_api>" execution/ ui/` returns ≥ 1 production-code hit outside `tests/`. |
+| 5 | **Replay determinism verified** | Existing `test_replay_determinism.py` passes unchanged; if the phase affects decisions, a new replay test case is added. |
+| 6 | **Default fallback verified** | A test asserts that with the new feature's config flag at its default (`False` / empty), outputs are byte-identical to the V1 baseline. |
+| 7 | **No skipped acceptance tests** | Every numbered acceptance criterion in the phase spec has a corresponding passing test. |
+| 8 | **Grep gate included** | Phase spec includes a `grep` command that must return at least one production-code hit for each new API. |
+| 9 | **A/B metric gate (model phases)** | For Phases 16, 17, 20: a quantitative comparison shows the new path is ≥ deterministic baseline on at least one defined metric. |
+| 10 | **CampaignVerdict recorded (Phase 16 only)** | The `CampaignVerdict(promote, win_ratio, median_sharpe_delta)` result is written back to this section of `implementation_plan.md`. |
+
+---
+
 ### Phase 15 — LIMIT / OCO Order Type Support `[NOT STARTED]`
 
-**Objective.** `strategy.md` §22.1 specifies bounce entries use LIMIT
-orders and target/exhaustion exits use LIMIT orders. Currently
-`BinanceBroker` sends only MARKET orders regardless of urgency, and
-`PaperEngine` simulates all fills at market price. Phase 15 makes the
-order-type routing faithful to the spec, adds partial-fill simulation
-in `PaperEngine`, and enables OCO (One-Cancels-Other) pairs for
-simultaneous stop-loss + target orders.
+**Objective.** `strategy.md` §13.3 specifies that bounce entries use
+LIMIT orders; target and exhaustion exits use LIMIT orders; invalidation,
+time, and risk-budget exits use MARKET orders. Currently `BinanceBroker`
+sends only MARKET orders regardless of urgency, and `PaperEngine`
+simulates all fills at market price. Phase 15 makes order-type routing
+faithful to the spec, adds partial-fill simulation in `PaperEngine`, and
+enables OCO pairs for simultaneous stop-loss + target exits.
+
+**Intent → order-type routing table** (canonical per `strategy.md` §13.3):
+
+| Intent source | Urgency | Order type | Notes |
+|---|---|---|---|
+| Bounce entry | `NORMAL` | LIMIT at `intent.reference_price` | Only when `reference_price` is valid (see below) |
+| Breakout entry | `IMMEDIATE` | MARKET | Aggressor; price crossing required |
+| Scale-in | `NORMAL` | LIMIT near microprice | §14.1, bounce archetype only |
+| Target exit | `NORMAL` | LIMIT at `current_target_price` | §13.3.2 |
+| Exhaustion exit | `NORMAL` | LIMIT | §13.3.3 |
+| Invalidation exit | `IMMEDIATE` | MARKET | §13.3.1 — must never be blocked |
+| Time exit | `NORMAL` | MARKET | §13.3.4 |
+| Risk-budget exit | `IMMEDIATE` | MARKET | §13.3.5 — highest priority, must never be blocked |
+
+**Reference price validation rules.**
+A LIMIT order is only sent when `reference_price` is a finite, positive
+float AND is within `config.ripple.limit_price_band_sigma` standard
+deviations of the current microprice. If `reference_price` is missing
+(zero), NaN, or out-of-band, `ExecutionManager` falls back to MARKET and
+logs a `LIMIT_FALLBACK` warning. Exits are **never blocked** by a
+missing reference price.
+
+**Partial-fill lifecycle states.**
+
+`PaperEngine` and `BinanceBroker` must both track the following states
+for open LIMIT orders:
+
+| State | Description |
+|---|---|
+| `OPEN` | Order placed; no fill received yet |
+| `PARTIAL` | Some quantity filled; residual remains on book |
+| `CANCELLED` | Order cancelled before full fill (timeout or OCO sibling) |
+| `FILLED` | Full quantity filled |
+
+Lifecycle transitions: `OPEN → PARTIAL → FILLED`, `OPEN → CANCELLED`,
+`PARTIAL → CANCELLED`, `OPEN/PARTIAL → FILLED`. Risk gates and position
+state update only on `FILLED` or `PARTIAL` fill events; never on `OPEN`.
+
+**OCO pair behavior.** When both a stop-loss and a target are active
+simultaneously, `place_oco(symbol, side, qty, target_price, stop_price)`
+is called. On either leg filling, the sibling is cancelled automatically.
+`PaperEngine` simulates OCO sibling cancellation via a shared `order_id`
+reference.
 
 **Scope.**
 
 | File | Change |
 |---|---|
-| `execution/models.py` | Add optional `price: float = 0.0` field to `ExecutionIntent` (limit price for `NORMAL` urgency intents). Extend `OrderType` routing table: `IMMEDIATE` → MARKET; `NORMAL` → LIMIT. |
-| `execution/broker_interface.py` | Add optional `price: float = 0.0` parameter to `place_order()` abstract signature. Add `cancel_order(broker_order_id: str) -> bool` abstract method. Add `place_oco(symbol, side, qty, price, stop_price) -> tuple[Order, Order]` abstract method. |
-| `execution/binance_broker.py` | Route LIMIT orders with `price` and `timeInForce=GTC` parameters. Implement `cancel_order` via Binance futures cancel endpoint. Implement `place_oco` via Binance LIMIT + STOP_MARKET pair. Partial-fill tracking: `_poll_order_fill` returns partial status and `fill_quantity < quantity`. |
-| `execution/paper_engine.py` | LIMIT fill simulation: record open limit orders in a priority queue; fill at limit price when the next incoming trade price crosses the limit; reject if IOC and market does not immediately cross. Partial-fill tracking: expose `fill_quantity` < full `quantity` when simulated volume is insufficient. |
-| `execution/execution_manager.py` | Route intent urgency → order type before `broker.place_order`: `IMMEDIATE` → `OrderType.MARKET`; `NORMAL` → `OrderType.LIMIT` at `intent.reference_price`. Scale-out intents (§13.3.2) send LIMIT at the target level. |
-| `tests/test_paper_engine.py` | New tests: LIMIT fill on market cross; IOC rejection; partial fill tracking; open-order queue management. |
-| `tests/test_binance_broker.py` | New tests: LIMIT order routing (mock Binance API); OCO pair creation; `cancel_order` call path. |
-| `tests/test_execution_manager.py` | New tests: `urgency=IMMEDIATE` → `OrderType.MARKET`; `urgency=NORMAL` → `OrderType.LIMIT`; scale-out uses LIMIT with target price. |
+| `execution/models.py` | Add `price: float = 0.0` and `limit_order_id: str = ""` to `ExecutionIntent`. Add `OrderLifecycle` enum: `OPEN`, `PARTIAL`, `CANCELLED`, `FILLED`. Add `fill_quantity: float = 0.0` and `lifecycle: OrderLifecycle` to `Order`. |
+| `execution/broker_interface.py` | Add `price: float = 0.0` to `place_order()` signature. Add abstract `cancel_order(order_id: str) -> bool`. Add abstract `place_oco(symbol, side, qty, price, stop_price) -> tuple[Order, Order]`. |
+| `execution/binance_broker.py` | Route LIMIT orders with `price` + `timeInForce=GTC`. Implement `cancel_order` via Binance cancel endpoint. Implement `place_oco` via Binance LIMIT + STOP_MARKET pair. Poll partial fills via `_poll_order_fill`; return `PARTIAL` state and `fill_quantity < quantity` when partial. |
+| `execution/paper_engine.py` | LIMIT fill simulation: priority queue of open LIMIT orders keyed by price. On each incoming trade, check cross condition (LIMIT BUY at price ≥ trade price; LIMIT SELL at price ≤ trade price); fill at limit price. Partial-fill simulation: fill only up to `trade.qty` if simulated volume insufficient; leave residual as `PARTIAL`. OCO: shared `order_id` reference; sibling cancelled when other leg fills. Timeout: order cancelled if `now_ms - placed_ms > config.execution.limit_timeout_ms`. |
+| `execution/execution_manager.py` | Validate `reference_price` before routing (finite, positive, within band); fall back to MARKET + `LIMIT_FALLBACK` log if invalid. Route by urgency per routing table above. Exits are never gated by price validation — fallback to MARKET, not rejection. On `PARTIAL` fill: update `_current_qty` by `fill_quantity`; leave order open. On `CANCELLED`: log and update state; do not clear position. |
+| `tests/test_paper_engine_limit.py` | NEW. Tests: LIMIT BUY fills when trade price ≤ limit; no fill when trade price > limit; IOC rejected immediately; partial fill when simulated volume < order qty; timeout cancels OPEN order; OCO sibling cancelled after other leg fills; exit order never blocked by missing entry reference_price. |
+| `tests/test_binance_broker_limit.py` | NEW. Tests: `place_order(LIMIT, price=X)` sends `price=X` in Binance request body (mock API); `cancel_order` calls Binance cancel endpoint; `place_oco` sends LIMIT + STOP_MARKET pair. |
+| `tests/test_execution_manager_routing.py` | NEW. Tests: bounce intent → LIMIT; breakout intent → MARKET; target exit → LIMIT; invalidation exit → MARKET; risk-budget exit → MARKET; `reference_price=NaN` → MARKET + LIMIT_FALLBACK log; exit intent with `reference_price=0.0` → MARKET (not blocked). |
 
 **Acceptance criteria.**
 
-1. Bounce entry intents (`urgency=NORMAL`) route to `BinanceBroker.place_order(order_type=LIMIT, price=intent.reference_price)`.
-2. Breakout entry intents (`urgency=IMMEDIATE`) route to `BinanceBroker.place_order(order_type=MARKET)`.
-3. `ExitType.TARGET` and `ExitType.EXHAUSTION` intents → LIMIT.
-4. `ExitType.INVALIDATION`, `ExitType.TIME`, `ExitType.RISK_BUDGET` intents → MARKET.
-5. `PaperEngine` fills a LIMIT BUY at limit price when the next trade price is ≤ limit price.
-6. `PaperEngine` LIMIT order is cancelled (not filled) if market never crosses before timeout.
-7. All existing Phase 14 acceptance tests pass unchanged.
+1. Bounce entry (`urgency=NORMAL`, `reference_price` valid) → `place_order(order_type=LIMIT, price=reference_price)`.
+2. Breakout entry (`urgency=IMMEDIATE`) → `place_order(order_type=MARKET)`.
+3. `ExitType.TARGET` and `ExitType.EXHAUSTION` → LIMIT.
+4. `ExitType.INVALIDATION` and `ExitType.RISK_BUDGET` → MARKET with `urgency=IMMEDIATE`.
+5. `reference_price=NaN` or `reference_price=0.0` on entry → MARKET with `LIMIT_FALLBACK` log; exit is never blocked.
+6. `PaperEngine` LIMIT BUY fills at limit price when trade crosses; no fill when market stays above.
+7. `PaperEngine` timeout-cancels OPEN orders after `limit_timeout_ms`.
+8. `PaperEngine` partial fill: `fill_quantity < order.quantity` when simulated volume is insufficient; residual remains as `PARTIAL`.
+9. OCO sibling cancellation: after one leg fills, the other is `CANCELLED`.
+10. `paper_engine_parity`: all Phase 15 behaviors are tested in `PaperEngine` before `BinanceBroker` live routing is implemented.
+11. All existing Phase 14 acceptance tests pass byte-identically.
+12. **Wired live?** `grep -r "place_order.*LIMIT\|OrderType\.LIMIT" execution/ ui/` returns ≥ 1 production-code hit.
+
+**Replay determinism.** LIMIT order placement and partial-fill simulation
+must be deterministic: given the same event sequence and `reference_price`
+values, the same fills (price, quantity, lifecycle) must result. Add a
+test case to `test_replay_determinism.py` verifying this.
 
 ---
 
 ### Phase 16 — HMM A/B Campaign at Scale `[NOT STARTED]`
 
-**Objective.** Phase 7V delivered a single-symbol smoke run with a
-mixed verdict (K=3, BIC=-31.09; HMM wins 1, rule-based wins 1, ties 2).
-Phase 16 promotes the harness to full campaign scale: multiple symbols,
-multiple date windows (≥ 30 d each), aggregate verdict logic. The
-campaign output is the evidence gate for Phase 17 (Wave HMM).
+**Objective.** Phase 7V delivered a single-symbol smoke run (K=3,
+BIC=-31.09; HMM wins 1, rule-based wins 1, ties 2 — mixed verdict).
+Phase 16 promotes the harness to a reproducible research campaign:
+multiple symbols, multiple date windows (≥ 30 d each), full metric suite,
+fixed configuration snapshot, deterministic seeds, and aggregate verdict
+logic. The campaign output is the **hard evidence gate** for Phase 17.
+
+**CampaignVerdict recorded here (to be filled in after Phase 16 runs):**
+
+```
+Phase 16 CampaignVerdict (to be recorded):
+  promote:              <true / false>
+  win_ratio:            <float>
+  median_sharpe_delta:  <float>
+  median_cagr_delta:    <float>
+  max_drawdown_delta:   <float>
+  trade_count_delta:    <int>
+  symbols:              [<list>]
+  windows:              [<list>]
+  config_snapshot_hash: <sha256 of config.json used>
+  recorded_by:          <agent / user>
+  recorded_at:          <UTC timestamp>
+```
 
 **Scope.**
 
 | File | Change |
 |---|---|
-| `tools/hmm_abtest.py` | Add `--symbols` CLI arg (comma-separated, e.g. `BTCUSDT,ETHUSDT,SOLUSDT`). Add `--windows` CLI arg (list of `YYYY-MM-DD:YYYY-MM-DD` ranges or shorthand `30d`, `60d`, `90d` counting back from today). Add aggregate campaign report: one row per (symbol, window) + summary win-ratio and median Sharpe delta. Add `--verdict-threshold` (default: `win_ratio ≥ 0.60 AND median_sharpe_delta ≥ 0.10`). |
-| `hmm/abtest.py` | Add `run_campaign(symbols, windows, config) -> list[AbtestSummary]`. Add `aggregate_verdict(results) -> CampaignVerdict` where `CampaignVerdict(promote: bool, win_ratio: float, median_sharpe_delta: float)`. |
-| `reports/` | Campaign outputs: `hmm_campaign_SYMBOL_WINDOW_*.md` per (symbol, window) + `hmm_campaign_summary_*.md` aggregate. |
-| `tests/test_hmm_abtest.py` | New tests: `run_campaign` with stub backtest runners; `aggregate_verdict` win-ratio calculation; `CampaignVerdict` promote threshold logic; `--symbols`/`--windows` CLI arg parsing. |
+| `tools/hmm_abtest.py` | Add `--symbols` CLI arg (comma-separated). Add `--windows` CLI arg (list of `YYYY-MM-DD:YYYY-MM-DD` or shorthand `30d`, `60d`, `90d`). Add `--seed` CLI arg (default `42`; passed to HMM trainer for deterministic Baum-Welch). Add `--verdict-threshold` (default: `win_ratio ≥ 0.60 AND median_sharpe_delta ≥ 0.10`). Write a `config_snapshot.json` alongside each campaign report (frozen copy of `config.json` at run time). |
+| `hmm/abtest.py` | Add `run_campaign(symbols, windows, config, seed) -> list[AbtestSummary]`. Add `aggregate_verdict(results, threshold) -> CampaignVerdict`. `AbtestSummary` must include `win_ratio`, `median_sharpe_delta`, `median_cagr_delta`, `max_drawdown`, `trade_count`, `winner`. `CampaignVerdict` must include all fields listed in the "recorded here" block above. |
+| `reports/` | Per-(symbol, window) report: `hmm_campaign_{SYMBOL}_{WINDOW}_{seed}.md`. Aggregate: `hmm_campaign_summary_{timestamp}.md`. Both reports include the `config_snapshot_hash`. |
+| `tests/test_hmm_abtest.py` | New tests: `run_campaign` with stub runners returns correct `AbtestSummary` fields; `aggregate_verdict` promote logic (win_ratio boundary); `CampaignVerdict` fields complete; `--seed` propagates to trainer; same seed + same data → identical per-window results (determinism test); config snapshot written alongside report. |
 
 **Acceptance criteria.**
 
-1. `python tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT --windows 30d,60d` completes without error and writes campaign + summary reports to `reports/`.
-2. `aggregate_verdict(results)` returns `CampaignVerdict(promote=True)` only when `win_ratio ≥ 0.60 AND median_sharpe_delta ≥ 0.10`.
-3. Per-(symbol, window) result rows each contain `pnl`, `max_drawdown`, `sharpe`, `cagr`, `winner` columns.
-4. Rule-based baseline is preserved; HMM is always opt-in.
-5. All existing `tests/test_hmm_abtest.py` tests pass alongside new tests.
+1. `python tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT --windows 30d,60d --seed 42` completes and writes all expected reports.
+2. Per-(symbol, window) rows include: `pnl`, `max_drawdown`, `sharpe`, `cagr`, `trade_count`, `winner`.
+3. `aggregate_verdict(results)` returns `CampaignVerdict(promote=True)` **only** when `win_ratio ≥ 0.60 AND median_sharpe_delta ≥ 0.10`.
+4. Identical `--seed` + identical data → identical per-window HMM training and test results (replay determinism).
+5. `config_snapshot.json` is written alongside each campaign report; its SHA-256 matches the `config_snapshot_hash` in the report header.
+6. Rule-based baseline is unchanged; HMM is always opt-in (`hmm_enabled=False` preserves V1).
+7. All existing `tests/test_hmm_abtest.py` tests pass unchanged.
 
-**Phase 17 gate note.** If `CampaignVerdict.promote is False`, Phase 17
-(Wave HMM) is blocked. Record the verdict in this plan and seek
-project-owner decision before proceeding. Phase 17's own acceptance
-criteria include a repeat A/B check for the Wave HMM path.
+**Phase 17 hard gate.** Phase 17 work **must not begin** until:
+- Phase 16 campaign has run on ≥ 2 symbols × ≥ 2 windows (minimum 4 pairs).
+- `CampaignVerdict` is recorded in this document (block above).
+- If `promote is False`, Phase 17 is blocked. Project owner must explicitly override in writing before any Phase 17 code is written.
 
 ---
 
 ### Phase 17 — HMM-based Wave Regime Classifier `[NOT STARTED]`
 
-**Objective.** Replace (optionally — toggle preserved) the deterministic
-rule-based Wave regime classifier (`WaveEngine._classify_regime`) with
-an HMM trained on V1 backtest regime labels. Mirrors the Phase 7
-`HMMBasedInference` pattern but for Wave's 5-state regime space. Gates
-on Phase 16 verdict.
+**Dependency gate — hard block.** Phase 16 `CampaignVerdict.promote is True` must be
+recorded in `implementation_plan.md §7.2` before implementation begins.
+Any code committed to the Wave HMM path before this gate is satisfied
+violates the V2 guard rails.
 
-**Dependency gate.** Phase 16 `CampaignVerdict.promote is True`
-required before implementation begins.
+**Objective.** Optionally replace the deterministic rule-based Wave
+regime classifier (`WaveEngine._classify_regime`) with an HMM trained
+on V1 backtest regime labels. The rule-based path is unchanged and is
+the default. Mirrors the Phase 7 `HMMBasedInference` pattern but for
+Wave's 5-state regime space.
+
+**V1 preservation rule.** `wave_hmm_enabled=False` (the default) must
+produce outputs **byte-identical** to V1 for every event sequence.
+This must be verified by a test before Phase 17 is considered done.
+
+**Invalid model fail-safe rule.** If `wave_hmm_enabled=True` and
+`wave_hmm_model_path` is missing, unreadable, or fails schema
+validation, the system must:
+- Log at `ERROR` level: `WAVE_HMM_LOAD_FAILED: falling back to rule-based`
+- Fall back to the V1 rule-based path silently (no crash, no exception
+  propagating to the trade decision path)
+- **Exception:** if `wave_hmm_fail_fast: bool = False` is set to
+  `True`, the process exits with code 1 on model load failure.
 
 **Scope.**
 
 | File | Change |
 |---|---|
-| `schemas.py` | Add `WaveConfig.wave_hmm_enabled: bool = False` and `wave_hmm_model_path: str = ""` (mirrors `RippleConfig.hmm_enabled`). |
-| `hmm/wave_hmm_model.py` | NEW. `WaveHMMModel` dataclass: `K`, emission `mu`/`Sigma` per state, transition matrix `A`, state labels. JSON save/load. |
-| `hmm/wave_hmm_trainer.py` | NEW. `WaveHMMTrainer`: Baum-Welch EM on Wave feature sequences (trend_efficiency, dispersion, absorption_ratio, residual_dislocation). `select_model(k_range=[3,4,5]) -> WaveHMMModel` using BIC. |
-| `wave/wave_engine.py` | Add `HMMWaveInference` path in `_classify_regime`: when `wave_hmm_enabled`, compute posterior `γ_t(k)` over Wave regime states; MAP state → `WaveRegime` enum. Rule-based path unmodified and default when `wave_hmm_enabled=False`. |
-| `tools/wave_hmm_train.py` | NEW CLI: trains a `WaveHMMModel` on stored backtest regime labels; writes JSON to `models/`. |
-| `tests/test_wave_hmm.py` | NEW. Tests: `WaveHMMModel` round-trip; `WaveHMMTrainer.select_model` BIC selection; `WaveEngine` toggle; posterior sums to 1.0; rule-based fallback preserved when `wave_hmm_enabled=False`. |
+| `schemas.py` | Add `WaveConfig.wave_hmm_enabled: bool = False`, `wave_hmm_model_path: str = ""`, `wave_hmm_fail_fast: bool = False`, `wave_hmm_schema_version: int = 1`. |
+| `hmm/wave_hmm_model.py` | NEW. `WaveHMMModel` dataclass: `schema_version: int`, `K: int`, emission `mu`/`Sigma` per state, transition matrix `A`, state labels. JSON save/load with schema version check; raise `WaveHMMSchemaError` if version mismatch. |
+| `hmm/wave_hmm_trainer.py` | NEW. `WaveHMMTrainer(seed: int = 42)`: Baum-Welch EM on Wave feature sequences (`trend_efficiency`, `dispersion`, `absorption_ratio`, `residual_dislocation`). `select_model(k_range=[3,4,5]) -> WaveHMMModel` using BIC. All PRNG seeded from `seed` parameter. |
+| `wave/wave_engine.py` | Add `HMMWaveInference` path in `_classify_regime`: when `wave_hmm_enabled`, compute posterior `γ_t(k)` → MAP state → `WaveRegime` enum. Invalid/missing model → fall back to rule-based per fail-safe rule. Rule-based path unmodified when `wave_hmm_enabled=False`. |
+| `tools/wave_hmm_train.py` | NEW CLI: `python tools/wave_hmm_train.py --symbol BTCUSDT --seed 42 --out models/wave_hmm_BTCUSDT.json`. |
+| `tests/test_wave_hmm.py` | NEW. Tests: `WaveHMMModel` round-trip with `schema_version` check; `WaveHMMTrainer.select_model` BIC selection; `WaveEngine` toggle; posterior sums to 1.0 ± 1e-6; rule-based fallback when `wave_hmm_enabled=False` → byte-identical to V1; invalid model path → ERROR log + fallback (not crash); `wave_hmm_fail_fast=True` → `SystemExit`; same seed → same training result; A/B check against ≥ 2 Phase 16 (symbol, window) pairs. |
 
 **Acceptance criteria.**
 
-1. `wave_hmm_enabled=False` (default) → `WaveEngine` behaviour byte-identical to V1 rule-based.
-2. `wave_hmm_enabled=True` with valid model path → regime label changes per HMM posterior.
-3. HMM posterior distribution sums to 1.0 (within 1 × 10⁻⁶) at every time step.
-4. `WaveHMMModel` save/load round-trips without numerical loss.
-5. A/B backtest: Wave HMM ≥ rule-based on at least one key metric (Sharpe or win_rate) across ≥ 2 of the Phase 16 campaign (symbol, window) pairs.
-6. All existing `tests/test_wave_engine.py` and `tests/test_crossvenue_wave.py` tests pass unchanged.
+1. `wave_hmm_enabled=False` (default) → `WaveEngine` outputs byte-identical to V1 rule-based for 3 independent replay sequences. **Wired test:** a new `test_replay_determinism.py` case covers this.
+2. `wave_hmm_enabled=True` with valid model path → regime label changes per HMM posterior MAP.
+3. HMM posterior distribution sums to 1.0 within 1 × 10⁻⁶ at every time step.
+4. `WaveHMMModel` save/load round-trips without numerical loss. Schema version mismatch raises `WaveHMMSchemaError`.
+5. Invalid model path + `wave_hmm_fail_fast=False` → `ERROR` log + silent rule-based fallback. Strategy continues executing.
+6. Invalid model path + `wave_hmm_fail_fast=True` → `SystemExit(1)`.
+7. A/B backtest: Wave HMM ≥ rule-based on ≥ 1 metric (Sharpe or win_rate) across ≥ 2 of the Phase 16 campaign (symbol, window) pairs.
+8. All existing `tests/test_wave_engine.py` and `tests/test_crossvenue_wave.py` tests pass unchanged.
+9. **Wired live?** `grep -r "wave_hmm_enabled\|HMMWaveInference" wave/ execution/ ui/` returns ≥ 1 production-code hit outside `tests/`.
+10. UI/diagnostic exposure: Wave HMM regime label and posterior probabilities exposed as **read-only snapshot fields only** (via `WaveSnapshot`). They must not be a decision path.
 
 ---
 
 ### Phase 18 — Cross-Venue Features in C++ Ripple `[NOT STARTED]`
 
 **Objective.** Cross-venue data (Oanda L1) currently flows only into the
-Python `WaveEngine`. Phase 18 wires the same `CrossVenueSnapshot` into
-the C++ `RippleEngine` so that Ripple's evidence scoring can additionally
-leverage cross-venue divergence and correlation (§23 "Cross-venue
-confirmation"). The Python WaveEngine path is unchanged.
+Python `WaveEngine` (§8.4). Phase 18 wires the same data into the C++
+`RippleEngine` as a new `CrossVenueSnapshot` so that Ripple's evidence
+scoring can leverage cross-venue divergence and correlation. The Python
+`WaveEngine` cross-venue path is **unchanged**; Phase 18 adds a
+**parallel** C++ path — it does not replace or duplicate the Python path.
+
+**Tile / Wave / Ripple boundary.** `CrossVenueSnapshot` is an input to
+Ripple's evidence scoring only. It must not alter Ripple's decision-making
+when `available=false`. The Python `WaveEngine` remains the sole owner of
+cross-venue → regime classification logic; Ripple's use is limited to
+evidence-score boosts.
+
+**CrossVenueSnapshot schema** (canonical for C++ and pybind11):
+
+```cpp
+struct CrossVenueSnapshot {
+    double  venue_price;        // Oanda last trade price
+    double  correlation_30m;    // Pearson 30-min rolling (range [-1, 1])
+    double  divergence_pct;     // (btc_price - oanda_proxy_price) / btc_price
+    bool    available;          // false → V1 behaviour, no boost applied
+    int64_t snapshot_ts_ms;     // event-time of last update (not wall-clock)
+};
+```
+
+**Staleness rule.** If `now_ms - snapshot_ts_ms > cv_stale_threshold_ms`
+(default `15_000`), Ripple must treat the snapshot as `available=false`
+regardless of the `available` flag. This prevents stale cross-venue data
+from permanently boosting evidence scores when the Oanda feed lags.
 
 **Scope.**
 
 | File | Change |
 |---|---|
-| `backtestingCpp/orderflow/Schemas.h` | Add `struct CrossVenueSnapshot { double venue_price; double correlation_30m; double divergence_pct; bool available; };`. |
-| `backtestingCpp/orderflow/RippleEngine.h/.cpp` | Add `set_crossvenue_snapshot(CrossVenueSnapshot)` setter. Integrate `cv.divergence_pct` (additive boost to absorption evidence) and `cv.correlation_30m` (inverse boost to exhaustion evidence) in the evidence scoring path, gated on `cv.available`. When `cv.available=false` path is identical to V1. |
-| `backtestingCpp/bindings.cpp` | Expose `CrossVenueSnapshot` struct and `RippleEngine.set_crossvenue_snapshot` via pybind11. |
-| `execution/live_runner.py` | Call `engine.set_crossvenue_snapshot(cv_snap)` inside `_layered_push_step` on each Oanda L1 update (cadence matches Wave: ≤ 5 s). |
+| `backtestingCpp/orderflow/Schemas.h` | Add `CrossVenueSnapshot` struct as defined above. |
+| `backtestingCpp/orderflow/RippleEngine.h/.cpp` | Add `set_crossvenue_snapshot(CrossVenueSnapshot)` setter. In evidence scoring: when `cv.available && (now_ms - cv.snapshot_ts_ms) <= cv_stale_threshold_ms`, add `cv.divergence_pct × cross_venue_divergence_boost` to absorption evidence; subtract `cv.correlation_30m × cross_venue_correlation_boost` from exhaustion evidence. Both boost factors configurable (default `0.0` → V1-identical). When stale or `!cv.available`, evidence path is byte-identical to V1. |
+| `backtestingCpp/bindings.cpp` | Expose `CrossVenueSnapshot` and `RippleEngine.set_crossvenue_snapshot` via pybind11. |
+| `execution/live_runner.py` | Call `engine.set_crossvenue_snapshot(cv_snap)` inside `_layered_push_step` on each Oanda L1 update (cadence ≤ 5 s). Reuse existing layered-push primitives. |
 | `ui/live_trading_session.py` | Same push inside `_push_layered_strategy`. |
-| `crossvenue/oanda_feed.py` | Extend `OandaL1Feed.last_snapshot() -> CrossVenueSnapshot` accessor consumed by the push loops. |
-| `tests/test_ripple_crossvenue.py` | NEW. Tests: `set_crossvenue_snapshot` with `available=False` → V1-identical evidence; `available=True` + high `divergence_pct` → absorption evidence increases; replay determinism with stored cross-venue CSV; pybind11 binding round-trip for `CrossVenueSnapshot`. |
+| `crossvenue/oanda_feed.py` | Extend to expose `last_crossvenue_snapshot() -> CrossVenueSnapshot`. `snapshot_ts_ms` uses the Oanda L1 event timestamp (not `time.time()`). |
+| `tests/test_ripple_crossvenue.py` | NEW. Tests: `set_crossvenue_snapshot({available=False})` → evidence scores byte-identical to V1; `available=True` + `divergence_pct > 0` + boost factor > 0 → absorption evidence increases; stale snapshot (`snapshot_ts_ms` old) → treated as `available=False`; replay determinism with stored cross-venue CSV (feed from `tests/fixtures/crossvenue_sample.csv`); pybind11 binding round-trip for `CrossVenueSnapshot`; wiring test: `live_runner._layered_push_step` calls `engine.set_crossvenue_snapshot`. |
 
 **Acceptance criteria.**
 
-1. `set_crossvenue_snapshot(CrossVenueSnapshot{available=False})` → Ripple evidence scores byte-identical to V1.
-2. `available=True` with `divergence_pct > dispersion_critical` → absorption evidence score increases.
-3. Replay with stored cross-venue CSV produces deterministic decisions.
-4. pybind11 binding test for `CrossVenueSnapshot` passes in `tests/test_crossvenue_wave.py` or new file.
-5. All existing Phase 8 cross-venue Wave tests pass unchanged.
+1. `set_crossvenue_snapshot({available: false})` → Ripple evidence scores byte-identical to V1 for 3 replay sequences.
+2. `cross_venue_divergence_boost=0.0` (default) + `available=true` → evidence scores byte-identical to V1 (boost is a no-op when factor is zero).
+3. `available=true` + `divergence_pct > 0` + `cross_venue_divergence_boost > 0` → absorption evidence score measurably increases.
+4. Stale snapshot (`now_ms - snapshot_ts_ms > cv_stale_threshold_ms`) → treated as `available=false`.
+5. Replay with stored cross-venue CSV (`tests/fixtures/crossvenue_sample.csv`) produces identical decisions across two runs.
+6. `CrossVenueSnapshot` pybind11 binding round-trip is lossless.
+7. All existing Phase 8 (`test_crossvenue_engine.py`, `test_crossvenue_wave.py`) tests pass unchanged.
+8. **Wired live?** `grep -r "set_crossvenue_snapshot" execution/ ui/` returns ≥ 2 hits (one in `live_runner.py`, one in `live_trading_session.py`).
+9. `snapshot_ts_ms` is populated from the Oanda event timestamp; never from `time.time()`.
 
 ---
 
 ### Phase 19 — Hierarchical ES / Euler Decomposition `[NOT STARTED]`
 
-**Objective.** Replace the single global ES bucket with the full Euler
-risk decomposition described in `strategy.md` §7.4.5. Tide publishes
-per-cell risk contributions (RC_i = w_i · ∂ρ/∂w_i); `RiskEngine`
-enforces per-cell limits in addition to the global throttle. V1 single-
-cell behaviour is preserved as the default (one cell covers the whole
-global budget).
+**Objective.** Replace the single global ES bucket with the Euler risk
+decomposition described in `strategy.md` §7.4.5. Tide publishes per-cell
+risk contributions `RC_i = w_i · ∂ρ/∂w_i`; `RiskEngine` enforces per-cell
+limits in addition to the global throttle. V1 single-cell behavior is the
+default when `euler_cells=[]`.
+
+**V1 preservation rule.** `euler_cells=[]` (the default) must produce
+`RiskEngine` behavior byte-identical to V1 global-ES path. This must
+be verified by a test that replays the Phase 14C risk-gate scenario and
+asserts identical outcomes.
+
+**Exit-blocking prohibition.** Per-cell budget rejection must only apply
+to **new position entries** and **scale-in orders**. Exit intents
+(`ExitType.INVALIDATION`, `ExitType.RISK_BUDGET`, `ExitType.TIME`)
+must never be blocked by a per-cell budget check. This is enforced by
+`ExecutionManager.route_intent`: exit intents bypass `check_new_order`.
+
+**Budget consistency invariant.** At every Tide update, `sum(cell_budgets)
+== global_budget` must hold within 1 × 10⁻⁹. `TideEngine` must assert
+this before publishing `EulerBudgetSnapshot`.
 
 **Scope.**
 
 | File | Change |
 |---|---|
-| `schemas.py` | Add `EulerRiskCell(strategy: str, asset: str, target_weight: float)` dataclass. Add `TideConfig.euler_cells: list[EulerRiskCell] = []` (empty list → single-cell V1 behaviour). |
+| `schemas.py` | Add `EulerRiskCell(strategy: str, asset: str, target_weight: float)` dataclass. Add `TideConfig.euler_cells: list[EulerRiskCell] = []`. |
 | `backtestingCpp/orderflow/Schemas.h` | Add `struct EulerBudgetSnapshot { std::vector<double> cell_budgets; std::vector<std::string> cell_labels; double global_budget; };`. |
-| `backtestingCpp/orderflow/RiskEngine.h/.cpp` | Add `set_euler_budget(EulerBudgetSnapshot)` setter. Enforce per-cell `consumed_es[i] < cell_budgets[i]` in `check_new_order` in addition to global budget check. When `cell_budgets` is empty, falls back to V1 global-only check. |
+| `backtestingCpp/orderflow/RiskEngine.h/.cpp` | Add `set_euler_budget(EulerBudgetSnapshot)` setter. In `check_new_order`: when `cell_budgets` is non-empty, additionally check `consumed_es[i] < cell_budgets[i]` for the cell matching the incoming intent's strategy+asset label. When `cell_budgets` is empty, global-only check (V1 path). **Exit intents bypass `check_new_order` entirely** — enforced in `ExecutionManager`, not in `RiskEngine`. |
 | `backtestingCpp/bindings.cpp` | Expose `EulerBudgetSnapshot` and `RiskEngine.set_euler_budget` via pybind11. |
-| `tide/tide_engine.py` | Compute Euler risk contributions: for each `EulerRiskCell` compute RC_i = target_weight × global_es_budget; publish `EulerBudgetSnapshot`. |
+| `tide/tide_engine.py` | Compute RC_i = `cell.target_weight × global_es_budget` for each `EulerRiskCell`. Assert `sum(cell_budgets) == global_budget` within 1e-9. Publish `EulerBudgetSnapshot`. No-op when `euler_cells=[]`. |
 | `execution/live_runner.py` + `ui/live_trading_session.py` | Push `EulerBudgetSnapshot` to `engine.set_euler_budget()` on Tide update cadence (60 s). |
-| `tests/test_euler_risk.py` | NEW. Tests: single-cell V1-equivalent; multi-cell per-cell rejection; Euler RC_i sum equals global budget; push cadence wiring; pybind11 binding round-trip. |
+| `tests/test_euler_risk.py` | NEW. Tests: `euler_cells=[]` → `RiskEngine` outputs byte-identical to V1 global-ES path (replays Phase 14C risk-gate scenario); multi-cell entry blocked when per-cell budget exhausted but global budget is not; exit intent bypasses per-cell check and executes; `sum(cell_budgets) == global_budget` assertion fires if budgets do not balance; pybind11 binding round-trip for `EulerBudgetSnapshot`; wiring test: `live_runner._layered_push_step` calls `engine.set_euler_budget` on Tide update. |
 
 **Acceptance criteria.**
 
-1. `euler_cells=[]` (default) → `RiskEngine` behaviour byte-identical to V1 global-ES path; all Phase 14C acceptance tests pass unchanged.
-2. Multi-cell: `RiskEngine` rejects orders from cells exceeding their individual budget even if the global budget is not exhausted.
-3. Euler RC contributions (`sum(cell_budgets)`) equal `global_budget` within 1 × 10⁻⁹.
-4. `EulerBudgetSnapshot` pybind11 binding round-trips without loss.
-5. Push cadence matches Tide: `set_euler_budget` called on every 60 s Tide tick in both headless and UI paths.
+1. `euler_cells=[]` (default) → `RiskEngine.check_new_order` behavior byte-identical to V1 for all Phase 14C test scenarios.
+2. Multi-cell: entry order blocked when `consumed_es[i] >= cell_budgets[i]` even if global budget is not exhausted.
+3. Exit intent (any `ExitType`) is never blocked by a per-cell budget check.
+4. `sum(cell_budgets) == global_budget` within 1 × 10⁻⁹ (asserted by `TideEngine` before publishing; tested in `test_euler_risk.py`).
+5. `EulerBudgetSnapshot` pybind11 binding round-trips without loss.
+6. `set_euler_budget` called on every 60 s Tide tick in both `live_runner.py` and `live_trading_session.py`.
+7. All existing `tests/test_risk_engine.cpp` and `tests/test_risk_bindings.py` tests pass unchanged.
+8. **Wired live?** `grep -r "set_euler_budget" execution/ ui/` returns ≥ 2 production-code hits.
+9. Phase 14C risk-gate regression: identical Phase 14C event replay with `euler_cells=[]` produces identical PnL and exit decisions as V1 baseline.
 
 ---
 
 ### Phase 20 — Liquidity-Map Logistic Hold/Break Calibration `[NOT STARTED]`
 
-**Objective.** Replace the deterministic threshold-based
+**Objective.** Optionally replace the deterministic threshold-based
 `LiquidityMapEngine` hold/break/destination scores with a calibrated
-logistic model trained on V1 backtest labelled outcomes. Rule-based
-fallback preserved as default (`logistic_enabled=False`). See
-`strategy.md` §10.3 and §23.
+logistic model trained on V1 backtest labelled outcomes. The deterministic
+path is the default (`logistic_enabled=False`) and must be byte-identical
+to V1 when enabled flag is not set. See `strategy.md` §10.3.
+
+**V1 preservation rule.** `logistic_enabled=False` must produce
+`LiquidityMapEngine` hold/break/destination scores byte-identical to V1
+for all existing `test_liquidity_map.cpp` scenarios.
+
+**Invalid model fail-safe rule.** If `logistic_enabled=True` and the
+model file is missing, unreadable, or has a score output outside [0, 1],
+the system falls back to the deterministic path and logs `LMAP_LOGISTIC_FALLBACK`.
+If `logistic_fail_fast=True` is set, process exits with code 1.
+
+**Labelled data requirements and leakage prevention.**
+
+| Requirement | Rule |
+|---|---|
+| Label definition | `hold_label = 1` if price reversed within N bars of the wall; `break_label = 1` if price closed beyond the wall level. |
+| Leakage prevention | Features used as model inputs must only contain information available **before** the labelled outcome. Future price data must never appear as a feature. |
+| Train/test split | Chronological split only (never random shuffle on time-series data). Test set must be after training set in calendar time. |
+| Minimum data requirement | ≥ 500 labelled examples per class required before training is allowed. |
+| Overfitting guard | `LogisticCalibrator` must report and reject models with test accuracy < 0.52 (no better than a biased coin). |
 
 **Scope.**
 
 | File | Change |
 |---|---|
-| `schemas.py` | Add `LiquidityMapConfig.logistic_enabled: bool = False` and `logistic_model_path: str = ""`. |
-| `lmap/logistic_calibrator.py` | NEW. `LogisticCalibrator`: extract `(feature_vector, hold_label)` and `(feature_vector, break_label)` pairs from V1 backtest trade logs. Train `sklearn.linear_model.LogisticRegression` for `hold_score`, `break_score`, `destination_score`. `LiquidityMapLogisticModel` JSON save/load. |
-| `backtestingCpp/orderflow/LiquidityMapEngine.h/.cpp` | Add `load_logistic_model(json_str)` setter. When loaded and `logistic_enabled`, replace deterministic score computations with logistic evaluation; gated on `logistic_enabled`, deterministic path unchanged when disabled. |
+| `schemas.py` | Add `LiquidityMapConfig.logistic_enabled: bool = False`, `logistic_model_path: str = ""`, `logistic_fail_fast: bool = False`, `logistic_schema_version: int = 1`. |
+| `lmap/logistic_calibrator.py` | NEW. `LogisticCalibrator`: extract `(feature_vector, hold_label)` and `(feature_vector, break_label)` pairs from V1 backtest trade logs. Chronological train/test split. Train `sklearn.linear_model.LogisticRegression` for `hold_score`, `break_score`, `destination_score`. Reject models with test accuracy < 0.52. `LiquidityMapLogisticModel` JSON save/load with `schema_version`. |
+| `backtestingCpp/orderflow/LiquidityMapEngine.h/.cpp` | Add `load_logistic_model(json_str)` setter. When loaded and `logistic_enabled`: replace deterministic score computations with logistic evaluation, clamp outputs to [0, 1]. Gated on flag; deterministic path unchanged when disabled. Schema version mismatch → `LMAP_LOGISTIC_FALLBACK` log + deterministic path (or exit if `fail_fast`). |
 | `backtestingCpp/bindings.cpp` | Expose `LiquidityMapEngine.load_logistic_model` via pybind11. |
-| `tools/lmap_calibrate.py` | NEW CLI: `python tools/lmap_calibrate.py --symbol BTCUSDT --from 2024-01-01 --to 2025-01-01 --out models/lmap_BTCUSDT.json`. |
-| `tests/test_lmap_logistic.py` | NEW. Tests: `LogisticCalibrator` fit/predict; model save/load round-trip; `LiquidityMapEngine` toggle; deterministic fallback preserved; logistic scores in [0, 1]. |
+| `tools/lmap_calibrate.py` | NEW CLI: `python tools/lmap_calibrate.py --symbol BTCUSDT --from 2024-01-01 --to 2025-01-01 --out models/lmap_BTCUSDT.json --test-split 0.2`. |
+| `tests/test_lmap_logistic.py` | NEW. Tests: `logistic_enabled=False` → scores byte-identical to V1 (run existing `test_liquidity_map.cpp` scenarios via Python bindings); `LogisticCalibrator` fit/predict with synthetic labelled data; model save/load round-trip with schema version check; `LiquidityMapEngine` toggle; logistic scores always in [0, 1]; invalid model path → `LMAP_LOGISTIC_FALLBACK` log + deterministic path; `logistic_fail_fast=True` + bad model → `SystemExit(1)`; replay determinism with model loaded (same events → same scores); overfitting guard: model with test accuracy < 0.52 rejected by calibrator; A/B comparison: logistic scores vs deterministic thresholds on held-out test set. |
 
 **Acceptance criteria.**
 
-1. `logistic_enabled=False` (default) → `LiquidityMapEngine` behaviour byte-identical to V1; all existing lmap tests pass unchanged.
-2. `logistic_enabled=True` with valid model → `hold_score`, `break_score`, `destination_score` change per logistic output.
-3. All logistic output scores are in [0, 1].
-4. Model save/load round-trips without numerical loss.
-5. A/B backtest comparison shows logistic calibration ≥ deterministic thresholds on at least one key metric (hold accuracy or break accuracy) for the training symbol.
+1. `logistic_enabled=False` (default) → `LiquidityMapEngine` hold/break/destination scores byte-identical to V1 for all `test_liquidity_map.cpp` scenarios.
+2. `logistic_enabled=True` with valid model → scores change per logistic output.
+3. All logistic output scores are in [0, 1] (clamped even if model produces out-of-range values).
+4. Model save/load round-trips without numerical loss. Schema version mismatch raises `LMAP_LOGISTIC_FALLBACK` log + deterministic fallback.
+5. Invalid model path + `logistic_fail_fast=False` → `LMAP_LOGISTIC_FALLBACK` log + deterministic path. No crash, no exception propagating to strategy.
+6. `logistic_fail_fast=True` + bad model → `SystemExit(1)`.
+7. `LogisticCalibrator` rejects models with test accuracy < 0.52.
+8. Labelled data uses chronological split only. Feature vectors contain no future price information.
+9. Replay determinism: given the same event sequence with model loaded, scores are identical across two runs.
+10. A/B metric gate: logistic calibration ≥ deterministic thresholds on ≥ 1 metric (hold accuracy or break accuracy) on the held-out test set before the model is promoted to `models/`.
+11. All existing `test_liquidity_map.cpp` (C++) and `test_lmap_logistic.py` (Python) tests pass.
+12. **Wired live?** `grep -r "load_logistic_model\|logistic_enabled" execution/ ui/` — note: Phase 20 changes the `LiquidityMapEngine` used inside the C++ hot path; the Python wiring test asserts that `engine.load_logistic_model` is called during strategy initialization when `logistic_enabled=True`.
 
 ---
 
-## 7.3 V2 UI Accuracy & First-Impression Polish (Phase 8)
+### Phase 15–20 UI Alignment Notes
 
-Three user-identified UI gaps remain after V1 GA that make the live
-interface misleading or incomplete. These are V2-era UI polish items —
-independent of the strategy algorithm phases (15–20) but sharing the
-same "V2 work" milestone. Full spec in `UI_STRATEGY_INTEGRATION_PLAN.md` §16.
+The following rules govern how V2 strategy backend phases interact with
+V2 UI phases (8, 9, 10, 11). They are cross-references only; the full
+UI specs live in `UI_STRATEGY_INTEGRATION_PLAN.md`.
+
+1. **Phase 8 first.** UI accuracy and polish (Phase 8 — candlestick
+   preload, strategy-attributed PnL, signal log accuracy) should be
+   complete before the QML migration (Phase 9) begins. Phase 8 fixes
+   apply to the existing QWidget UI and must not be re-done in QML.
+2. **Phase 9 QML migration is UI-only.** Phase 9 must not change any
+   strategy behavior, decision paths, or data contracts. The migration
+   is a pure rendering-stack change. Any new strategy state exposed to
+   the UI during Phase 9 must be **read-only snapshot/diagnostic state**
+   sourced from `StrategySnapshot` — never a decision path.
+3. **Phase 10 process isolation preserves execution safety.** The
+   ZeroMQ IPC layer (Phase UI-10B) must not introduce new latency into
+   execution decisions. The engine subprocess runs without any UI
+   dependency. If the IPC channel is unavailable, the engine continues
+   with its last armed state — it does not pause execution.
+4. **Phase 10 preserves replay determinism.** The ring-buffer drain
+   architecture (Phase UI-10A) must not alter the order in which events
+   are processed by the strategy layers. The engine's event loop is
+   unchanged; only the render loop changes.
+5. **V2 strategy state exposed to the UI must be read-only.** Any
+   field added to `StrategySnapshot` in Phases 15–20 (e.g., LIMIT order
+   lifecycle, Wave HMM posterior, cross-venue snapshot, Euler cell
+   budgets, logistic scores) is surfaced as a diagnostic display only.
+   The UI must not write to or modify these fields.
+
+---
+
+## 7.3 V2 UI Phases (8, 9, 10 & 11)
+
+**Deployment target for all UI phases:** Ubuntu 24.04 LTS on AWS EC2
+g5.xlarge (NVIDIA A10G GPU), rendered remotely via NICE DCV.
+All UI work must conform to `AGENT_STRATEGY_RULES.md §22`.
+Full spec for each phase lives in `UI_STRATEGY_INTEGRATION_PLAN.md`.
+
+### 7.3.1 Phase 8 — Accuracy & First-Impression Polish
+
+Three user-identified UI gaps make the live interface misleading or
+incomplete after V1 GA. Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §16.
 
 **Phase 8 GA gate:** Sub-phases 8A + 8B + 8C all complete.
 
@@ -3298,17 +3536,124 @@ same "V2 work" milestone. Full spec in `UI_STRATEGY_INTEGRATION_PLAN.md` §16.
   candle data…" for up to 80 minutes at 1 m timeframe. Fix: async
   Binance klines REST fetch on connect and on timeframe change.
 - **8B — Strategy PnL:** `AccountPanel` computes realized PnL via
-  naive FIFO order matching (any BUY → SELL pair), not strategy-
-  attributed fills from `ExecutionManager`. Order rows show no
-  Ripple reason context. Fix: wire account panel to
-  `ExecutionManager.session_realized_pnl` and `session_trade_count`.
-- **8C — Signal log accuracy:** Legacy `ScoreBasedInference` raw
-  signals (`STACKED_IMBALANCE_*`, `BULLISH_*`, etc.) flood the
-  blotter at market-event frequency when strategy is armed. Tide bias
-  changes and Wave regime changes are never emitted as explicit log
-  entries. Exit signals carry no realized PnL annotation. Fix: gate
-  legacy signals on disarmed state, emit structured `TIDE`/`WAVE`
-  change events, annotate exits with PnL delta.
+  naive FIFO order matching, not strategy-attributed fills from
+  `ExecutionManager`. Fix: wire to `session_realized_pnl` and
+  `session_trade_count`.
+- **8C — Signal log accuracy:** Legacy signals flood the blotter;
+  Tide/Wave transitions are never logged; exits carry no PnL. Fix:
+  gate legacy signals, emit `TIDE`/`WAVE` change events, annotate
+  exits with PnL delta.
+
+---
+
+### 7.3.2 Phase 9 — Qt Quick/QML Migration, GPU Acceleration & UI Cleanup
+
+**Architectural pivot:** The entire UI rendering stack moves from
+`QWidget` + `QPainter` (CPU raster) to **Qt Quick / QML** with an
+OpenGL scene graph backend. This aligns with the Linux/AWS/NICE DCV
+deployment target. Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §22.
+
+**Phase 9 GA gate:** All four sub-phases complete. GPU backend verified
+(`QSGRendererInterface` ≠ `Software`). Frame budget P95 < 20 ms at 60 FPS.
+
+| Sub-phase | Name | Status | Dependency |
+|---|---|---|---|
+| **9A** | QML Scaffold & GPU Backend Setup | `NOT STARTED` | Phase 8 (parallel) |
+| **9B** | Chart Widgets → QML (`QQuickPaintedItem` bridge) | `NOT STARTED` | 9A |
+| **9C** | Strategy Dashboard → QML + Trade Indicators | `NOT STARTED` | 9B + Phase 8B |
+| **9D** | Dead Element Audit & Toolbar Cleanup | `NOT STARTED` | 9A (parallel with 9B) |
+
+**Problems addressed (summary):**
+
+- **9A — QML scaffold:** Replace `QWidget`-based `QApplication` with
+  `QGuiApplication` + `QQmlApplicationEngine`. Force OpenGL scene graph
+  backend (`QSG_RHI_BACKEND=opengl`). Add startup GPU verification
+  check per `AGENT_STRATEGY_RULES.md §22.2`. Establish QML component
+  directory structure (`ui/qml/`). Set `QQuickWindow::setMaximumFrameLatency(1)`
+  for NICE DCV frame pacing.
+- **9B — Chart widgets to QML:** Migrate `HeatmapWidget`,
+  `CandleChartView`, `CVDWidget`, `VolumeProfileWidget` to
+  `QQuickPaintedItem` subclasses (bridge tier) that render inside the
+  QML scene graph. This alone eliminates the per-frame CPU→GPU pixel
+  buffer upload. Static candle history cached as `QSGGeometryNode`
+  vertex data updated only on bucket close. Heatmap depth image
+  converted to `QSGTexture` (GPU-resident) updated once per computed
+  frame.
+- **9C — Strategy dashboard to QML + trade indicators:** Migrate
+  `StrategyDashboardView`, `StrategyDiagnosticsPanel`, `TradeBlotter`
+  to QML components backed by `QAbstractListModel` C++ models.
+  Add `PositionCard` QML component (entry/stop/target/R:R/PnL).
+  Add trade ENTRY/EXIT markers and horizontal overlay lines to the
+  candle chart QML component.
+- **9D — UI cleanup:** Remove hidden legacy stubs (`_tick_size_input`,
+  `_imbalance_input`, disabled "Replay" mode). Consolidate duplicate
+  candle-duration controls. Add overlay toggle buttons. Surface
+  `_SuppressionMetrics` to status area. No new `QWidget` subclasses.
+
+---
+
+### 7.3.3 UI Phase 10 — Decoupled Render Loop & Engine Process Isolation
+
+> **Note:** "UI Phase 10" is a V2 UI roadmap phase. It is distinct from the
+> completed strategy Phase 10 (Live Path Hardening) documented at §5.
+
+Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §23.
+
+**UI Phase 10 GA gate:** Sub-phases UI-10A + UI-10B both complete.
+Engine continues executing live orders for ≥ 5 minutes after UI process
+is `kill -9`'d. UI reconnects and shows correct state after restart.
+
+| Sub-phase | Name | Status | Dependency |
+|---|---|---|---|
+| **UI-10A** | Decoupled 60 FPS Render Loop | `NOT STARTED` | Phase 9A (QML scaffold) |
+| **UI-10B** | Engine Service Process Isolation (ZeroMQ IPC) | `NOT STARTED` | UI-10A (ring-buffer boundary) |
+
+**Problems addressed (summary):**
+
+- **UI-10A — Render loop:** All market data (trades, depth, ripple,
+  snapshots) written to thread-safe ring buffers by WS/engine threads.
+  QML scene graph `frameSwapped` signal drives a 16 ms (60 FPS) drain
+  cycle. Each `QQuickItem` receives at most one `markDirty()` / property
+  update per frame. 100 ms strategy ops (Tide/Wave push, status refresh)
+  driven by a frame-counter accumulator. Per-event UI updates removed.
+- **UI-10B — Process isolation:** Engine extracted to standalone
+  `engine_service.py` subprocess. State/events flow via ZeroMQ PUB
+  (port 55001). Control commands (ARM/DISARM/CONNECT) via ZeroMQ REP
+  (port 55002). UI-absent timeout: engine continues trading for 30 s
+  after losing control connection. Engine service managed by systemd
+  (`Restart=on-failure`). UI starts headlessly; operator connects on
+  demand via `--engine-addr`.
+
+---
+
+### 7.3.4 Phase 11 — Linux / AWS / NICE DCV Production Deployment
+
+Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §24.
+
+**Phase 11 GA gate:** Engine and UI running unattended on Ubuntu 24.04
+g5.xlarge via NICE DCV for 72 hours with zero manual restarts.
+
+| Sub-phase | Name | Status | Dependency |
+|---|---|---|---|
+| **11A** | NVIDIA Driver & Qt 6 Setup | `NOT STARTED` | Phase 9A (QML scaffold) |
+| **11B** | NICE DCV Rendering Optimisation | `NOT STARTED` | Phase 9B (QML charts) |
+| **11C** | Systemd Engine & UI Service Files | `NOT STARTED` | Phase UI-10B |
+| **11D** | Observability & GPU Diagnostics | `NOT STARTED` | Phase 11C |
+
+**Problems addressed (summary):**
+
+- **11A:** Install script for Ubuntu 24.04: NVIDIA driver ≥ 535,
+  CUDA 12, Qt 6.6 from `qt6-base-dev`, NICE DCV server ≥ 2023.1.
+  `QT_QPA_PLATFORM=xcb` environment configuration. OpenGL 4.5 context
+  assertion at startup (fail-fast if < 4.0).
+- **11B:** NICE DCV session configuration for OpenGL capture.
+  `QSG_RENDER_LOOP=threaded` enforced. Frame pacing: 30 FPS floor
+  configured in NICE DCV server settings. GPU memory allocation hints.
+- **11C:** `engine.service` and `trading-ui.service` systemd unit files.
+  Startup order: engine starts first, UI waits for IPC port. Watchdog
+  timeout, `KillMode=mixed`, `OOMScoreAdj` tuned to protect engine.
+- **11D:** `nvidia-smi` GPU utilization logged every 60 s. QSG frame
+  timing exposed via `/metrics` endpoint. Prometheus/Grafana optional.
 
 ---
 

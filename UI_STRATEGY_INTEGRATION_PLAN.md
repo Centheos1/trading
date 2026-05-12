@@ -2022,3 +2022,954 @@ Phase 8C (Signal Log) ─────── depends on Phase 14B Tide/Wave snaps
 8A + 8B + 8C can run in parallel once their individual dependencies are met.
 Phase 8 GA requires all three sub-phases complete.
 ```
+
+---
+
+## 22. Phase 9 — Qt Quick/QML Migration, GPU Acceleration & UI Cleanup
+
+> **Deployment target:** Ubuntu 24.04 on AWS EC2 g5.xlarge (NVIDIA A10G),
+> streamed via NICE DCV. All constraints in `AGENT_STRATEGY_RULES.md §22`
+> apply to every component built in this phase.
+
+### 22.1 Overview
+
+Phase 9 is a **rendering-stack architectural pivot**. The existing
+`QWidget` + `QPainter` (CPU raster) UI is replaced by **Qt Quick / QML**
+running on an OpenGL scene graph. This enables:
+
+1. **True GPU rendering** — chart geometry and heatmap textures live in
+   GPU VRAM. No per-frame CPU→GPU pixel upload.
+2. **NICE DCV optimization** — QML's retained-mode scene graph minimizes
+   redraws; DCV streams only changed regions.
+3. **Linux-first deployment** — QML runs identically on Ubuntu 24.04
+   with NVIDIA proprietary drivers; no macOS-only APIs.
+4. **Clean dead-element removal** — the QML migration is the right moment
+   to drop hidden legacy stubs and consolidate duplicate controls.
+
+| Sub-phase | Name | Status | Depends on |
+|---|---|---|---|
+| **9A** | QML Scaffold & OpenGL Backend Setup | `NOT STARTED` | Phase 8 (parallel) |
+| **9B** | Chart Widgets → QML Scene Graph | `NOT STARTED` | 9A |
+| **9C** | Strategy Dashboard → QML + Trade Indicators | `NOT STARTED` | 9B + Phase 8B |
+| **9D** | Dead Element Audit & Toolbar Cleanup | `NOT STARTED` | 9A (parallel with 9B) |
+
+**Phase 9 GA gate:** All four sub-phases complete. `QSGRendererInterface`
+backend is `OpenGL` (not `Software`) at startup. P95 frame time < 20 ms
+at 60 FPS on g5.xlarge. NICE DCV session stable for ≥ 30 minutes.
+
+---
+
+### 22.2 Phase 9A — QML Scaffold & OpenGL Backend Setup `[NOT STARTED]`
+
+**Problem in detail.**
+
+The application currently uses `QApplication` + `QMainWindow` (QWidget
+stack). Migrating to Qt Quick requires replacing the application root
+with `QGuiApplication` + `QQmlApplicationEngine` and establishing the
+OpenGL scene graph backend before any window is shown.
+
+**Proposed solution.**
+
+*9A-1 — Switch application root to QML engine.*
+
+Replace `ui/app.py`'s `QApplication` + `MainWindow()` with:
+
+```python
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
+
+# Force OpenGL scene graph — must be set BEFORE QGuiApplication creation
+os.environ.setdefault("QSG_RHI_BACKEND", "opengl")
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")       # Linux/NICE DCV
+os.environ.setdefault("QSG_RENDER_LOOP", "threaded")   # Scene graph off GUI thread
+
+app = QGuiApplication(sys.argv)
+engine = QQmlApplicationEngine()
+engine.load("ui/qml/main.qml")
+```
+
+*9A-2 — GPU verification check.*
+
+After the first `QQuickWindow` is created, call `_check_gpu(window)`
+(see `AGENT_STRATEGY_RULES.md §22.2`). Log at ERROR and display an
+in-app banner if software rendering is detected.
+
+*9A-3 — NICE DCV frame pacing.*
+
+```python
+window.setMaximumFrameLatency(1)   # single-frame pipeline — minimizes latency
+window.setRenderTarget(QQuickWindow.DefaultTarget)
+```
+
+*9A-4 — QML directory structure.*
+
+```
+ui/qml/
+  main.qml                    # root ApplicationWindow
+  components/
+    HeatmapView.qml           # wraps HeatmapItem (QQuickPaintedItem)
+    CandleChartView.qml       # wraps CandleItem (QSGGeometryNode-backed)
+    CvdView.qml               # wraps CvdItem
+    VolumeProfileView.qml     # wraps VolumeProfileItem
+    StrategyDashboard.qml     # composes diagnostics + blotter + position card
+    PositionCard.qml          # trade position summary
+    TradeBlotter.qml          # ListView-backed blotter
+  models/
+    TradeBlotterModel.py      # QAbstractListModel registered as QML type
+    SnapshotModel.py          # exposes TideSnapshot / WaveSnapshot props to QML
+```
+
+*9A-5 — C++ / Python model registration.*
+
+Expose data models to QML via `PySide6.QtQml.QmlElement` or
+`qmlRegisterType`. `TradeBlotterModel` and `SnapshotModel` are
+`QObject` subclasses with `Q_PROPERTY` fields. The QML engine holds
+a reference; Python garbage collection must not collect them.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `ui/app.py` | Replace `QApplication`/`QMainWindow` with `QGuiApplication`/`QQmlApplicationEngine`. Set env vars. Add `_check_gpu`. |
+| `ui/qml/main.qml` (NEW) | Root `ApplicationWindow` with three detachable `Window` items: OrderFlow, Chart, Strategy. |
+| `ui/qml/components/` (NEW) | Stub QML files for each component (empty `Item {}` placeholders for 9A; filled in 9B/9C). |
+| `ui/models/snapshot_model.py` (NEW) | `QObject` exposing `tide_bias`, `wave_regime`, `risk_budget_pct`, `unrealized_pnl` as `Q_PROPERTY`. |
+| `tests/test_qml_scaffold.py` (NEW) | Offscreen: engine loads `main.qml` without error; `QSGRendererInterface` is not `Software`; `_check_gpu` emits ERROR log when forced to software mode via `QT_QPA_PLATFORM=offscreen`. |
+
+**Acceptance criteria.**
+
+1. `python -m ui.app` opens three QML windows without Python exceptions.
+2. `QSGRendererInterface.graphicsApi()` ≠ `Software` on a machine with
+   a GPU and NVIDIA drivers installed.
+3. `QSG_RHI_BACKEND=opengl` is set before `QGuiApplication` creation.
+4. `_check_gpu` logs `ERROR` when `QSG_RHI_BACKEND=software` is forced.
+5. All existing `tests/test_strategy_ui.py` checks pass (QWidget paths
+   remain available during migration — they are deprecated, not deleted).
+
+---
+
+### 22.3 Phase 9B — Chart Widgets → QML Scene Graph `[NOT STARTED]`
+
+**Problem in detail.**
+
+| Widget | Current (QWidget/QPainter) | Target (QML) |
+|---|---|---|
+| `HeatmapWidget` | Uploads 3.8 MB numpy `QImage` to GPU every paint | `QSGTexture` updated once per computed frame; drawn as a textured quad |
+| `CandleChartView` | Redraws all 80 candles from scratch every tick | `QSGGeometryNode` with vertex data updated only on bucket close; live candle updated incrementally |
+| `CVDWidget` | `QPainter` bar chart every tick | `QSGGeometryNode` bars; deltas accumulated, geometry updated once per frame |
+| `VolumeProfileWidget` | `QPainter` bar chart | `QSGGeometryNode` histogram; updated only on VP rebuild |
+
+**Migration tier: `QQuickPaintedItem` bridge.**
+
+Each widget is initially wrapped as a `QQuickPaintedItem` subclass. This
+renders using `QPainter` inside the QML scene graph — the scene graph
+handles compositing (GPU), but painting itself remains CPU. This is a
+**bridge tier** annotated `# TODO Phase 9B-final: migrate to QSGNode`
+and replaced in Phase 9B-final with native scene graph nodes.
+
+Bridge class pattern:
+
+```python
+class HeatmapItem(QQuickPaintedItem):
+    def paint(self, painter: QPainter) -> None:
+        # existing HeatmapWidget.paintEvent logic here
+        # but: depth_image is already cached as QSGTexture
+        ...
+```
+
+**9B-final — Native scene graph nodes for candle chart:**
+
+```python
+class CandleItem(QQuickItem):
+    def updatePaintNode(self, old_node, data):
+        node = old_node or QSGGeometryNode()
+        if self._geometry_dirty:
+            geom = QSGGeometry(QSGGeometry.defaultAttributes_Point2D(),
+                               self._vertex_count)
+            # fill vertex buffer from candle OHLC data
+            geom.markVertexDataDirty()
+            node.setGeometry(geom)
+            self._geometry_dirty = False
+        return node
+```
+
+This runs on the **render thread** (not GUI thread), completing within
+the frame budget without touching Python GIL-protected state.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `ui/items/heatmap_item.py` (NEW) | `HeatmapItem(QQuickPaintedItem)`: bridge. Replaces `HeatmapWidget`. Exposes `frameData` property; `paint()` draws the heatmap using existing `OrderFlowViewModel` output. |
+| `ui/items/candle_item.py` (NEW) | `CandleItem(QQuickItem)`: bridge first (`QQuickPaintedItem`), then native `QSGGeometryNode` in 9B-final. Exposes `bucketMs`, `visibleCandles` properties. |
+| `ui/items/cvd_item.py` (NEW) | `CvdItem(QQuickPaintedItem)`: bridge. |
+| `ui/items/volume_profile_item.py` (NEW) | `VolumeProfileItem(QQuickPaintedItem)`: bridge. |
+| `ui/qml/components/HeatmapView.qml` | Replace stub with `HeatmapItem { anchors.fill: parent }`. |
+| `ui/qml/components/CandleChartView.qml` | Replace stub with `CandleItem` + overlay lines + event markers. |
+| `ui/orderflow_viewmodel.py` | Add `depth_texture_dirty: bool` flag. `compute_frame()` sets flag when depth image changes; `HeatmapItem.paint()` calls `QQuickWindow.createTextureFromImage()` once when dirty. |
+| `tests/test_qml_chart_items.py` (NEW) | Offscreen: `HeatmapItem.paint()` called at most once after 100 `vm.add_trade()` calls between frames; `CandleItem.updatePaintNode()` is not called when no new candle data; vertex count matches candle count after geometry rebuild. |
+
+**Acceptance criteria.**
+
+1. `HeatmapItem` renders the heatmap in an offscreen QML scene; no
+   per-trade `paintEvent` calls between frames.
+2. `CandleItem._geometry_dirty` is `False` after `updatePaintNode()`;
+   set `True` only on bucket close.
+3. `QSGRendererInterface` reports `OpenGL` for all `QQuickWindow`
+   instances.
+4. P95 frame time for a synthetic 300 trades/s load < 20 ms at 60 FPS
+   (measured in `tests/test_perf_baseline.py`).
+5. All existing bubble pipeline tests pass unchanged.
+
+---
+
+### 22.4 Phase 9C — Strategy Dashboard → QML + Trade Indicators `[NOT STARTED]`
+
+**Scope summary.**
+
+Migrate `StrategyDashboardView`, `StrategyDiagnosticsPanel`, and
+`TradeBlotter` to QML components backed by registered Python `QObject`
+models. Add the `PositionCard` QML component and wire trade overlay
+lines and ENTRY/EXIT markers on the candle chart.
+
+**QML data models.**
+
+| QML Component | Python Model | Key Q_PROPERTYs |
+|---|---|---|
+| `TradeBlotter.qml` | `TradeBlotterModel(QAbstractListModel)` | `timestamp`, `signal_type`, `price`, `description`, `category`, `realized_pnl` |
+| `StrategyDiagnostics.qml` | `SnapshotModel(QObject)` | `tideBias`, `waveRegime`, `riskBudgetPct`, `unrealizedPnl`, `tradeState` |
+| `PositionCard.qml` | `PositionModel(QObject)` | `entryPrice`, `stopPrice`, `targetPrice`, `rrRatio`, `unrealizedPnl`, `sessionPnl`, `tradeStateLabel` |
+
+**Trade indicators (candle chart).**
+
+Add to `CandleItem`:
+- `tradeOverlayActive: bool` + `entryPrice/stopPrice/targetPrice: real` properties → QML binding draws three horizontal dashed lines.
+- `tradeEvents: var` (list model of `{ts_ms, type, price}`) → QML `Repeater` draws up/down triangle markers at candle x-positions.
+
+Wire from Python: `SnapshotModel` emits `overlayChanged` signal when
+snapshot updates; `CandleChartView.qml` binds `tradeOverlayActive` to
+`snapshotModel.tradeState === "ACTIVE"`.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `ui/models/trade_blotter_model.py` (NEW) | `TradeBlotterModel(QAbstractListModel)`: thread-safe `appendEntry(SignalEntry)`; max 500 rows; `roleNames` returns field names. |
+| `ui/models/position_model.py` (NEW) | `PositionModel(QObject)`: Q_PROPERTYs for position fields; `update(snap, exec_state)` called from render timer. |
+| `ui/qml/components/PositionCard.qml` (NEW) | Card layout: trade state badge, entry/stop/target rows, R:R, PnL. Solid dark background (no opacity for NICE DCV). |
+| `ui/qml/components/TradeBlotter.qml` (NEW) | `ListView` with `TradeBlotterModel`. Fixed-height delegate (32 px). Category color coding. |
+| `ui/qml/components/StrategyDashboard.qml` (NEW) | Composes `PositionCard`, `TradeBlotter`, `StrategyDiagnostics`. |
+| `ui/main_window_bridge.py` (NEW) | Thin Python bridge: receives `_on_ripple_received` / `_on_timer_tick` events and updates QML models via `QMetaObject.invokeMethod`. Replaces direct widget calls in `main_window.py`. |
+| `tests/test_qml_strategy_ui.py` (NEW) | `TradeBlotterModel.appendEntry` from a non-GUI thread; `rowCount` increments; `PositionModel` updates from a synthetic snapshot; `PositionCard` renders non-placeholder content when `tradeState == "ACTIVE"`. |
+
+**Acceptance criteria.**
+
+1. `TradeBlotterModel.appendEntry(entry)` called from a worker thread
+   does not crash; the `rowCount` observed from the QML engine
+   increments by 1.
+2. `PositionModel.tradeStateLabel` is `"ACTIVE"` after
+   `update(snap_with_active_trade, exec_state)`.
+3. `PositionCard.qml` renders without `opacity` animations; background
+   is solid `#0c0e1c`.
+4. Entry/stop/target overlay lines appear on `CandleItem` when
+   `tradeOverlayActive` is set; disappear on `clear_trade_overlay()`.
+5. ENTRY triangle marker appears at the correct candle x-position for a
+   synthetic event with a known `ts_ms`.
+6. All existing `tests/test_strategy_dashboard.py` checks pass.
+
+---
+
+### 22.5 Phase 9D — Dead Element Audit & Toolbar Cleanup `[NOT STARTED]`
+
+This sub-phase is identical in intent to the previously planned cleanup
+but is implemented in QML rather than QWidget. All legacy stub controls
+are removed during the QML toolbar rebuild.
+
+**Dead elements removed (consolidated list):**
+
+| Element | Resolution |
+|---|---|
+| `_tick_size_input` / `_imbalance_input` (hidden) | Removed. Defaults hardcoded in `engine_service.py`. |
+| `_mode_combo` "Replay" item (disabled) | Removed. Mode combo reduced to "Live" label. |
+| `_candle_combo` (main toolbar) | Removed. `CandleChartView.qml` toolbar has the single `ComboBox` for timeframe. |
+| SMA/EMA/VWAP/Structural/VolProfile overlays always-on | QML `CheckBox` row in chart toolbar; state persisted via `Qt.labs.settings`. |
+| `_SuppressionMetrics` never surfaced | QML `ToolTip` on ripple count label, formatted each frame from model property. |
+
+**Acceptance criteria.**
+
+1. QML toolbar contains no disabled or hidden controls inherited from
+   the old QWidget toolbar.
+2. Chart timeframe `ComboBox` in `CandleChartView.qml` is the only
+   candle-duration control; changing it updates all dependent views.
+3. Each overlay `CheckBox` persists its state across restarts.
+4. Suppression metrics appear in the `ToolTip` within one render frame
+   of receiving a ripple decision.
+
+---
+
+### 22.6 Phase 9 Dependency Graph
+
+```
+Phase 9A (QML Scaffold + GPU Backend)
+  └─ independent of Phase 8; can start now
+
+Phase 9B (Chart Widgets → QML)
+  └─ depends on: Phase 9A (QML engine, component directory)
+
+Phase 9C (Strategy Dashboard → QML + Trade Indicators)
+  ├─ depends on: Phase 9B (CandleItem overlay API)
+  └─ depends on: Phase 8B (session_realized_pnl for PositionCard)
+
+Phase 9D (Dead Element Cleanup)
+  └─ depends on: Phase 9A (can run in parallel with 9B)
+
+9A → 9B → 9C (serial critical path)
+9D runs in parallel with 9B.
+Phase 9 GA requires 9A + 9B + 9C + 9D all complete.
+```
+
+---
+
+## 23. Phase 10 — Decoupled Render Loop & Engine Process Isolation
+
+### 23.1 Overview
+
+Phase 10 addresses two structural problems that make the current
+architecture unsuitable for 24/7 unattended trading on a remote server:
+
+**Problem 1 — Shared fate.** The engine and UI run in the same OS
+process. A Qt/QML rendering crash, a pybind11 segfault, or an OOM kill
+terminates the engine threads and leaves open positions unmanaged.
+
+**Problem 2 — Data rate drives render rate.** QML model updates are
+called directly from WS-thread callbacks. At 500 trades/s the QML
+engine may schedule 500 partial redraws between frames, wasting GPU
+time and NICE DCV bandwidth.
+
+**Goals.**
+
+1. Engine survival: trading continues for ≥ 30 minutes after the UI
+   process is killed.
+2. Render rate: exactly 60 FPS regardless of market data frequency.
+3. Headless engine: `engine_service.py` can run without any UI.
+
+| Sub-phase | Name | Status | Depends on |
+|---|---|---|---|
+| **UI-10A** | Decoupled 60 FPS Render Loop | `NOT STARTED` | Phase 9A (QML scaffold) |
+| **UI-10B** | Engine Service Process Isolation (ZeroMQ IPC) | `NOT STARTED` | UI-10A (ring-buffer boundary) |
+
+**Phase 10 GA gate.** UI-10A + UI-10B complete. Smoke test: engine
+PAPER-armed; `kill -9` UI PID; engine log shows continuous ticks for
+≥ 5 minutes; UI relaunched with `--engine-addr localhost`; reconnects
+and shows correct state without re-arming.
+
+---
+
+### 23.2 Phase UI-10A — Decoupled 60 FPS Render Loop `[NOT STARTED]`
+
+**Problem in detail.**
+
+After Phase 9, QML model updates are still called directly from WS
+callbacks on worker threads. Although QML coalesces some property-change
+events, high-frequency updates (200–500 trades/s) can still cause the
+QML engine to schedule excessive redraws between scene graph commits.
+The `_update_timer` at 100 ms drives `on_timer_tick()` heavy computation
+(VP rebuild, snapshot push) on the GUI thread, competing with scene
+graph rendering.
+
+**Proposed architecture (QML-aligned).**
+
+```
+WS / Engine threads                   QML / GUI thread
+───────────────────                   ─────────────────────────────
+trade callback                        QQuickWindow.frameSwapped signal
+  └─► _trade_buf.append()        ──►    _on_frame_swapped()
+                                          drain _trade_buf → vm.add_trade()
+depth callback                            drain _depth_buf → vm.add_depth()
+  └─► _depth_buf.append()                drain _ripple_buf → _process_ripple()
+                                          vm.compute_frame()           ← once
+ripple callback                           heatmap_model.update(frame)  ← once
+  └─► _ripple_buf.append()               if _frame_count % 6 == 0:
+                                            session.on_timer_tick()
+snapshot callback                           snapshot_model.update(snap)
+  └─► _snap_buf.append()                    position_model.update(...)
+```
+
+Key rules (QML):
+- **No QML property updates outside `_on_frame_swapped`** (GUI thread).
+  Worker threads append to ring buffers only.
+- **`QQuickWindow.frameSwapped`** replaces `QTimer` as the render
+  cadence driver. This signal fires after each GPU frame commit —
+  guaranteed 60 FPS on g5.xlarge, ≤ 30 FPS on bandwidth-limited
+  NICE DCV sessions.
+- **One `compute_frame()` per frame.** The heatmap ViewModel runs once
+  per `frameSwapped` event.
+- **`QAbstractListModel.beginInsertRows` / `endInsertRows`** batched:
+  all trade blotter entries from the drain are inserted in a single
+  `beginInsertRows` … `endInsertRows` block.
+- **100 ms coarse ops** driven by `_frame_count % 6` (at 60 FPS).
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `ui/main_window_bridge.py` | Connect `QQuickWindow.frameSwapped` to `_on_frame_swapped`. Remove `QTimer`. Add `_trade_buf`, `_depth_buf`, `_ripple_buf`, `_snap_buf` ring buffers. `_on_frame_swapped` drains all four buffers; calls `vm.compute_frame()` once; updates QML models via `Q_PROPERTY` setters (thread-safe — called from GUI thread). |
+| `ui/items/heatmap_item.py` | Replace `QQuickPaintedItem.update()` calls from data path with `_dirty = True`. Paint only when `_dirty`; clear after `paint()`. |
+| `ui/items/candle_item.py` | `_geometry_dirty = True` on new trade data; `updatePaintNode` runs only when dirty. |
+| `ui/models/trade_blotter_model.py` | Add `flush_pending()` method: drains an internal list of pending `SignalEntry` objects into the model with a single `beginInsertRows`/`endInsertRows` pair. Called from `_on_frame_swapped`. |
+| `tests/test_render_loop_qml.py` | NEW. Push 100 trades to `_trade_buf`; call `_on_frame_swapped()` once; assert `heatmap_item._dirty` is `False`; assert `blotter_model.rowCount()` increased by 100 in a single begin/end block; assert `frame_count` incremented; 100 ms ops not called on frames 1–5. |
+
+**Acceptance criteria.**
+
+1. `_on_frame_swapped` is the **only** place where QML model properties
+   are set. No worker thread directly calls `setProperty` on a model.
+2. Pushing 500 trades to `_trade_buf` between two `frameSwapped` events
+   results in exactly **one** `HeatmapItem.paint()` call and one
+   `beginInsertRows` / `endInsertRows` batch.
+3. `QQuickWindow.frameSwapped` drives the loop; no `QTimer` is used
+   for the render cadence.
+4. 100 ms accumulator ops execute once every 6 frames (±1 jitter).
+5. `tests/test_render_loop_qml.py` all pass.
+6. GPU utilization (steady-state, no market data) < 10% on g5.xlarge
+   (measured via `nvidia-smi`).
+
+---
+
+### 23.3 Phase UI-10B — Engine Service Process Isolation `[NOT STARTED]`
+
+**Problem in detail.**
+
+Phase UI-10A decouples rendering from data frequency. However, the engine
+and UI still share the same OS process. A `SIGSEGV` in the Qt OpenGL
+driver, an unhandled exception in a QML `updatePaintNode`, or an OOM
+kill will terminate the engine threads mid-trade. The only way to
+guarantee the engine survives a UI failure is to run them in **separate
+OS processes**.
+
+**Proposed architecture.**
+
+```
+┌──────────────────────────────────────┐
+│         engine_service.py            │   started by: ui/app.py as subprocess,
+│         (separate OS process)        │   OR headlessly: python engine_service.py
+│                                      │
+│  ┌──────────────────────────────┐    │
+│  │  WS Feed Thread              │    │
+│  │  C++ OrderFlowEngine         │    │
+│  │  LayeredPush Thread          │    │
+│  │  ExecutionManager / Broker   │    │
+│  └────────────┬─────────────────┘    │
+│               │ events               │
+│  ┌────────────▼─────────────────┐    │
+│  │  IpcPublisher                │    │──► tcp://127.0.0.1:55001 (ZMQ PUB)
+│  │  (zmq PUB socket)            │    │    publishes: TICK, DEPTH, RIPPLE,
+│  └──────────────────────────────┘    │    SNAPSHOT, ORDER, HEALTH
+│                                      │
+│  ┌──────────────────────────────┐    │
+│  │  ControlServer               │    │◄── tcp://127.0.0.1:55002 (ZMQ REP)
+│  │  (zmq REP socket)            │    │    receives: CONNECT, DISCONNECT,
+│  └──────────────────────────────┘    │    ARM, DISARM, SET_MODE
+└──────────────────────────────────────┘
+
+┌──────────────────────────────────────┐
+│         ui/app.py (Qt process)       │
+│                                      │
+│  ┌──────────────────────────────┐    │
+│  │  IpcClient Thread            │    │◄── ZMQ SUB (subscribes to PUB)
+│  │  (zmq SUB socket)            │    │    writes to _trade_buf/_snap_buf/...
+│  └──────────────────────────────┘    │
+│                                      │
+│  ┌──────────────────────────────┐    │
+│  │  ControlClient               │    │──► ZMQ REQ → engine ControlServer
+│  │  (zmq REQ socket, main thr.) │    │    (ARM, DISARM, CONNECT, etc.)
+│  └──────────────────────────────┘    │
+│                                      │
+│  Qt Render Timer (16 ms)             │
+│  drains buffers → repaints           │
+└──────────────────────────────────────┘
+```
+
+**IPC message protocol.**
+
+All messages are serialized as `msgpack` (fast, compact, no schema
+compilation required). Each message is a 2-frame ZeroMQ multipart:
+`[topic_bytes, payload_bytes]`.
+
+| Topic | Direction | Fields |
+|---|---|---|
+| `TICK` | Engine → UI | `ts_ms, price, qty, side, symbol` |
+| `DEPTH` | Engine → UI | `ts_ms, bids: [(p,q)], asks: [(p,q)]` |
+| `RIPPLE` | Engine → UI | `ts_ms, action, confidence, ref_price, state, symbol` |
+| `SNAPSHOT` | Engine → UI | `ts_ms, tide: {...}, wave: {...}, risk: {...}, trade: {...}` |
+| `ORDER` | Engine → UI | `order_id, status, side, qty, fill_price, reason` |
+| `HEALTH` | Engine → UI | `ts_ms, trade_feed_state, depth_feed_state, engine_ok` |
+| `CONNECT` | UI → Engine | `symbol, tick_size` |
+| `DISCONNECT` | UI → Engine | — |
+| `ARM` | UI → Engine | `mode, sizing_mode, sizing_value` |
+| `DISARM` | UI → Engine | — |
+| `SET_MODE` | UI → Engine | `mode` |
+
+**Engine service behaviour on UI disconnect.**
+
+When the engine's `ControlServer` detects that the ZMQ REQ socket has
+been silent for > `_CONTROL_TIMEOUT_S` (default 30 s), it enters
+**UI-absent mode**: publishing continues (for reconnecting UI), strategy
+execution continues with last armed state, no automatic disarm. This
+ensures open positions remain managed even if the UI crashes.
+
+**Watchdog / restart.**
+
+`engine_service.py` includes a self-watchdog: if the WS feed or
+ExecutionManager raises an unhandled exception, the watchdog logs the
+error, closes positions, and exits with a non-zero code so that
+systemd/supervisord can restart the process automatically.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `engine_service.py` (NEW) | Standalone script: `if __name__ == "__main__": run_engine_service(symbol, ...)`. Contains `IpcPublisher`, `ControlServer`, watchdog loop, and the existing `run_live_execute` wiring from `live_runner.py` (imported, not duplicated). |
+| `ipc/__init__.py` (NEW) | Package marker. |
+| `ipc/protocol.py` (NEW) | `IpcMessage` dataclass. `encode(msg) → bytes` / `decode(bytes) → IpcMessage` via `msgpack`. Topic constants. |
+| `ipc/publisher.py` (NEW) | `IpcPublisher`: owns ZMQ PUB socket; `publish_tick`, `publish_depth`, `publish_ripple`, `publish_snapshot`, `publish_order`, `publish_health`. Thread-safe. |
+| `ipc/control_server.py` (NEW) | `ControlServer`: owns ZMQ REP socket in a daemon thread; dispatches `CONNECT` / `DISCONNECT` / `ARM` / `DISARM` / `SET_MODE` to engine callbacks. |
+| `ipc/client.py` (NEW) | `IpcClient`: ZMQ SUB + REQ sockets in a daemon thread; writes received messages to the four `_*_buf` ring buffers in `MainWindow`. Exposes `send_control(cmd, payload)` for UI → engine commands. |
+| `ui/live_trading_session.py` | Add `IpcMode` flag. When in IPC mode, `start_live()` connects `IpcClient` instead of starting a local WS feed. `on_timer_tick()` unchanged (render timer accumulator drives it). |
+| `ui/main_window.py` | `_on_connect` spawns `engine_service.py` as a `subprocess.Popen` (or connects to an already-running instance). `_on_disconnect` sends `DISCONNECT` via `IpcClient.send_control`. ARM/DISARM send control messages instead of directly calling `ExecutionManager`. |
+| `ui/app.py` | Accept `--engine-addr` CLI arg to connect to a remote/existing engine instead of spawning a subprocess. |
+| `tests/test_ipc_protocol.py` (NEW) | Tests: encode/decode round-trip for all 6 topic types; unknown topic raises `ValueError`; `msgpack` payload is < 256 bytes for typical TICK message. |
+| `tests/test_ipc_client_server.py` (NEW) | In-process loopback tests using `inproc://` ZMQ transport: publisher sends 10 TICK messages; client receives 10 in `_trade_buf`; control round-trip: UI sends ARM, engine callback fires. |
+
+**New dependency.**
+
+```
+pyzmq >= 25.0     # ZeroMQ Python bindings
+msgpack >= 1.0    # Fast serialization
+```
+
+Add both to `requirements.txt` (or `pyproject.toml`).
+
+**Acceptance criteria.**
+
+1. `python engine_service.py --symbol BTCUSDT` starts without error
+   and begins publishing HEALTH messages at 1 Hz.
+2. `ui/app.py --engine-addr localhost` connects to the running service;
+   the Qt UI shows live trades within 2 s of connecting.
+3. `kill -9 <ui_pid>` while the engine is PAPER-armed: engine log
+   shows continuous tick processing for ≥ 5 minutes; no position
+   opened or closed without operator instruction.
+4. UI is relaunched with `--engine-addr localhost`; it reconnects and
+   shows the correct PAPER-armed state without the user re-arming.
+5. Engine `DISCONNECT` command stops the WS feed gracefully; engine
+   exits with code 0.
+6. All existing `tests/test_live_runner.py` and
+   `tests/test_execution_manager.py` tests pass unchanged (the runner
+   and exec manager are not structurally modified, only wrapped).
+7. `ipc/protocol.py` encode/decode round-trip tests pass for all topic
+   types (verified by `tests/test_ipc_protocol.py`).
+
+---
+
+### 23.4 Phase 10 Dependency Graph
+
+```
+Phase UI-10A (Decoupled Render Loop)
+  ├─ depends on: Phase 9A (QML scaffold, QQuickWindow available)
+  └─ independent of: Phase UI-10B
+
+Phase UI-10B (Engine Service Process Isolation)
+  ├─ depends on: Phase UI-10A (ring-buffer data boundary stable)
+  └─ new deps: pyzmq >= 25.0, msgpack >= 1.0
+
+UI-10A can start as soon as Phase 9A is merged.
+UI-10B starts after UI-10A is merged and ring-buffer boundary is stable.
+
+Phase 10 GA gate:
+  • kill -9 smoke test passes (see §23.3 acceptance criterion 3)
+  • UI reconnect smoke test passes (criterion 4)
+  • GPU utilization < 10% at idle, < 40% at peak
+  • All existing regression tests green
+```
+
+---
+
+## 24. Phase 11 — Linux / AWS / NICE DCV Production Deployment
+
+### 24.1 Overview
+
+Phase 11 transitions the application from developer-laptop execution
+to **production deployment** on Ubuntu 24.04 running on AWS EC2
+g5.xlarge with NICE DCV remote rendering. It encompasses:
+
+1. **NVIDIA driver + Qt 6 installation** (11A)
+2. **NICE DCV rendering optimization** (11B)
+3. **Systemd service files** for both engine and UI (11C)
+4. **GPU observability and diagnostics** (11D)
+
+This phase has no strategy-layer changes. It is purely operational /
+infrastructure.
+
+| Sub-phase | Name | Status | Depends on |
+|---|---|---|---|
+| **11A** | NVIDIA + Qt 6 Setup on Ubuntu 24.04 | `NOT STARTED` | Phase 9A (QML scaffold) |
+| **11B** | NICE DCV Rendering Optimisation | `NOT STARTED` | Phase 9B (QML charts) |
+| **11C** | Systemd Engine & UI Service Files | `NOT STARTED` | Phase UI-10B (IPC) |
+| **11D** | GPU Observability & Startup Diagnostics | `NOT STARTED` | Phase 11A |
+
+**Phase 11 GA gate:** Engine and UI running unattended on Ubuntu 24.04
+g5.xlarge via NICE DCV for 72 hours with zero manual restarts.
+All guardrails in `AGENT_STRATEGY_RULES.md §22` verified in CI against
+an offscreen OpenGL context.
+
+---
+
+### 24.2 Phase 11A — NVIDIA + Qt 6 Setup on Ubuntu 24.04 `[NOT STARTED]`
+
+**Problem in detail.**
+
+Ubuntu 24.04 ships with Mesa (software OpenGL via llvmpipe) by default.
+NVIDIA proprietary drivers must be installed and the Qt scene graph must
+be confirmed to use the NVIDIA GPU before any trading UI is deployed.
+There is currently no installation script, no deployment README, and no
+OpenGL version assertion at startup.
+
+**Proposed solution.**
+
+*11A-1 — Installation script (`scripts/setup_aws_ubuntu.sh`).*
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# NVIDIA driver
+apt-get install -y nvidia-driver-535 nvidia-utils-535
+
+# CUDA (optional — for future GPU strategy compute)
+apt-get install -y cuda-toolkit-12-3
+
+# Qt 6 runtime and development
+apt-get install -y \
+  qt6-base-dev qt6-declarative-dev qt6-qml-module \
+  libqt6opengl6 libqt6quick6 qml6-module-qtquick
+
+# Python bindings
+pip install PySide6==6.6.*
+
+# NICE DCV server
+# (follow AWS NICE DCV install guide; requires license)
+```
+
+*11A-2 — OpenGL context assertion at startup.*
+
+In `ui/app.py`, after the first `QQuickWindow` is visible:
+
+```python
+from PySide6.QtGui import QOpenGLContext
+ctx = QOpenGLContext.currentContext()
+if ctx is None:
+    raise RuntimeError("No OpenGL context — check NVIDIA drivers")
+version = ctx.format().version()
+if version < (4, 0):
+    raise RuntimeError(
+        f"OpenGL {version[0]}.{version[1]} < 4.0. "
+        "Proprietary NVIDIA drivers required.")
+logger.info("OpenGL %d.%d on %s", *version, ctx.extensions())
+```
+
+*11A-3 — Detect and reject llvmpipe.*
+
+```python
+renderer = ctx.extensions()   # contains renderer string
+if "llvmpipe" in renderer.lower() or "softpipe" in renderer.lower():
+    logger.error("Software renderer detected: %s. "
+                 "Install NVIDIA drivers and restart.", renderer)
+    sys.exit(1)
+```
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `scripts/setup_aws_ubuntu.sh` (NEW) | Full installation script for Ubuntu 24.04 on g5.xlarge. |
+| `ui/app.py` | Add OpenGL version check and renderer string check. Emit structured log at INFO (hardware) or ERROR (software). |
+| `docs/DEPLOYMENT.md` (NEW) | Step-by-step deployment guide: AMI selection, security groups, NICE DCV session, systemd setup, first-run smoke test. |
+| `tests/test_opengl_guard.py` (NEW) | Offscreen: mock `QOpenGLContext` returning version (3, 3) → `RuntimeError` raised; version (4, 5) → passes; renderer `"NVIDIA A10G"` → passes; renderer `"llvmpipe"` → `sys.exit(1)` called. |
+
+**Acceptance criteria.**
+
+1. `setup_aws_ubuntu.sh` runs without errors on a fresh Ubuntu 24.04
+   g5.xlarge AMI.
+2. After setup, `python -m ui.app` starts with `QSGRendererInterface =
+   OpenGL` logged at INFO.
+3. OpenGL version ≥ 4.0 asserted at startup; process exits with code 1
+   if not met.
+4. `llvmpipe` renderer string causes immediate `sys.exit(1)` with an
+   ERROR log.
+
+---
+
+### 24.3 Phase 11B — NICE DCV Rendering Optimisation `[NOT STARTED]`
+
+**Problem in detail.**
+
+NICE DCV captures the GPU framebuffer and streams it to the remote
+client. Without optimization, the default Qt rendering behaviour causes:
+
+- Unnecessary full-screen redraws when only one widget changed.
+- Variable frame rate (Qt does not throttle unless told to).
+- Semi-transparent overlays requiring compositor re-blends on every
+  frame, increasing DCV compression workload.
+- Animations that keep the scene "always dirty", preventing DCV from
+  skipping identical frames.
+
+**Proposed solution.**
+
+*11B-1 — NICE DCV server configuration.*
+
+`/etc/dcv/dcv.conf` (relevant sections):
+
+```ini
+[display]
+target-fps = 30          # 30 FPS is sufficient for trading; saves bandwidth
+web-client-max-head-resolution = (2560, 1440)
+
+[connectivity]
+enable-quic-frontend = true   # QUIC reduces latency vs TCP
+```
+
+*11B-2 — Qt scene graph NICE DCV hints.*
+
+```python
+# ui/app.py — before engine.load()
+os.environ["QSG_RENDER_LOOP"] = "threaded"      # scene graph off GUI thread
+os.environ["QT_QPA_UPDATE_IDLE_TIME"] = "16"    # ms between idle redraws
+```
+
+*11B-3 — QML component rules enforced in code review.*
+
+- All `Rectangle` backgrounds use `color: "#0c0e1c"` (solid — no alpha).
+- No `NumberAnimation` or `PropertyAnimation` on persistent UI elements.
+- Chart `QQuickItem` subclasses override `isTextureProvider() → True`
+  so DCV can capture them directly from the GPU without a CPU round-trip.
+- `QQuickWindow::setRenderTarget(DefaultTarget)` set in `ui/app.py`.
+
+*11B-4 — Frame-stable 30 FPS floor.*
+
+When `QQuickWindow.frameSwapped` fires faster than 30 FPS (> 33 ms
+between frames not guaranteed on DCV), the `_on_frame_swapped` handler
+checks elapsed time and skips model updates if the last frame was < 16 ms
+ago (prevents DCV oversaturation while maintaining UI responsiveness
+on local GPU).
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `scripts/configure_dcv.sh` (NEW) | Applies `/etc/dcv/dcv.conf` settings above; restarts `dcvserver`. |
+| `ui/app.py` | Add DCV render loop env vars; set `QQuickWindow::setRenderTarget`. |
+| `ui/main_window_bridge.py` | Add frame-time guard in `_on_frame_swapped`: skip if `elapsed < 16 ms`. |
+| `docs/DEPLOYMENT.md` | DCV configuration section. |
+
+**Acceptance criteria.**
+
+1. DCV client shows stable 30 FPS (±2 FPS) during a 60 s live-feed
+   connection (measured via `dcv describe-session --statistics`).
+2. QML scene graph uses `threaded` render loop (confirmed in startup log
+   `QSG_INFO=1`).
+3. No `NumberAnimation` present in any `.qml` file (verified by `grep
+   -r "NumberAnimation" ui/qml/`).
+4. GPU framebuffer captured directly (no CPU round-trip) for chart
+   items (verified by `nvidia-smi --query-gpu=memory.used` remaining
+   stable during idle streaming).
+
+---
+
+### 24.4 Phase 11C — Systemd Engine & UI Service Files `[NOT STARTED]`
+
+**Problem in detail.**
+
+Currently both the engine and UI are started manually. For 24/7
+operation, the engine must restart automatically on failure and start
+before the UI. The UI should be restartable independently.
+
+**Proposed solution.**
+
+*`/etc/systemd/system/trading-engine.service`*
+
+```ini
+[Unit]
+Description=Trading Engine Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/trading
+ExecStart=/opt/trading/venv/bin/python -m engine_service \
+  --symbol BTCUSDT --pub-port 55001 --rep-port 55002
+Restart=on-failure
+RestartSec=5
+OOMScoreAdj=-500          # protect engine from OOM killer
+KillMode=mixed
+TimeoutStopSec=30         # allow graceful position close
+
+[Install]
+WantedBy=multi-user.target
+```
+
+*`/etc/systemd/system/trading-ui.service`*
+
+```ini
+[Unit]
+Description=Trading UI (NICE DCV)
+After=trading-engine.service dcvserver.service
+Requires=trading-engine.service
+
+[Service]
+Type=simple
+User=trader
+Environment=DISPLAY=:1
+Environment=QSG_RHI_BACKEND=opengl
+Environment=QT_QPA_PLATFORM=xcb
+Environment=QSG_RENDER_LOOP=threaded
+WorkingDirectory=/opt/trading
+ExecStart=/opt/trading/venv/bin/python -m ui.app \
+  --engine-addr localhost
+Restart=on-failure
+RestartSec=10
+OOMScoreAdj=200           # UI is lower priority than engine
+```
+
+**Key design decisions:**
+
+- `OOMScoreAdj=-500` for engine: Linux OOM killer prefers positive
+  scores; engine is protected.
+- `KillMode=mixed`: sends `SIGTERM` to engine main process and
+  `SIGKILL` to remaining processes after `TimeoutStopSec`.
+- UI `Requires=trading-engine.service`: if engine is stopped,
+  systemd stops UI too (safe — engine is the authoritative process).
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `deploy/trading-engine.service` (NEW) | Systemd unit file above. |
+| `deploy/trading-ui.service` (NEW) | Systemd unit file above. |
+| `scripts/install_services.sh` (NEW) | Copies unit files to `/etc/systemd/system/`, reloads daemon, enables both services. |
+| `docs/DEPLOYMENT.md` | Service management section (start, stop, status, logs). |
+
+**Acceptance criteria.**
+
+1. `systemctl start trading-engine` starts the engine; IPC PUB port
+   55001 is listening within 5 s.
+2. `systemctl start trading-ui` connects to the engine; NICE DCV shows
+   the UI within 10 s.
+3. `kill -9 <ui_pid>` → systemd restarts UI within 10 s; engine
+   continues trading (verified by engine log).
+4. `systemctl stop trading-engine` sends `SIGTERM`; engine closes
+   positions gracefully and exits within 30 s.
+5. After OS reboot, both services start automatically in the correct
+   order.
+
+---
+
+### 24.5 Phase 11D — GPU Observability & Startup Diagnostics `[NOT STARTED]`
+
+**Problem in detail.**
+
+There is no visibility into GPU health, VRAM usage, or rendering
+performance during a live session. Regressions in GPU utilization (e.g.,
+accidental software fallback, memory leak in textures) are invisible
+until performance degrades noticeably.
+
+**Proposed solution.**
+
+*11D-1 — Startup diagnostic block.*
+
+```python
+# ui/app.py — always logged at startup
+def log_system_diagnostics() -> None:
+    import subprocess, json
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,driver_version,memory.total,"
+             "memory.free,utilization.gpu", "--format=csv,noheader"],
+            timeout=5).decode()
+        logger.info("GPU: %s", out.strip())
+    except FileNotFoundError:
+        logger.warning("nvidia-smi not found — GPU diagnostics unavailable")
+    logger.info("QSG backend: %s", os.environ.get("QSG_RHI_BACKEND", "auto"))
+    logger.info("Qt platform: %s", os.environ.get("QT_QPA_PLATFORM", "auto"))
+```
+
+*11D-2 — Runtime GPU health monitor.*
+
+`GpuMonitor` (background thread): polls `nvidia-smi` every 60 s;
+logs VRAM usage and GPU utilization. If GPU utilization is 0% for > 120 s
+while the UI is rendering, emit a `GPU_IDLE_WHILE_RENDERING` warning
+(potential software fallback regression).
+
+*11D-3 — QSG frame timing.*
+
+Enable `QSG_RENDER_TIMING=1` in the systemd service. Parse and log
+P50/P95/P99 frame times from the QSG output every 60 s.
+
+*11D-4 — Performance baseline CI test.*
+
+`tests/test_perf_baseline.py` (offscreen, synthetic load):
+
+| Metric | Pass Threshold |
+|---|---|
+| `QSGRendererInterface` | Not `Software` |
+| P95 frame time at 500 trades/s synthetic load | < 20 ms |
+| `TradeBlotterModel.rowCount()` after drain | Matches input count exactly |
+| `HeatmapItem.paint()` calls per 100 trades | Exactly 1 |
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `ui/app.py` | Add `log_system_diagnostics()` call at startup. |
+| `ui/monitoring/gpu_monitor.py` (NEW) | `GpuMonitor(threading.Thread)`: polls nvidia-smi; logs; emits `GPU_IDLE_WHILE_RENDERING` via Python logger. |
+| `deploy/trading-engine.service` | Add `Environment=QSG_RENDER_TIMING=1`. |
+| `tests/test_perf_baseline.py` (NEW) | Offscreen performance baseline tests (see table above). |
+
+**Acceptance criteria.**
+
+1. `log_system_diagnostics()` logs GPU name and driver version at startup
+   on g5.xlarge (or logs warning on non-GPU host).
+2. `GpuMonitor` runs for 60 s without exceptions in a unit test with a
+   mocked `nvidia-smi` subprocess.
+3. `GPU_IDLE_WHILE_RENDERING` warning appears in log when GPU utilization
+   is 0% for > 120 s (injected via mock).
+4. `tests/test_perf_baseline.py` all pass on an offscreen OpenGL context.
+
+---
+
+### 24.6 Phase 11 Dependency Graph
+
+```
+Phase 11A (NVIDIA + Qt 6 Setup)
+  └─ depends on: Phase 9A (QML scaffold — confirms Qt 6 is required)
+  └─ can run in parallel with Phase 9B, 9C
+
+Phase 11B (NICE DCV Optimisation)
+  └─ depends on: Phase 9B (QML charts must be rendering via scene graph)
+  └─ depends on: Phase 11A (NVIDIA driver installed)
+
+Phase 11C (Systemd Services)
+  └─ depends on: Phase UI-10B (engine_service.py exists with IPC ports)
+  └─ depends on: Phase 11A
+
+Phase 11D (GPU Observability)
+  └─ depends on: Phase 11A
+  └─ can run in parallel with Phase 11B and 11C
+
+Phase 11 GA gate:
+  • 72-hour unattended run on g5.xlarge via NICE DCV
+  • Zero OOM kills, zero unhandled engine exceptions
+  • GPU utilization logged and within bounds throughout
+  • All regression tests green on offscreen OpenGL context
+```

@@ -826,3 +826,157 @@ Any change to the bubble/CVD rendering path must pass these tests in `tests/test
 4. **Do not assume depth and trade timestamps are synchronized.** They drift by seconds in normal operation.
 5. **Do not add new time-dependent rendering logic without checking `test_bubble_pipeline.py`.** If you touch `t_start`, `chart_now`, pruning cutoffs, or visible window calculations, add a test that injects a 14-second depth-trade skew and verifies the data survives.
 6. **Do not use local system time (`datetime.now()`, `time.time()`) for any rendering timestamp.** The initial REST depth snapshot already does this (a known wart); it must not be introduced elsewhere.
+
+---
+
+## 22. UI Architecture Constraints — GPU / Linux / NICE DCV
+
+This section defines **non-negotiable architectural guardrails** for all
+UI development. The target deployment is Ubuntu 24.04 on AWS EC2
+GPU instances (g5.xlarge, NVIDIA A10G) with NICE DCV remote rendering.
+All UI phases (Phase 9, 10, 11 and beyond) must conform to these rules.
+Violations block PR merge.
+
+---
+
+### 22.1 Rendering Stack — What Is Permitted
+
+| Decision | Rule |
+|---|---|
+| **UI framework** | Qt 6 only. Qt 5 APIs must not be used. |
+| **Widget toolkit** | Qt Quick / QML for all new visual components. New `QWidget` subclasses are **forbidden** for production UI elements. Existing QWidget components may remain until migrated in Phase 9. |
+| **GPU backend** | OpenGL (primary). Vulkan (optional, Phase 11+). Software rendering (`llvmpipe`, `softpipe`, Mesa CPU) is **forbidden** in production. |
+| **Raster-only paths** | `QPainter` on `QWidget` is forbidden for new chart / dashboard components. `QQuickPaintedItem` is permitted as a **temporary bridge** during migration; it must be annotated `# TODO: migrate to QSGNode` and removed within one phase. |
+| **Animations** | Discrete state transitions only. Continuous timer-driven animations that cause permanent redraws are forbidden. |
+| **Transparency** | Solid-background panels preferred. Semi-transparent overlays may be used sparingly but must not be stacked (no more than one alpha-blended layer per screen region). |
+
+### 22.2 GPU Verification — Mandatory Startup Check
+
+Every application startup must verify hardware acceleration is active
+and log the result. If software rendering is detected, a visible warning
+must be emitted and the startup sequence must log at ERROR level.
+
+**Required startup code pattern:**
+
+```python
+# ui/app.py — before QQuickWindow.show()
+from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
+
+def _check_gpu(window: QQuickWindow) -> None:
+    api = window.rendererInterface().graphicsApi()
+    name = QSGRendererInterface.GraphicsApi(api).name
+    if api in (QSGRendererInterface.GraphicsApi.Software,
+               QSGRendererInterface.GraphicsApi.Unknown):
+        logger.error(
+            "FATAL: Qt scene graph using SOFTWARE rendering (%s). "
+            "Check NVIDIA drivers and QSG_RHI_BACKEND.", name)
+    else:
+        logger.info("Qt scene graph backend: %s (hardware)", name)
+```
+
+This check must run for every `QQuickWindow` opened (main, chart, strategy).
+
+**Required environment variables for OpenGL backend:**
+
+```bash
+export QSG_RHI_BACKEND=opengl        # Force OpenGL (not Vulkan/Metal)
+export QML_DISABLE_DISK_CACHE=0      # Enable QML compilation cache
+export QT_ENABLE_GLYPH_CACHE_WORKAROUND=1  # NVIDIA text rendering fix
+```
+
+These must be set in the systemd unit file and documented in the
+deployment README.
+
+### 22.3 Threading — Hard Rules
+
+| Rule | Rationale |
+|---|---|
+| **GUI thread renders only.** The Qt main thread (QML scene graph thread) must not call broker APIs, parse WebSocket frames, or run Tide/Wave computation. | Thread starvation causes frame drops visible in NICE DCV stream. |
+| **All market data ingestion runs on worker threads.** WS feed, depth snapshot fetch, and engine callbacks run on `QThread` or `threading.Thread` worker threads. | Matches current design; must remain true after QML migration. |
+| **Cross-thread data delivery uses lock-free ring buffers.** Worker threads write to bounded `collections.deque` (with GIL-protected `append`/`popleft`) or `queue.Queue`. The GUI thread drains these buffers once per render frame. | Avoids mutex contention on the hot path. |
+| **No `QMutex` on the GUI thread inside `updatePaintNode` or `paint`.** Scene graph callbacks must complete within the frame budget (< 8 ms at 60 FPS, < 16 ms at 30 FPS). | Blocking calls here stall the entire scene graph. |
+| **Engine service runs in a separate OS process (Phase UI-10B).** A crash in the Qt process must not terminate the trading engine. | 24/7 requirement: engine availability > UI availability. |
+
+### 22.4 Render Loop — FPS and Batching Rules
+
+| Rule | Value |
+|---|---|
+| **Target frame rate** | 60 FPS on local GPU; 30 FPS minimum on NICE DCV (network-limited). |
+| **Render timer interval** | 16 ms (60 FPS). Never shorter. Never longer than 33 ms (30 FPS floor). |
+| **Updates per frame** | Each widget/`QQuickItem` receives at most **one** `update()` / `markDirty()` call per render frame, regardless of incoming data rate. |
+| **Batch threshold** | Market data events between two render frames are accumulated in a ring buffer and applied in a single batch at frame start. |
+| **Coarse operations** | Tide/Wave snapshot push, VP profile rebuild, status-bar refresh: every 6th frame (~100 ms). |
+| **NICE DCV redraws** | A full-screen repaint must not be triggered more than 30 times per second. Dirty-region marking (`QQuickItem::update()` on a leaf item) is preferred over root-level redraws. |
+
+### 22.5 QML Scene Graph Rules
+
+| Rule |
+|---|
+| **Avoid binding loops.** Every QML property binding must have a clear, acyclic dependency graph. Use `onCompleted` or explicit function calls for initialization logic. |
+| **Do not create or destroy QML objects in the render loop.** Use `Loader`, `Repeater`, or `Component.createObject` during initialization only. During steady-state operation, update existing objects' properties — do not recreate them. |
+| **Use `ListView` with fixed-size delegates for the trade blotter.** `Repeater` is forbidden for lists > 50 items. |
+| **Geometry updates for charts must use `QSGGeometryNode` with `QSGGeometry.markVertexDataDirty()`.** Do not replace the geometry node — update vertex data in-place. |
+| **Custom `QSGNode` subclasses must implement `preprocess()` for data upload.** This runs on the render thread before the draw call, keeping the GUI thread free. |
+| **No `Canvas` for high-frequency chart data.** `Canvas` is QML-rasterized (CPU). Use `QQuickItem` with native scene graph nodes or `QQuickPaintedItem` (bridge only). |
+
+### 22.6 NICE DCV Optimization Rules
+
+NICE DCV streams the server-side GPU framebuffer to the remote client.
+Every unnecessary redraw costs network bandwidth and client decode CPU.
+
+| Rule | Rationale |
+|---|---|
+| **Do not use Qt animations (`NumberAnimation`, `SequentialAnimation`, etc.) on visual elements that are always visible.** | Animations force continuous redraws even when data is static. |
+| **Avoid `opacity` bindings that change frequently.** Each opacity change triggers a compositor re-blend pass. | |
+| **Prefer `visible: false` over `opacity: 0` to hide elements.** Hidden items are excluded from the scene graph entirely. | |
+| **Set `QQuickWindow::setRenderTarget` to the default framebuffer.** Do not render to offscreen surfaces unnecessarily. | Offscreen surfaces require a GPU blit back to the framebuffer — extra work for DCV. |
+| **Enable `QSG_RENDER_LOOP=threaded` (the default on Linux).** This moves scene graph submission off the GUI thread. | |
+| **Frame pacing: target a stable 30 or 60 FPS, never variable.** DCV clients buffer and decode at a fixed rate; jitter causes visible stutter. Set `QQuickWindow::setMaximumFrameLatency(1)`. | |
+
+### 22.7 Linux / AWS Deployment Rules
+
+| Rule |
+|---|
+| **Target OS: Ubuntu 24.04 LTS.** No macOS-specific APIs (Metal, CoreAnimation, `NSApplication`) in production paths. |
+| **GPU: NVIDIA A10G (g5.xlarge) with proprietary driver ≥ 535.** OSS `nouveau` driver is forbidden (no Vulkan/OGL perf). |
+| **Qt 6.6+ from official Qt installer or `qt6-base-dev` Ubuntu package.** Do not build Qt from source in production. |
+| **OpenGL context: require `OpenGL 4.5 Core Profile`.** Fail fast with an error if the context is < 4.0. |
+| **NICE DCV server version ≥ 2023.1** (supports GL/Vulkan capture on NVIDIA). |
+| **The trading engine (`engine_service.py`) runs as a systemd service with `Restart=on-failure`.** It must start before the UI and outlive it. |
+| **DISPLAY / Wayland: set `QT_QPA_PLATFORM=xcb` on the DCV server.** Wayland remoting through NICE DCV is not supported. |
+
+### 22.8 What Agents Must Never Do (UI)
+
+1. **Never create a new `QWidget` subclass for a production visual component.** Use `QQuickItem` or `QQuickPaintedItem` (bridge).
+2. **Never call `widget.update()` / `item.update()` from a non-GUI thread.** Use `QMetaObject.invokeMethod(..., Qt.QueuedConnection)` or emit a Qt signal.
+3. **Never call `QApplication.processEvents()` inside a timer callback or data handler.** This re-enters the event loop and causes ordering bugs.
+4. **Never disable `QSG_RHI_BACKEND`.** The RHI backend must always be set explicitly; relying on Qt's auto-detection risks software fallback on headless servers.
+5. **Never hold a Python GIL-protected lock inside `updatePaintNode` or `paint`.** Doing so stalls the scene graph render thread.
+6. **Never log at DEBUG level inside `paintEvent` / `updatePaintNode`.** Logging is IO and can exceed the frame budget.
+7. **Never use `QOpenGLWidget` for new components.** It uses a separate OpenGL context; prefer `QQuickItem` in the scene graph which shares the main context.
+8. **Never deploy with `QSG_RHI_BACKEND=software` or `LIBGL_ALWAYS_SOFTWARE=1` set.** These override GPU selection and force CPU rendering.
+
+### 22.9 Mandatory Performance Diagnostics
+
+Each UI phase must include a profiling baseline captured via:
+
+```bash
+QSG_RENDER_TIMING=1 python -m ui.app          # scene graph frame timings
+QSG_INFO=1 python -m ui.app                   # backend info at startup
+NVRM_PROFILING=1 nvidia-smi dmon -s u         # GPU utilization monitor
+```
+
+The following metrics must be logged at startup and available via the
+`--perf` CLI flag:
+
+| Metric | Pass Threshold |
+|---|---|
+| Scene graph backend API | Must be `OpenGL` or `Vulkan`, never `Software` |
+| Average frame time (60 FPS target) | < 16 ms |
+| P95 frame time | < 20 ms |
+| Qt main thread CPU usage (steady-state) | < 5% on g5.xlarge vCPU |
+| GPU utilization (steady-state, no trades) | < 10% |
+| GPU utilization (peak, 500 trades/s) | < 40% |
+
+These thresholds are tested in `tests/test_perf_baseline.py`
+(offscreen, synthetic load) before any Phase 9+ PR is merged.
