@@ -53,6 +53,20 @@ TIMEFRAMES = [
 ]
 
 _VISIBLE_CANDLES = 80
+_MAX_STORED_CANDLES = 1000
+
+# Phase 8A — empty / loading state labels rendered by ``paintEvent`` when
+# the deque is empty.  Centralised so tests can assert the exact strings
+# without duplicating literals across modules (AGENT_STRATEGY_RULES.md
+# §20).
+_LABEL_WAITING = "Waiting for candle data\u2026"
+_LABEL_LOADING = "Loading historical candles\u2026"
+
+# Sentinel trade count given to preloaded candles so that a subsequent
+# live ``process_trade`` lands in the ``c.trades > 0`` branch and
+# updates h/l/c without resetting the preloaded open price.  See
+# :meth:`CandleChartView.preload_candles`.
+_PRELOAD_TRADE_COUNT = 1
 
 
 @dataclass(slots=True)
@@ -80,12 +94,20 @@ class CandleChartView(QWidget):
 
         self._bucket_ms: int = 60_000
         self._visible_candles: int = _VISIBLE_CANDLES
-        self._candles: deque[_Candle] = deque(maxlen=1000)
+        self._candles: deque[_Candle] = deque(maxlen=_MAX_STORED_CANDLES)
 
         self._auto_scale = True
         self._price_min = 0.0
         self._price_max = 0.0
         self._last_paint_ms = 0.0
+        # Phase 8A — render-state hooks.  ``_loading`` toggles the empty
+        # placeholder text from "Waiting for candle data…" to
+        # "Loading historical candles…" while a REST preload is in
+        # flight.  ``_last_paint_label`` records the last empty-state
+        # label drawn so tests can assert paint behaviour without
+        # scraping pixel buffers.
+        self._loading: bool = False
+        self._last_paint_label: str = ""
 
         self._font_axis = QFont("Menlo", 9)
         self._font_price_tag = QFont("Menlo", 9, QFont.Bold)
@@ -108,6 +130,82 @@ class CandleChartView(QWidget):
         self._candles.clear()
         self._auto_scale = True
         self.timeframe_changed.emit(ms)
+        self.update()
+
+    # ----------------------------------------------------------- preload
+
+    def set_loading(self, loading: bool) -> None:
+        """Phase 8A — toggle the "Loading historical candles…" overlay.
+
+        Called by ``MainWindow`` around the async REST preload kicked
+        off from ``_on_connect`` / ``_on_chart_tf_changed``.  While
+        ``True`` the chart shows the loading placeholder instead of the
+        normal candle render, so the user gets explicit feedback that a
+        fetch is in flight (Acceptance Criterion #3, §16.2).
+        """
+        new = bool(loading)
+        if new == self._loading:
+            return
+        self._loading = new
+        self.update()
+
+    @property
+    def loading(self) -> bool:
+        return self._loading
+
+    def preload_candles(
+        self,
+        candles: list[tuple[int, float, float, float, float, float]],
+    ) -> None:
+        """Phase 8A — replace ``_candles`` with a batch of historical
+        OHLCV rows.
+
+        Each row is ``(open_time_ms, open, high, low, close, volume)``
+        as produced by :func:`data_feed.fetch_binance_klines`.  Empty
+        input is a no-op (so a network failure that returns ``[]`` does
+        not nuke any existing data).
+
+        Preloaded candles use :data:`_PRELOAD_TRADE_COUNT` as the
+        ``trades`` count so that subsequent ``process_trade`` calls
+        landing in the same bucket update high/low/close correctly
+        rather than re-seeding open from the live tick price.  Buy /
+        sell volume splits are zeroed — kline rows do not expose taker
+        side information.
+        """
+        if not candles:
+            return
+
+        ordered = sorted(candles, key=lambda r: r[0])
+        new_deque: deque[_Candle] = deque(maxlen=self._candles.maxlen)
+        for row in ordered:
+            try:
+                ts, o, h, l, c, v = row
+            except (TypeError, ValueError):
+                continue
+            ts_i = int(ts)
+            o_f = float(o)
+            h_f = float(h)
+            l_f = float(l)
+            c_f = float(c)
+            v_f = float(v)
+            if ts_i <= 0 or o_f <= 0 or c_f <= 0:
+                continue
+            bkt_ts = (ts_i // self._bucket_ms) * self._bucket_ms
+            new_deque.append(_Candle(
+                ts=bkt_ts,
+                o=o_f,
+                h=h_f,
+                l=l_f,
+                c=c_f,
+                vol=v_f,
+                buy_vol=0.0,
+                sell_vol=0.0,
+                trades=_PRELOAD_TRADE_COUNT,
+            ))
+        if not new_deque:
+            return
+        self._candles = new_deque
+        self._auto_scale = True
         self.update()
 
     def process_trade(self, ts: int, price: float, qty: float, is_buy: bool):
@@ -173,12 +271,20 @@ class CandleChartView(QWidget):
         w, h = self.width(), self.height()
         painter.fillRect(0, 0, w, h, _BG)
 
-        if not self._candles:
+        # Phase 8A — render the loading placeholder while a historical
+        # REST preload is in flight (acceptance #3) and the empty-state
+        # placeholder otherwise.  Painting the loading label suppresses
+        # the candle/grid render so the user is not shown a half-drawn
+        # chart during the fetch.
+        if self._loading or not self._candles:
+            label = _LABEL_LOADING if self._loading else _LABEL_WAITING
+            self._last_paint_label = label
             painter.setPen(_TEXT)
             painter.setFont(self._font_axis)
-            painter.drawText(w // 2 - 80, h // 2, "Waiting for candle data\u2026")
+            painter.drawText(w // 2 - 80, h // 2, label)
             painter.end()
             return
+        self._last_paint_label = ""
 
         px = MARGIN_LEFT
         py = MARGIN_TOP

@@ -1,34 +1,56 @@
-"""Phase 7V — HMM vs. rule-based backtest comparison harness.
+"""Phase 7V / Phase 16 — HMM vs. rule-based backtest comparison harness.
 
-End-to-end script that:
+End-to-end script that runs the HMM vs. rule-based A/B harness in one
+of two modes:
 
-1. Runs an ``orderflow`` backtest against a stored ``TickStore`` with the
-   default rule-based ``ScoreBasedInference`` backend, capturing every
-   ripple-decision evidence vector + assigned ``RippleState`` along the
-   way.
-2. Trains an HMM via :class:`hmm.HMMTrainer` on the captured evidence
-   sequence, choosing ``K`` by BIC across ``{3, 4, 5, 6}``, and derives
-   the ``state_map`` by majority vote against the rule-based labels.
-3. Saves the trained model to ``models/`` as JSON.
-4. Re-runs the same backtest with ``hmm_enabled=True`` +
-   ``hmm_model_path=<saved file>``, capturing the same metrics.
-5. Writes a Markdown + JSON A/B report to ``reports/``.
+- **Single-pair mode** (legacy, Phase 7V): ``--symbol`` + ``--from-time``
+  + ``--to-time``. Runs the rule-based backtest, trains an HMM on the
+  captured evidence, re-runs with HMM, writes one Markdown + JSON
+  report to ``reports/``.
 
-Closes the explicit validation gap from
-``implementation_plan.md`` Phase 7 ("Actual HMM vs. rule-based backtest
-comparison ... requires labeled V1 backtest data").
+- **Campaign mode** (Phase 16): ``--symbols`` + ``--windows`` (each
+  window is either ``YYYY-MM-DD:YYYY-MM-DD`` or shorthand ``30d`` /
+  ``60d`` / ``90d``). Iterates over the cartesian product, writes one
+  per-pair report (``hmm_campaign_{SYMBOL}_{WINDOW}_{seed}.md``) plus
+  one aggregate (``hmm_campaign_summary_{timestamp}.md``) and a frozen
+  ``config_snapshot.json``. Used for the multi-symbol / multi-window
+  research evidence that gates Phase 17.
+
+Both modes share the per-pair runner :func:`run_abtest` so the same
+training + comparison code path is exercised end-to-end.
+
+For testing without a built C++ engine, the campaign mode supports
+``--dry-run`` which uses a synthetic stub backtester (no real data
+needed). The unit tests reuse the same stub via direct import.
+
+Closes the explicit validation gap from ``implementation_plan.md``
+Phase 7 ("Actual HMM vs. rule-based backtest comparison ... requires
+labeled V1 backtest data") and delivers the Phase 16 campaign harness
+that records the :class:`CampaignVerdict` consumed by Phase 17's hard
+dependency gate.
 
 Usage::
 
     cd /Users/clintsellen/Documents/Trading/app/backtest
+
+    # Single-pair (legacy Phase 7V):
     python -m tools.hmm_abtest \\
         --symbol BTCUSDT --exchange binance \\
         --from-time 2024-01-01 --to-time 2024-12-31 \\
         --label phase7v_smoke
 
+    # Campaign (Phase 16):
+    python -m tools.hmm_abtest \\
+        --symbols BTCUSDT,ETHUSDT --windows 30d,60d --seed 42
+
+    # Smoke / CI without a built engine + without market data:
+    python -m tools.hmm_abtest \\
+        --symbols BTCUSDT --windows 30d --seed 42 --dry-run
+
 The harness is deterministic given the same tick store, parameters,
-and HMM training seed. All defaults match the post-13Y baseline
-(see ``reports/orderflow_BTCUSDT_post13Y_baseline.txt``).
+``--seed``, and (for shorthand windows) ``--now``. All defaults match
+the post-13Y baseline (see
+``reports/orderflow_BTCUSDT_post13Y_baseline.txt``).
 """
 from __future__ import annotations
 
@@ -52,15 +74,36 @@ if str(_PROJ_ROOT) not in sys.path:
 
 from hmm.abtest import (  # noqa: E402
     AbtestSummary,
+    CampaignVerdict,
+    DEFAULT_CAMPAIGN_SEED,
+    DEFAULT_CAMPAIGN_SYMBOLS,
+    DEFAULT_CAMPAIGN_WINDOWS,
+    DEFAULT_VERDICT_MEDIAN_SHARPE_DELTA_MIN,
+    DEFAULT_VERDICT_WIN_RATIO_MIN,
+    SHORTHAND_WINDOWS_DAYS,
+    VerdictThreshold,
+    aggregate_report_path,
+    aggregate_verdict,
+    campaign_verdict_to_dict,
+    compute_config_snapshot_hash,
     derive_state_map,
+    format_campaign_summary_report,
     format_comparison_json,
     format_comparison_report,
     now_iso,
+    parse_window_arg,
+    run_campaign,
+    write_config_snapshot,
 )
 from hmm.hmm_trainer import HMMTrainer  # noqa: E402
 from hmm.hmm_model import HMMModel  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Default config.json path used by the campaign mode for the
+# config-snapshot SHA-256. Documented as the user-overridable
+# ``--config-path`` flag.
+DEFAULT_CONFIG_PATH: Path = _PROJ_ROOT / "config.json"
 
 
 # Default parameter set — mirrors reports/orderflow_BTCUSDT_post13Y_baseline.txt.
@@ -279,7 +322,17 @@ def _train_hmm_from_capture(
             f"got {len(evidence)}; widen the date range or relax "
             f"signal thresholds")
 
-    np.random.seed(seed)
+    # Phase 16 determinism rule (AGENT_STRATEGY_RULES.md §7.1 +
+    # implementation_plan.md §7.2 acceptance #4): ``HMMTrainer`` is
+    # deterministic-by-construction (quantile-based init, no PRNG
+    # calls), so the seed does not currently feed any random state.
+    # We allocate a local ``default_rng(seed)`` anyway so future
+    # trainer changes that introduce randomized restarts can plumb
+    # the seed through without touching every caller. Crucially we
+    # do **NOT** call ``np.random.seed(seed)`` here — that mutates
+    # global numpy state and would break the determinism contract
+    # for any concurrent caller.
+    _rng = np.random.default_rng(seed)  # noqa: F841 — reserved for forward-compat
     obs = np.array(evidence, dtype=np.float64)
 
     trainer = HMMTrainer()
@@ -334,27 +387,85 @@ def _parse_date_arg(s: str, *, end_of_day: bool = False) -> int:
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="tools.hmm_abtest",
-        description="Phase 7V — HMM vs. rule-based backtest A/B harness.",
+        description=(
+            "Phase 7V (single-pair) / Phase 16 (campaign) — HMM vs. "
+            "rule-based backtest A/B harness."
+        ),
     )
+    # ---- Single-pair mode (Phase 7V, legacy) -------------------------
     p.add_argument("--symbol", default="BTCUSDT",
-                   help="symbol (default: BTCUSDT)")
+                   help="single-pair mode: symbol (default: BTCUSDT). "
+                        "Ignored when --symbols is set.")
     p.add_argument("--exchange", default="binance",
                    help="exchange / TickStore prefix (default: binance, "
                         "reads data/<exchange>_ticks.h5)")
-    p.add_argument("--from-time", required=True,
-                   help="start date (YYYY-MM-DD) or epoch ms")
-    p.add_argument("--to-time", required=True,
-                   help="end date (YYYY-MM-DD) or epoch ms")
+    p.add_argument("--from-time", default=None,
+                   help="single-pair mode: start date (YYYY-MM-DD) or "
+                        "epoch ms. Required when --symbols/--windows "
+                        "are not given.")
+    p.add_argument("--to-time", default=None,
+                   help="single-pair mode: end date (YYYY-MM-DD) or "
+                        "epoch ms. Required when --symbols/--windows "
+                        "are not given.")
+    # ---- Phase 16 campaign mode --------------------------------------
+    p.add_argument(
+        "--symbols", default=None,
+        help="Phase 16 campaign mode: comma-separated symbols, e.g. "
+             "'BTCUSDT,ETHUSDT'. Triggers campaign mode when set. "
+             f"Default if --windows is set: {','.join(DEFAULT_CAMPAIGN_SYMBOLS)}.",
+    )
+    p.add_argument(
+        "--windows", default=None,
+        help="Phase 16 campaign mode: comma-separated window list. Each "
+             "token is either an explicit ISO range "
+             "'YYYY-MM-DD:YYYY-MM-DD' or shorthand from "
+             f"{sorted(SHORTHAND_WINDOWS_DAYS)} (resolved relative to "
+             "--now). Triggers campaign mode when set. Default if "
+             f"--symbols is set: {','.join(DEFAULT_CAMPAIGN_WINDOWS)}.",
+    )
+    p.add_argument(
+        "--now", type=int, default=None,
+        help="Phase 16 campaign mode: UTC epoch ms used as 'now' for "
+             "shorthand window resolution. Default: actual UTC now. "
+             "Pass a fixed value for deterministic replay of a campaign.",
+    )
+    p.add_argument(
+        "--verdict-threshold", default=None,
+        help="Phase 16 campaign mode: '<win_ratio_min>,<sharpe_delta_min>' "
+             f"(default: '{DEFAULT_VERDICT_WIN_RATIO_MIN:.2f},"
+             f"{DEFAULT_VERDICT_MEDIAN_SHARPE_DELTA_MIN:.2f}'). "
+             "Promotion requires win_ratio >= win_ratio_min AND "
+             "median_sharpe_delta >= sharpe_delta_min (both).",
+    )
+    p.add_argument(
+        "--config-path", default=str(DEFAULT_CONFIG_PATH),
+        help="Phase 16 campaign mode: path to canonical config.json. The "
+             "SHA-256 of this file (computed with sort_keys=True) is "
+             "embedded in every report and written next to them as "
+             f"config_snapshot.json. Default: {DEFAULT_CONFIG_PATH}.",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="Phase 16 campaign mode: use a synthetic stub backtester "
+             "(no C++ engine, no market data). Writes the per-pair + "
+             "aggregate reports + config snapshot for smoke testing. "
+             "Single-pair mode ignores this flag.",
+    )
+    # ---- Shared knobs -----------------------------------------------
     p.add_argument(
         "--label", default="phase7v",
-        help="label suffix for output filenames (default: phase7v)")
+        help="label suffix for output filenames (default: phase7v; "
+             "single-pair mode only — campaign mode uses a fixed "
+             "'campaign' prefix).")
     p.add_argument(
         "--k-range", default="3,4,5,6",
         help="comma-separated K candidates for HMM model selection "
              "(default: 3,4,5,6)")
     p.add_argument(
-        "--seed", type=int, default=0,
-        help="numpy seed for HMM training reproducibility (default: 0)")
+        "--seed", type=int, default=DEFAULT_CAMPAIGN_SEED,
+        help=f"seed for HMM training reproducibility "
+             f"(default: {DEFAULT_CAMPAIGN_SEED}). Same seed + same "
+             "data + same config → identical per-window results.")
     p.add_argument(
         "--output-dir", default=None,
         help="report output dir (default: reports/)")
@@ -503,6 +614,255 @@ def run_abtest(
     return summary, md_path, json_path
 
 
+def _parse_verdict_threshold_arg(spec: Optional[str]) -> VerdictThreshold:
+    """Parse the ``--verdict-threshold`` CLI value.
+
+    Accepts ``None`` (use defaults) or a string of the form
+    ``'<win_ratio_min>,<sharpe_delta_min>'``. Both fields are floats.
+    """
+    if spec is None:
+        return VerdictThreshold()
+    parts = [s.strip() for s in spec.split(",")]
+    if len(parts) != 2:
+        raise ValueError(
+            f"--verdict-threshold must be 'win_ratio_min,sharpe_delta_min', "
+            f"got {spec!r}"
+        )
+    try:
+        wr = float(parts[0])
+        sd = float(parts[1])
+    except ValueError as exc:
+        raise ValueError(
+            f"--verdict-threshold parse error: {exc}"
+        ) from exc
+    return VerdictThreshold(win_ratio_min=wr, median_sharpe_delta_min=sd)
+
+
+def _make_dry_run_backtest_runner(seed: int):
+    """Build a synthetic stub backtester for ``--dry-run`` mode.
+
+    Mimics the signature of :func:`_run_single_backtest` but returns
+    deterministic synthetic data derived from the seed. The first call
+    (``capture_evidence=True``) yields two well-separated 6-D Gaussian
+    clusters; the second (``capture_evidence=False``) yields HMM-side
+    metrics with a small positive sharpe + cagr delta over the
+    rule-based side. Reused by Phase 16 unit tests via direct import.
+    """
+    rng = np.random.default_rng(seed)
+    n_per = 30
+    cluster_a = rng.normal(loc=[0.8, 0.1, 0.1, 0.1, 0.1, 0.1],
+                           scale=0.05, size=(n_per, 6))
+    cluster_b = rng.normal(loc=[0.1, 0.8, 0.1, 0.1, 0.1, 0.1],
+                           scale=0.05, size=(n_per, 6))
+    evidence = np.vstack([cluster_a, cluster_b]).tolist()
+    state_assignments = [2] * n_per + [3] * n_per
+    # Pick HMM-side values that clearly clear the default Phase 16
+    # promotion thresholds (win_ratio ≥ 0.60 AND median_sharpe_delta
+    # ≥ 0.10) so the dry-run report exercises the promote=True path.
+    # Sharpe delta = 0.25 (well above the 0.10 floor).
+    score_metrics = {"pnl": 1.0, "max_drawdown": 0.05, "num_trades": 5,
+                     "sharpe_ratio": 0.50, "cagr": 1.0}
+    hmm_metrics = {"pnl": 2.0, "max_drawdown": 0.05, "num_trades": 6,
+                   "sharpe_ratio": 0.75, "cagr": 1.5}
+
+    def runner(
+        ofe: Any,
+        *,
+        exchange: str,
+        symbol: str,
+        from_time_ms: int,
+        to_time_ms: int,
+        params: Dict[str, Any],
+        capture_evidence: bool,
+        timeout_s: float,
+    ) -> _RunResult:
+        result = _RunResult()
+        if capture_evidence:
+            result.evidence = list(evidence)
+            result.state_assignments = list(state_assignments)
+            result.decisions = len(evidence)
+            for s in state_assignments:
+                result.state_histogram[s] = (
+                    result.state_histogram.get(s, 0) + 1)
+            metrics = score_metrics
+        else:
+            result.decisions = len(evidence)
+            for s in state_assignments:
+                result.state_histogram[s] = (
+                    result.state_histogram.get(s, 0) + 1)
+            metrics = hmm_metrics
+        result.pnl = float(metrics["pnl"])
+        result.max_drawdown = float(metrics["max_drawdown"])
+        result.num_trades = int(metrics["num_trades"])
+        result.sharpe_ratio = float(metrics["sharpe_ratio"])
+        result.cagr = float(metrics["cagr"])
+        return result
+
+    return runner
+
+
+def _resolve_now_ms(now_arg: Optional[int]) -> int:
+    """Resolve the ``--now`` flag to a UTC epoch-ms integer.
+
+    If ``now_arg`` is ``None``, returns ``datetime.now(UTC)`` in ms;
+    otherwise returns the explicit value (used by tests + reproducible
+    campaign replays).
+    """
+    if now_arg is not None:
+        return int(now_arg)
+    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+
+
+def _load_config_for_snapshot(
+    config_path: Path, parser: argparse.ArgumentParser,
+) -> Dict[str, Any]:
+    """Load the canonical config.json. Errors degrade to ``parser.error``.
+
+    Returns the parsed dict. The caller is responsible for hashing it
+    via :func:`compute_config_snapshot_hash`.
+    """
+    if not config_path.exists():
+        parser.error(
+            f"--config-path {config_path} does not exist; cannot "
+            f"compute config_snapshot_hash"
+        )
+    try:
+        with open(config_path, encoding="utf-8") as fp:
+            cfg = json.load(fp)
+    except (OSError, json.JSONDecodeError) as exc:
+        parser.error(
+            f"--config-path {config_path} could not be parsed as JSON: "
+            f"{exc}"
+        )
+    if not isinstance(cfg, dict):
+        parser.error(
+            f"--config-path {config_path} must contain a JSON object"
+        )
+    return cfg
+
+
+def _run_campaign_mode(args: argparse.Namespace,
+                       parser: argparse.ArgumentParser) -> int:
+    """Phase 16 campaign mode entry point. Returns the process exit
+    code (0 on success). Always writes the config snapshot and the
+    aggregate report; per-pair reports are written by
+    :func:`run_campaign`.
+    """
+    symbols_str = args.symbols or ",".join(DEFAULT_CAMPAIGN_SYMBOLS)
+    windows_str = args.windows or ",".join(DEFAULT_CAMPAIGN_WINDOWS)
+    symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+    if not symbols:
+        parser.error("--symbols must contain at least one non-empty token")
+
+    now_ms = _resolve_now_ms(args.now)
+    window_tokens = [w.strip() for w in windows_str.split(",") if w.strip()]
+    if not window_tokens:
+        parser.error("--windows must contain at least one non-empty token")
+    windows: List[Tuple[int, int, str]] = []
+    for w in window_tokens:
+        try:
+            windows.append(parse_window_arg(w, now_ms=now_ms))
+        except ValueError as exc:
+            parser.error(f"--windows: {exc}")
+
+    try:
+        threshold = _parse_verdict_threshold_arg(args.verdict_threshold)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    k_range = [int(x) for x in args.k_range.split(",") if x.strip()]
+    if not k_range or any(k < 2 for k in k_range):
+        parser.error("--k-range must be a comma-separated list of "
+                     "ints >= 2")
+
+    output_dir = Path(args.output_dir) if args.output_dir else (
+        _PROJ_ROOT / "reports")
+    models_dir = Path(args.models_dir) if args.models_dir else (
+        _PROJ_ROOT / "models")
+
+    params = dict(DEFAULT_PARAMS)
+    if args.params_json:
+        with open(args.params_json) as fp:
+            extra = json.load(fp)
+        if not isinstance(extra, dict):
+            parser.error("--params-json must contain a JSON object")
+        params.update(extra)
+
+    config_path = Path(args.config_path)
+    cfg = _load_config_for_snapshot(config_path, parser)
+    snapshot_hash = compute_config_snapshot_hash(cfg)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = output_dir / "config_snapshot.json"
+    written_hash = write_config_snapshot(cfg, snapshot_path)
+    assert written_hash == snapshot_hash, (
+        "config snapshot hash mismatch — sort_keys serialization drift"
+    )
+
+    pair_runner_kwargs: Dict[str, Any] = {
+        "exchange": args.exchange,
+        "params": params,
+        "k_range": k_range,
+        "timeout_s": args.timeout_s,
+    }
+    if args.dry_run:
+        # Inject the synthetic backtester into the per-pair runner so
+        # we never touch the C++ engine or HDF5 store.
+        pair_runner_kwargs["backtest_runner"] = (
+            _make_dry_run_backtest_runner(args.seed))
+        pair_runner_kwargs["ofe_module"] = object()
+
+    logger.info(
+        "Phase 16 campaign starting: %d symbols × %d windows = %d pairs",
+        len(symbols), len(windows), len(symbols) * len(windows),
+    )
+
+    results = run_campaign(
+        symbols=symbols,
+        windows=windows,
+        config=cfg,
+        seed=args.seed,
+        output_dir=output_dir,
+        models_dir=models_dir,
+        config_snapshot_hash=snapshot_hash,
+        pair_runner_kwargs=pair_runner_kwargs,
+        label="campaign",
+    )
+
+    verdict = aggregate_verdict(
+        results, threshold,
+        config_snapshot_hash=snapshot_hash,
+        recorded_by="tools.hmm_abtest",
+        recorded_at=now_iso(),
+    )
+
+    ts_tag = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+    summary_md = aggregate_report_path(output_dir, ts_tag)
+    summary_md.write_text(
+        format_campaign_summary_report(
+            results, verdict, timestamp_iso=now_iso(), seed=args.seed),
+        encoding="utf-8",
+    )
+    summary_json = summary_md.with_suffix(".json")
+    summary_json.write_text(
+        json.dumps(campaign_verdict_to_dict(verdict), indent=2,
+                   sort_keys=True),
+        encoding="utf-8",
+    )
+
+    if not getattr(args, "quiet", False):
+        print()
+        print(f"Campaign aggregate report: {summary_md}")
+        print(f"Campaign aggregate JSON:   {summary_json}")
+        print(f"Config snapshot:           {snapshot_path}")
+        print(f"Config snapshot SHA-256:   {snapshot_hash}")
+        print(f"Pairs written:             {len(results)}")
+        print(f"Promote:                   {verdict.promote}")
+        print(f"win_ratio:                 {verdict.win_ratio:.4f}")
+        print(f"median_sharpe_delta:       {verdict.median_sharpe_delta:+.6f}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
@@ -512,6 +872,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         level=log_level,
         format="%(asctime)s [%(levelname)s] %(name)s :: %(message)s",
     )
+
+    # Phase 16 — campaign mode is selected by --symbols OR --windows.
+    # If either is set, we ignore the legacy --symbol/--from-time/--to-time.
+    if args.symbols is not None or args.windows is not None or args.dry_run:
+        return _run_campaign_mode(args, parser)
+
+    # Legacy single-pair mode (Phase 7V). --from-time and --to-time
+    # become required here (they are only optional at the parser level
+    # so campaign mode can omit them).
+    if args.from_time is None or args.to_time is None:
+        parser.error(
+            "single-pair mode requires --from-time and --to-time. "
+            "For campaign mode, pass --symbols and --windows instead."
+        )
 
     from_time_ms = _parse_date_arg(args.from_time)
     to_time_ms = _parse_date_arg(args.to_time, end_of_day=True)

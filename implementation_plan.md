@@ -3094,7 +3094,7 @@ evaluated before Phase 17 work begins.
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
-| **16** | HMM A/B Campaign at Scale | `NOT STARTED` | §9.10, §23 | Phase 7V (DONE) |
+| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING` | §9.10, §23 | Phase 7V (DONE) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
 | **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
@@ -3211,7 +3211,21 @@ test case to `test_replay_determinism.py` verifying this.
 
 ---
 
-### Phase 16 — HMM A/B Campaign at Scale `[NOT STARTED]`
+### Phase 16 — HMM A/B Campaign at Scale `[HARNESS DELIVERED 2026-05-12 — CAMPAIGN RECORDING PENDING]`
+
+> **Status nuance — read this first.** Phase 16 is split into two
+> halves: *(a) the campaign harness*, which is software (CLI flags,
+> dataclasses, report writers, deterministic seeds, config snapshot
+> hash) and is what this commit ships; and *(b) the campaign run on
+> real market data*, which is a runtime artefact that the user/agent
+> who has the tick data + intent must execute and then paste back
+> into the `CampaignVerdict` block below. The phase is **NOT
+> "DONE"** — it is "HARNESS DELIVERED" — until that real-data
+> verdict is recorded here. Phase 17 stays hard-gated until then.
+>
+> The harness was shipped on 2026-05-12. See "How to run the real
+> campaign and record the verdict" further down this section for the
+> exact CLI invocation + paste-back procedure.
 
 **Objective.** Phase 7V delivered a single-symbol smoke run (K=3,
 BIC=-31.09; HMM wins 1, rule-based wins 1, ties 2 — mixed verdict).
@@ -3260,6 +3274,82 @@ Phase 16 CampaignVerdict (to be recorded):
 - Phase 16 campaign has run on ≥ 2 symbols × ≥ 2 windows (minimum 4 pairs).
 - `CampaignVerdict` is recorded in this document (block above).
 - If `promote is False`, Phase 17 is blocked. Project owner must explicitly override in writing before any Phase 17 code is written.
+
+#### How to run the real campaign and record the verdict
+
+The harness is delivered (`hmm/abtest.py`, `tools/hmm_abtest.py`,
+`tests/test_hmm_abtest.py`). Once Binance tick data for the chosen
+symbols is staged in `data/binance_ticks.h5`, the campaign is one
+CLI invocation. The verdict that matters for Phase 17 is the one
+written into the **CampaignVerdict block above** by the agent/user
+who runs that command.
+
+**1. Smoke check (no market data — sanity that the harness works):**
+
+```bash
+cd /Users/clintsellen/Documents/Trading/app/backtest
+python tools/hmm_abtest.py \
+    --symbols BTCUSDT --windows 30d --seed 42 --dry-run \
+    --output-dir reports/phase16_smoke
+```
+
+This uses synthetic stub data, never touches the C++ engine, and
+exits 0 with a populated `reports/phase16_smoke/` directory. Use it
+to confirm the install + Python paths before the real run.
+
+**2. Real campaign (Phase 16 acceptance command):**
+
+```bash
+cd /Users/clintsellen/Documents/Trading/app/backtest
+python tools/hmm_abtest.py \
+    --symbols BTCUSDT,ETHUSDT \
+    --windows 30d,60d \
+    --seed 42
+```
+
+Optional knobs:
+
+- `--verdict-threshold 0.60,0.10` — pin custom promotion thresholds
+  (default: `win_ratio ≥ 0.60 AND median_sharpe_delta ≥ 0.10`).
+- `--config-path config.json` — path to the canonical config snapshot
+  (its SHA-256 is embedded in every report).
+- `--now <epoch_ms>` — fix the "now" anchor for shorthand windows
+  (`30d` / `60d` / `90d`) so the campaign is replay-deterministic.
+- `--windows 2024-01-01:2024-01-31,2024-06-01:2024-06-30` — explicit
+  ISO date ranges instead of shorthand.
+- `--quiet` — suppress progress logging.
+
+**3. Files produced under `reports/`:**
+
+| File | Purpose |
+|---|---|
+| `hmm_campaign_{SYMBOL}_{WINDOW}_{seed}.md` | Per-(symbol, window) report. Includes the per-pair `winner`, `win_ratio`, `median_sharpe_delta`, `median_cagr_delta`, `max_drawdown` (HMM run), `trade_count` (HMM run), the full HMM-vs-rule-based metric comparison table, and the `config_snapshot_hash`. |
+| `hmm_campaign_summary_{timestamp}.md` | Aggregate report with the per-pair table + the `CampaignVerdict` block at the bottom in the exact format expected by the "CampaignVerdict recorded here" block above. **Copy that block, paste it into the recorded-here block, edit `recorded_by` if needed.** |
+| `hmm_campaign_summary_{timestamp}.json` | Same data as the aggregate `.md` but JSON-shaped (machine-readable; downstream tooling). |
+| `config_snapshot.json` | Frozen sorted-keys copy of `config.json` at run time. SHA-256 of this file matches `config_snapshot_hash` in every per-pair report header. |
+| `hmm_abtest_{SYMBOL}_{label}_{ts}.{md,json}` | Original Phase 7V per-pair audit trail (one per pair). Kept intact alongside the canonical Phase 16 filenames. |
+
+**4. Paste-back procedure:**
+
+1. Open the new `reports/hmm_campaign_summary_{timestamp}.md`.
+2. Find the `## CampaignVerdict` section (last section of the file).
+3. Copy the `Phase 16 CampaignVerdict (recorded):` … block.
+4. Paste over the `Phase 16 CampaignVerdict (to be recorded):` block
+   in this document (above, in the "CampaignVerdict recorded here"
+   sub-section), changing the title from `(to be recorded)` to
+   `(recorded)`. Update `recorded_by` to your handle if needed.
+5. Update this section's status header from
+   `[HARNESS DELIVERED 2026-05-12 — CAMPAIGN RECORDING PENDING]` to
+   `[DONE — YYYY-MM-DD]`.
+6. If `promote: true` is recorded, Phase 17's hard gate is satisfied
+   and that work may begin. If `promote: false`, Phase 17 stays
+   blocked unless the project owner files an explicit override.
+
+The harness is deterministic: identical `--seed` + identical tick
+data + identical `config.json` content yields byte-identical
+per-pair `AbtestSummary` objects across re-runs. This is asserted by
+`tests/test_hmm_abtest.py::TestCampaignDeterminism`. Replays of the
+same campaign on the same data should reproduce the same verdict.
 
 ---
 
@@ -3816,7 +3906,7 @@ config-driven (§20), and `num_trades` is a Pareto objective (§22.2 #15).
 
 **Outstanding for V2 GA (see §7.2 for detailed phase specs):**
 - Phase 15 ✅ — LIMIT / OCO / partial-fill order types in `BinanceBroker` and `PaperEngine` (2026-05-12).
-- Phase 16 ⬜ — HMM A/B campaign at scale (multi-symbol, multi-window, ≥ 30-day windows).
+- Phase 16 ⬜ — HMM A/B campaign at scale: **harness delivered 2026-05-12** (`hmm/abtest.py::run_campaign`/`aggregate_verdict`/`CampaignVerdict` + `tools/hmm_abtest.py --symbols/--windows/--seed/--verdict-threshold/--config-path/--now/--dry-run`); campaign recording pending — needs a real-data run + `CampaignVerdict` paste-back into §7.2 before Phase 17 can begin.
 - Phase 17 ⬜ — HMM-based Wave regime classifier (gates on Phase 16 verdict).
 - Phase 18 ⬜ — Cross-venue features inside C++ Ripple (today Python WaveEngine only).
 - Phase 19 ⬜ — Hierarchical ES decomposition (Euler) — currently single global ES bucket.

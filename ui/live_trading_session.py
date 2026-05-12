@@ -18,9 +18,12 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from data_feed import (
     BINANCE_FUTURES_USDM_DEPTH_URL,
+    BINANCE_FUTURES_USDM_KLINES_URL,
+    DEFAULT_KLINES_LIMIT,
     depth_book_to_engine_update,
     fetch_and_build_depth_snapshot,
     fetch_binance_depth_book,
+    fetch_binance_klines,
 )
 from data_feed.binance_futures_ws import run_binance_usdm_futures_ws_feed
 from data_feed.stream_health import FeedState, FeedStreamHealth
@@ -463,6 +466,44 @@ class LiveTradingSession:
     def set_volume_profile_window(self, window_ms: int) -> None:
         if self._engine:
             self._engine.get_volume_profile().set_window(window_ms)
+
+    # ──────────────────────────────────────────────────────────────
+    # Phase 8A — Historical candle preload
+    # ──────────────────────────────────────────────────────────────
+
+    def fetch_historical_klines(
+        self,
+        symbol: str,
+        interval_ms: int,
+        limit: int = DEFAULT_KLINES_LIMIT,
+    ) -> list[tuple[int, float, float, float, float, float]]:
+        """Phase 8A — fetch historical OHLCV klines from Binance.
+
+        Synchronous wrapper around :func:`data_feed.fetch_binance_klines`
+        that **always returns a list** — network failures, malformed
+        responses, or invalid ``interval_ms`` values are logged and the
+        method returns ``[]``.  ``MainWindow`` runs this off the GUI
+        thread so the Qt event loop stays responsive (Acceptance
+        Criterion #4 — "no crash, no error dialog").
+
+        See ``UI_STRATEGY_INTEGRATION_PLAN.md`` §16.2.
+        """
+        sym = (symbol or "").strip()
+        if not sym:
+            return []
+        try:
+            return fetch_binance_klines(
+                BINANCE_FUTURES_USDM_KLINES_URL,
+                sym,
+                int(interval_ms),
+                limit=int(limit),
+            )
+        except Exception as exc:
+            logger.warning(
+                "fetch_historical_klines failed (symbol=%s interval_ms=%d): %s",
+                symbol, int(interval_ms), exc,
+            )
+            return []
 
     def _fetch_depth_snapshot(self, symbol: str) -> None:
         if not self._engine or ofe is None:

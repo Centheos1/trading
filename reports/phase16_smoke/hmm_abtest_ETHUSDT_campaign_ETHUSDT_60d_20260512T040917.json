@@ -1,0 +1,97 @@
+{
+  "phase": "7V",
+  "schema": 1,
+  "symbol": "ETHUSDT",
+  "from_time_ms": 1741816000000,
+  "to_time_ms": 1747000000000,
+  "captured_at_iso": "2026-05-12T04:09:17Z",
+  "n_observations": 60,
+  "K_chosen": 3,
+  "K_candidates": [
+    3,
+    4,
+    5,
+    6
+  ],
+  "bic": -1048.06711523481,
+  "log_likelihood": 616.1563102674022,
+  "model_json_path": "reports/phase16_smoke/models/hmm_ETHUSDT_campaign_ETHUSDT_60d_20260512T040917.json",
+  "state_map": [
+    2,
+    2,
+    3
+  ],
+  "score_metrics": {
+    "pnl": 1.0,
+    "max_drawdown": 0.05,
+    "num_trades": 5.0,
+    "sharpe_ratio": 0.5,
+    "cagr": 1.0
+  },
+  "hmm_metrics": {
+    "pnl": 2.0,
+    "max_drawdown": 0.05,
+    "num_trades": 6.0,
+    "sharpe_ratio": 0.75,
+    "cagr": 1.5
+  },
+  "score_decisions": 60,
+  "hmm_decisions": 60,
+  "score_state_histogram": {
+    "2": 30,
+    "3": 30
+  },
+  "hmm_state_histogram": {
+    "2": 30,
+    "3": 30
+  },
+  "metric_rows": [
+    {
+      "name": "pnl",
+      "score_value": 1.0,
+      "hmm_value": 2.0,
+      "delta": 1.0,
+      "relative_pct": 100.0,
+      "higher_is_better": true,
+      "winner": "hmm"
+    },
+    {
+      "name": "max_drawdown",
+      "score_value": 0.05,
+      "hmm_value": 0.05,
+      "delta": 0.0,
+      "relative_pct": 0.0,
+      "higher_is_better": false,
+      "winner": "tie"
+    },
+    {
+      "name": "num_trades",
+      "score_value": 5.0,
+      "hmm_value": 6.0,
+      "delta": 1.0,
+      "relative_pct": 20.0,
+      "higher_is_better": null,
+      "winner": "n/a"
+    },
+    {
+      "name": "sharpe_ratio",
+      "score_value": 0.5,
+      "hmm_value": 0.75,
+      "delta": 0.25,
+      "relative_pct": 50.0,
+      "higher_is_better": true,
+      "winner": "hmm"
+    },
+    {
+      "name": "cagr",
+      "score_value": 1.0,
+      "hmm_value": 1.5,
+      "delta": 0.5,
+      "relative_pct": 50.0,
+      "higher_is_better": true,
+      "winner": "hmm"
+    }
+  ],
+  "verdict": "HMM improves at least one metric without regression.",
+  "notes": []
+}

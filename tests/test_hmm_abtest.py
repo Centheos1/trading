@@ -660,5 +660,885 @@ class TestBuildConfigHmmFields(unittest.TestCase):
         self.assertEqual(cfg.ripple.hmm_model_path, "")
 
 
+# ===========================================================================
+# Phase 16 — HMM A/B Campaign at Scale
+# ===========================================================================
+#
+# These tests cover:
+#   * AbtestSummary.populate_phase16_fields and the new derived fields.
+#   * VerdictThreshold + CampaignVerdict shape.
+#   * aggregate_verdict promote logic (boundary at win_ratio=0.60).
+#   * run_campaign cartesian iteration, per-pair file emission,
+#     metadata stamping, and seed propagation.
+#   * Determinism: identical seed + identical stub data → identical
+#     AbtestSummary fields across two independent run_campaign calls.
+#   * Config snapshot: write_config_snapshot's hash matches
+#     compute_config_snapshot_hash; both match the spec formula
+#     hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).
+#   * parse_window_arg shorthand + ISO + invalid forms.
+#   * Default fallback (hmm_enabled=False): the campaign harness does
+#     not flip the rule-based config keys.
+#   * --seed CLI flag propagates through to the trainer call.
+#   * The CLI dry-run smoke (no real backtester needed) produces all
+#     expected report files and a valid CampaignVerdict.
+
+import hashlib
+
+from hmm.abtest import (
+    CampaignVerdict,
+    DEFAULT_CAMPAIGN_SEED,
+    DEFAULT_VERDICT_MEDIAN_SHARPE_DELTA_MIN,
+    DEFAULT_VERDICT_WIN_RATIO_MIN,
+    SHORTHAND_WINDOWS_DAYS,
+    VerdictThreshold,
+    aggregate_verdict,
+    campaign_verdict_to_dict,
+    compute_config_snapshot_hash,
+    format_campaign_pair_report,
+    format_campaign_summary_report,
+    parse_window_arg,
+    run_campaign,
+    write_config_snapshot,
+)
+
+
+def _make_pair_runner_double(
+    score_metrics: Dict[str, float],
+    hmm_metrics: Dict[str, float],
+):
+    """Build a stand-in for ``tools.hmm_abtest.run_abtest`` that skips
+    the trainer + C++ engine entirely. Returns a fully-populated
+    ``AbtestSummary`` so ``run_campaign`` can stamp Phase 16 metadata
+    on top.
+
+    The returned tuple matches ``run_abtest``'s signature
+    ``(summary, md_path, json_path)`` so the harness's per-pair file
+    handling exercises the real code path.
+    """
+    call_log: List[Dict[str, Any]] = []
+
+    def runner(
+        *,
+        symbol: str,
+        from_time_ms: int,
+        to_time_ms: int,
+        label: str,
+        seed: int,
+        output_dir: Path,
+        models_dir: Path,
+        exchange: str,
+        params: Dict[str, Any],
+        k_range: List[int],
+        timeout_s: float,
+        ofe_module: Any = None,
+        backtest_runner: Any = None,
+    ) -> tuple:
+        call_log.append({
+            "symbol": symbol,
+            "from_time_ms": from_time_ms,
+            "to_time_ms": to_time_ms,
+            "label": label,
+            "seed": seed,
+            "params": dict(params),
+            "k_range": list(k_range),
+        })
+        s = AbtestSummary(
+            symbol=symbol,
+            from_time_ms=from_time_ms,
+            to_time_ms=to_time_ms,
+            captured_at_iso="2026-05-12T00:00:00Z",
+            n_observations=10,
+            K_chosen=3,
+            K_candidates=list(k_range),
+            bic=-100.0,
+            log_likelihood=50.0,
+            score_metrics=dict(score_metrics),
+            hmm_metrics=dict(hmm_metrics),
+            score_decisions=10,
+            hmm_decisions=10,
+            state_map=[1, 2, 3],
+            score_state_histogram={1: 5, 2: 5},
+            hmm_state_histogram={1: 6, 2: 4},
+            model_json_path=str(
+                models_dir / f"hmm_{symbol}_{label}.json"),
+        )
+        # Touch the output dir + write a stub timestamped report so we
+        # can verify the harness re-emits the canonical per-pair file
+        # alongside it.
+        output_dir.mkdir(parents=True, exist_ok=True)
+        models_dir.mkdir(parents=True, exist_ok=True)
+        md_path = output_dir / f"hmm_abtest_{symbol}_{label}.md"
+        md_path.write_text("(stub timestamped report)", encoding="utf-8")
+        json_path = output_dir / f"hmm_abtest_{symbol}_{label}.json"
+        json_path.write_text("{}", encoding="utf-8")
+        return s, md_path, json_path
+
+    return runner, call_log
+
+
+# ---------------------------------------------------------------------------
+# AbtestSummary Phase 16 derived fields
+# ---------------------------------------------------------------------------
+
+class TestAbtestSummaryPhase16Fields(unittest.TestCase):
+    def test_populate_phase16_fields_hmm_strict_winner(self):
+        s = AbtestSummary(
+            symbol="BTCUSDT", from_time_ms=0, to_time_ms=1,
+            score_metrics={"pnl": 1.0, "max_drawdown": 0.10,
+                           "num_trades": 5, "sharpe_ratio": 0.5,
+                           "cagr": 1.0},
+            hmm_metrics={"pnl": 2.0, "max_drawdown": 0.10,
+                         "num_trades": 6, "sharpe_ratio": 0.7,
+                         "cagr": 2.0},
+        )
+        s.populate_phase16_fields()
+        # Decisive metrics: pnl, max_drawdown, sharpe, cagr (4).
+        # HMM wins pnl, sharpe, cagr; ties max_drawdown.
+        self.assertEqual(s.winner, "hmm")
+        self.assertAlmostEqual(s.win_ratio, 0.75)  # 3/4
+        self.assertAlmostEqual(s.median_sharpe_delta, 0.2)
+        self.assertAlmostEqual(s.median_cagr_delta, 1.0)
+        self.assertAlmostEqual(s.max_drawdown, 0.10)
+        self.assertEqual(s.trade_count, 6)
+
+    def test_populate_phase16_fields_score_winner(self):
+        s = AbtestSummary(
+            symbol="BTCUSDT", from_time_ms=0, to_time_ms=1,
+            score_metrics={"pnl": 5.0, "max_drawdown": 0.05,
+                           "num_trades": 5, "sharpe_ratio": 1.0,
+                           "cagr": 5.0},
+            hmm_metrics={"pnl": 1.0, "max_drawdown": 0.10,
+                         "num_trades": 5, "sharpe_ratio": 0.5,
+                         "cagr": 2.0},
+        )
+        s.populate_phase16_fields()
+        self.assertEqual(s.winner, "score")
+        self.assertEqual(s.win_ratio, 0.0)
+
+    def test_populate_phase16_fields_mixed(self):
+        s = AbtestSummary(
+            symbol="BTCUSDT", from_time_ms=0, to_time_ms=1,
+            score_metrics={"pnl": 5.0, "max_drawdown": 0.10,
+                           "num_trades": 5, "sharpe_ratio": 0.5,
+                           "cagr": 1.0},
+            hmm_metrics={"pnl": 6.0, "max_drawdown": 0.15,
+                         "num_trades": 5, "sharpe_ratio": 0.5,
+                         "cagr": 1.0},
+        )
+        s.populate_phase16_fields()
+        # HMM wins pnl, score wins max_drawdown, sharpe + cagr tie.
+        self.assertEqual(s.winner, "mixed")
+
+    def test_populate_phase16_fields_tie(self):
+        same = {"pnl": 1.0, "max_drawdown": 0.05,
+                "num_trades": 5, "sharpe_ratio": 0.5, "cagr": 1.0}
+        s = AbtestSummary(
+            symbol="BTCUSDT", from_time_ms=0, to_time_ms=1,
+            score_metrics=dict(same), hmm_metrics=dict(same))
+        s.populate_phase16_fields()
+        self.assertEqual(s.winner, "tie")
+        self.assertEqual(s.win_ratio, 0.0)
+        self.assertEqual(s.median_sharpe_delta, 0.0)
+
+    def test_phase16_fields_default_to_neutral(self):
+        # Default-constructed AbtestSummary must be backwards-compatible
+        # with Phase 7V callers that never populate the new fields.
+        s = AbtestSummary(symbol="BTCUSDT", from_time_ms=0, to_time_ms=1)
+        self.assertEqual(s.window_label, "")
+        self.assertEqual(s.seed, 0)
+        self.assertEqual(s.config_snapshot_hash, "")
+        self.assertEqual(s.winner, "tie")
+        self.assertEqual(s.win_ratio, 0.0)
+        self.assertEqual(s.trade_count, 0)
+
+
+# ---------------------------------------------------------------------------
+# VerdictThreshold + aggregate_verdict promote logic
+# ---------------------------------------------------------------------------
+
+class TestVerdictThreshold(unittest.TestCase):
+    def test_defaults_match_spec(self):
+        # Pin the Phase 16 spec defaults: win_ratio >= 0.60 AND
+        # median_sharpe_delta >= 0.10. If either default changes, the
+        # implementation_plan.md §7.2 spec must change first.
+        th = VerdictThreshold()
+        self.assertEqual(th.win_ratio_min,
+                         DEFAULT_VERDICT_WIN_RATIO_MIN)
+        self.assertEqual(th.median_sharpe_delta_min,
+                         DEFAULT_VERDICT_MEDIAN_SHARPE_DELTA_MIN)
+        self.assertEqual(th.win_ratio_min, 0.60)
+        self.assertEqual(th.median_sharpe_delta_min, 0.10)
+
+
+def _summary_with_winner(
+    *,
+    winner: str,
+    sharpe_delta: float = 0.20,
+    cagr_delta: float = 0.50,
+    dd_delta: float = 0.0,
+    trade_delta: int = 1,
+    symbol: str = "BTCUSDT",
+    window_label: str = "30d",
+) -> AbtestSummary:
+    """Synthesize an AbtestSummary whose populate_phase16_fields()
+    will yield the requested ``winner``."""
+    score = {"pnl": 1.0, "max_drawdown": 0.05, "num_trades": 5,
+             "sharpe_ratio": 0.5, "cagr": 1.0}
+    if winner == "hmm":
+        hmm = {
+            "pnl": score["pnl"] + 1.0,
+            "max_drawdown": score["max_drawdown"] - 0.01,
+            "num_trades": score["num_trades"] + trade_delta,
+            "sharpe_ratio": score["sharpe_ratio"] + sharpe_delta,
+            "cagr": score["cagr"] + cagr_delta,
+        }
+    elif winner == "score":
+        hmm = {
+            "pnl": score["pnl"] - 1.0,
+            "max_drawdown": score["max_drawdown"] + 0.01,
+            "num_trades": score["num_trades"] + trade_delta,
+            "sharpe_ratio": score["sharpe_ratio"] - 0.10,
+            "cagr": score["cagr"] - 0.10,
+        }
+    elif winner == "tie":
+        hmm = dict(score)
+    else:
+        raise ValueError(winner)
+    hmm["max_drawdown"] = score["max_drawdown"] + dd_delta
+    s = AbtestSummary(
+        symbol=symbol, from_time_ms=0, to_time_ms=1,
+        score_metrics=dict(score), hmm_metrics=dict(hmm),
+        window_label=window_label, seed=42,
+        config_snapshot_hash="dead" * 16,
+    )
+    s.populate_phase16_fields()
+    return s
+
+
+class TestAggregateVerdict(unittest.TestCase):
+    def test_empty_results_returns_promote_false(self):
+        v = aggregate_verdict([], VerdictThreshold())
+        self.assertIsInstance(v, CampaignVerdict)
+        self.assertFalse(v.promote)
+        self.assertEqual(v.win_ratio, 0.0)
+        self.assertEqual(v.n_pairs, 0)
+        self.assertEqual(v.symbols, [])
+        self.assertEqual(v.windows, [])
+
+    def test_promote_true_when_both_thresholds_met(self):
+        results = [
+            _summary_with_winner(winner="hmm", sharpe_delta=0.20),
+            _summary_with_winner(winner="hmm", sharpe_delta=0.20),
+            _summary_with_winner(winner="hmm", sharpe_delta=0.20),
+        ]
+        v = aggregate_verdict(results, VerdictThreshold())
+        self.assertTrue(v.promote)
+        self.assertAlmostEqual(v.win_ratio, 1.0)
+        self.assertAlmostEqual(v.median_sharpe_delta, 0.20)
+
+    def test_promote_false_when_win_ratio_too_low(self):
+        # 1 of 3 HMM wins → win_ratio = 0.333 < 0.60 → promote False
+        # even though the median sharpe delta clears 0.10.
+        results = [
+            _summary_with_winner(winner="hmm", sharpe_delta=0.20),
+            _summary_with_winner(winner="score"),
+            _summary_with_winner(winner="score"),
+        ]
+        v = aggregate_verdict(results, VerdictThreshold())
+        self.assertFalse(v.promote)
+        self.assertAlmostEqual(v.win_ratio, 1.0 / 3.0)
+
+    def test_promote_false_when_sharpe_delta_too_low(self):
+        # All HMM wins (win_ratio=1.0) but median sharpe delta < 0.10.
+        results = [
+            _summary_with_winner(winner="hmm", sharpe_delta=0.05),
+            _summary_with_winner(winner="hmm", sharpe_delta=0.05),
+            _summary_with_winner(winner="hmm", sharpe_delta=0.05),
+        ]
+        v = aggregate_verdict(results, VerdictThreshold())
+        self.assertFalse(v.promote)
+
+    def test_promote_at_exact_win_ratio_boundary(self):
+        # 0.60 boundary: 3 HMM wins out of 5 → win_ratio = 0.60.
+        # The spec requires `>=` so promote is True if sharpe also clears.
+        results = (
+            [_summary_with_winner(winner="hmm", sharpe_delta=0.20)] * 3
+            + [_summary_with_winner(winner="score")] * 2
+        )
+        v = aggregate_verdict(results, VerdictThreshold())
+        self.assertAlmostEqual(v.win_ratio, 0.60)
+        self.assertTrue(v.promote)
+
+    def test_threshold_overrides_apply(self):
+        # Custom threshold: win_ratio_min = 0.99 → 0.60 is no longer enough.
+        results = (
+            [_summary_with_winner(winner="hmm", sharpe_delta=0.20)] * 3
+            + [_summary_with_winner(winner="score")] * 2
+        )
+        v = aggregate_verdict(
+            results,
+            VerdictThreshold(win_ratio_min=0.99, median_sharpe_delta_min=0.0),
+        )
+        self.assertFalse(v.promote)
+
+    def test_campaign_verdict_field_completeness(self):
+        # Implementation_plan.md §7.2 "CampaignVerdict recorded here"
+        # block lists the exact fields the CampaignVerdict must carry.
+        # If any field disappears, this test catches the regression.
+        v = aggregate_verdict(
+            [_summary_with_winner(winner="hmm")],
+            VerdictThreshold(),
+            config_snapshot_hash="abc" * 16,
+            recorded_by="unit-test",
+            recorded_at="2026-05-12T00:00:00Z",
+        )
+        for fld in ("promote", "win_ratio", "median_sharpe_delta",
+                    "median_cagr_delta", "max_drawdown_delta",
+                    "trade_count_delta", "symbols", "windows",
+                    "config_snapshot_hash", "recorded_by", "recorded_at"):
+            self.assertTrue(hasattr(v, fld), f"missing field: {fld}")
+        self.assertEqual(v.config_snapshot_hash, "abc" * 16)
+        self.assertEqual(v.recorded_by, "unit-test")
+        self.assertEqual(v.recorded_at, "2026-05-12T00:00:00Z")
+
+    def test_aggregated_symbols_and_windows_dedupe_preserve_order(self):
+        results = [
+            _summary_with_winner(winner="hmm", symbol="BTCUSDT",
+                                 window_label="30d"),
+            _summary_with_winner(winner="hmm", symbol="BTCUSDT",
+                                 window_label="60d"),
+            _summary_with_winner(winner="score", symbol="ETHUSDT",
+                                 window_label="30d"),
+            _summary_with_winner(winner="hmm", symbol="ETHUSDT",
+                                 window_label="60d"),
+        ]
+        v = aggregate_verdict(results, VerdictThreshold())
+        self.assertEqual(v.symbols, ["BTCUSDT", "ETHUSDT"])
+        self.assertEqual(v.windows, ["30d", "60d"])
+        self.assertEqual(v.n_pairs, 4)
+
+    def test_campaign_verdict_to_dict_is_json_serializable(self):
+        v = aggregate_verdict(
+            [_summary_with_winner(winner="hmm")],
+            VerdictThreshold(),
+            config_snapshot_hash="hex",
+        )
+        d = campaign_verdict_to_dict(v)
+        encoded = json.dumps(d, sort_keys=True)
+        self.assertIsInstance(encoded, str)
+        decoded = json.loads(encoded)
+        self.assertEqual(decoded["schema"], 1)
+        self.assertEqual(decoded["config_snapshot_hash"], "hex")
+        self.assertIn("threshold", decoded)
+
+
+# ---------------------------------------------------------------------------
+# parse_window_arg
+# ---------------------------------------------------------------------------
+
+class TestParseWindowArg(unittest.TestCase):
+    NOW_MS = 1_700_000_000_000  # fixed UTC anchor for deterministic tests
+
+    def test_shorthand_30d(self):
+        f, t, lbl = parse_window_arg("30d", now_ms=self.NOW_MS)
+        self.assertEqual(t, self.NOW_MS)
+        self.assertEqual(f, self.NOW_MS - 30 * 86_400_000)
+        self.assertEqual(lbl, "30d")
+
+    def test_shorthand_60d_and_90d(self):
+        for spec, days in (("60d", 60), ("90d", 90)):
+            f, t, lbl = parse_window_arg(spec, now_ms=self.NOW_MS)
+            self.assertEqual(t - f, days * 86_400_000)
+            self.assertEqual(lbl, spec)
+
+    def test_iso_range(self):
+        f, t, lbl = parse_window_arg(
+            "2024-01-01:2024-01-31", now_ms=self.NOW_MS)
+        self.assertLess(f, t)
+        self.assertEqual(lbl, "2024-01-01_2024-01-31")
+        # Round-trip via datetime.
+        from datetime import datetime, timezone
+        f_dt = datetime.fromtimestamp(f / 1000.0, tz=timezone.utc)
+        t_dt = datetime.fromtimestamp(t / 1000.0, tz=timezone.utc)
+        self.assertEqual((f_dt.year, f_dt.month, f_dt.day), (2024, 1, 1))
+        self.assertEqual((t_dt.year, t_dt.month, t_dt.day), (2024, 1, 31))
+        self.assertEqual(t_dt.hour, 23)
+
+    def test_empty_raises(self):
+        with self.assertRaises(ValueError):
+            parse_window_arg("", now_ms=self.NOW_MS)
+
+    def test_unknown_shorthand_raises(self):
+        with self.assertRaises(ValueError):
+            parse_window_arg("17d", now_ms=self.NOW_MS)
+
+    def test_inverted_range_raises(self):
+        with self.assertRaises(ValueError):
+            parse_window_arg(
+                "2024-01-31:2024-01-01", now_ms=self.NOW_MS)
+
+    def test_shorthand_dictionary_pinned(self):
+        # If anyone changes the shorthand vocabulary, the spec ref in
+        # implementation_plan.md §7.2 must update too.
+        self.assertEqual(SHORTHAND_WINDOWS_DAYS,
+                         {"30d": 30, "60d": 60, "90d": 90})
+
+
+# ---------------------------------------------------------------------------
+# config snapshot hash
+# ---------------------------------------------------------------------------
+
+class TestConfigSnapshot(unittest.TestCase):
+    def test_hash_matches_spec_formula(self):
+        cfg = {"b": 1, "a": [1, 2, {"z": True}]}
+        expected = hashlib.sha256(
+            json.dumps(cfg, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(compute_config_snapshot_hash(cfg), expected)
+
+    def test_hash_invariant_to_input_key_order(self):
+        cfg_a = {"a": 1, "b": 2, "nested": {"x": 1, "y": 2}}
+        cfg_b = {"b": 2, "a": 1, "nested": {"y": 2, "x": 1}}
+        self.assertEqual(compute_config_snapshot_hash(cfg_a),
+                         compute_config_snapshot_hash(cfg_b))
+
+    def test_write_config_snapshot_round_trip(self):
+        import tempfile
+        cfg = {"foo": [1, 2, 3], "bar": {"baz": True}}
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "snap.json"
+            written_hash = write_config_snapshot(cfg, path)
+            self.assertTrue(path.exists())
+            # Re-hash the on-disk content the same way and confirm
+            # bit-equality.
+            on_disk = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(compute_config_snapshot_hash(on_disk),
+                             written_hash)
+            self.assertEqual(written_hash,
+                             compute_config_snapshot_hash(cfg))
+
+    def test_real_config_json_hashes(self):
+        # The real ``config.json`` must hash without error and the
+        # hash must be 64 hex chars (sha256).
+        cfg = json.load(open("config.json", encoding="utf-8"))
+        h = compute_config_snapshot_hash(cfg)
+        self.assertEqual(len(h), 64)
+        int(h, 16)  # must be parseable hex
+
+
+# ---------------------------------------------------------------------------
+# run_campaign + per-pair report writing
+# ---------------------------------------------------------------------------
+
+class TestRunCampaign(unittest.TestCase):
+    def setUp(self):
+        self.score = {"pnl": 1.0, "max_drawdown": 0.05, "num_trades": 5,
+                      "sharpe_ratio": 0.50, "cagr": 1.0}
+        self.hmm = {"pnl": 2.0, "max_drawdown": 0.05, "num_trades": 6,
+                    "sharpe_ratio": 0.75, "cagr": 1.5}
+
+    def _kwargs(self, output_dir, models_dir, runner):
+        return dict(
+            symbols=["BTCUSDT", "ETHUSDT"],
+            windows=[
+                (1_000, 1_001, "w1"),
+                (2_000, 2_001, "w2"),
+            ],
+            config={"x": 1},
+            seed=42,
+            output_dir=output_dir,
+            models_dir=models_dir,
+            config_snapshot_hash="abc" * 16,
+            pair_runner=runner,
+            pair_runner_kwargs={
+                "exchange": "binance",
+                "params": {"tick_size": 0.01},
+                "k_range": [3],
+                "timeout_s": 10.0,
+            },
+        )
+
+    def test_returns_one_summary_per_pair_with_phase16_fields(self):
+        import tempfile
+        runner, log = _make_pair_runner_double(self.score, self.hmm)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "reports"
+            mod = Path(td) / "models"
+            results = run_campaign(**self._kwargs(out, mod, runner))
+
+        self.assertEqual(len(results), 4)
+        # Cartesian order: BTCUSDT/w1, BTCUSDT/w2, ETHUSDT/w1, ETHUSDT/w2.
+        self.assertEqual(
+            [(r.symbol, r.window_label) for r in results],
+            [("BTCUSDT", "w1"), ("BTCUSDT", "w2"),
+             ("ETHUSDT", "w1"), ("ETHUSDT", "w2")],
+        )
+        for r in results:
+            self.assertEqual(r.seed, 42)
+            self.assertEqual(r.config_snapshot_hash, "abc" * 16)
+            self.assertEqual(r.winner, "hmm")
+            self.assertGreater(r.win_ratio, 0.0)
+            self.assertEqual(r.trade_count, 6)
+        self.assertEqual(len(log), 4)
+        for entry in log:
+            self.assertEqual(entry["seed"], 42)
+
+    def test_canonical_per_pair_reports_written(self):
+        import tempfile
+        runner, _ = _make_pair_runner_double(self.score, self.hmm)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "reports"
+            mod = Path(td) / "models"
+            run_campaign(**self._kwargs(out, mod, runner))
+            for sym in ("BTCUSDT", "ETHUSDT"):
+                for w in ("w1", "w2"):
+                    p = out / f"hmm_campaign_{sym}_{w}_42.md"
+                    self.assertTrue(p.exists(), f"missing {p}")
+                    md = p.read_text(encoding="utf-8")
+                    self.assertIn(f"# HMM Campaign Pair — {sym} / {w}", md)
+                    self.assertIn("abc" * 16, md)  # config hash
+                    self.assertIn("**Seed:** `42`", md)
+
+    def test_seed_propagates_to_pair_runner(self):
+        import tempfile
+        runner, log = _make_pair_runner_double(self.score, self.hmm)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "reports"
+            mod = Path(td) / "models"
+            kwargs = self._kwargs(out, mod, runner)
+            kwargs["seed"] = 1234
+            results = run_campaign(**kwargs)
+        for r in results:
+            self.assertEqual(r.seed, 1234)
+        for entry in log:
+            self.assertEqual(entry["seed"], 1234)
+
+    def test_empty_symbols_or_windows_raises(self):
+        with self.assertRaises(ValueError):
+            run_campaign(
+                symbols=[], windows=[(1, 2, "w")],
+                config={}, seed=42,
+                output_dir=Path("/tmp"), models_dir=Path("/tmp"),
+                pair_runner=lambda **kw: (None, None, None),
+            )
+        with self.assertRaises(ValueError):
+            run_campaign(
+                symbols=["X"], windows=[],
+                config={}, seed=42,
+                output_dir=Path("/tmp"), models_dir=Path("/tmp"),
+                pair_runner=lambda **kw: (None, None, None),
+            )
+
+    def test_run_campaign_does_not_set_hmm_enabled_in_pair_kwargs(self):
+        # Phase 16 acceptance #6 + V2 default-fallback rule: the
+        # campaign harness must not flip ``hmm_enabled`` in the
+        # caller-supplied params dict (the per-pair runner does that
+        # internally for its own second invocation of the C++ engine).
+        # If the campaign harness ever leaks ``hmm_enabled=True`` into
+        # the rule-based-only param dict, the V1 byte-identical
+        # contract is broken.
+        import tempfile
+        runner, log = _make_pair_runner_double(self.score, self.hmm)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "reports"
+            mod = Path(td) / "models"
+            run_campaign(**self._kwargs(out, mod, runner))
+        for entry in log:
+            self.assertNotIn("hmm_enabled", entry["params"])
+            self.assertNotIn("hmm_model_path", entry["params"])
+
+
+# ---------------------------------------------------------------------------
+# Determinism — same seed + same data → identical results
+# ---------------------------------------------------------------------------
+
+class TestCampaignDeterminism(unittest.TestCase):
+    def test_two_runs_same_seed_produce_identical_summaries(self):
+        import tempfile
+        score = {"pnl": 1.0, "max_drawdown": 0.05, "num_trades": 5,
+                 "sharpe_ratio": 0.50, "cagr": 1.0}
+        hmm = {"pnl": 2.0, "max_drawdown": 0.05, "num_trades": 6,
+               "sharpe_ratio": 0.75, "cagr": 1.5}
+
+        def go():
+            runner, _ = _make_pair_runner_double(score, hmm)
+            with tempfile.TemporaryDirectory() as td:
+                results = run_campaign(
+                    symbols=["BTCUSDT", "ETHUSDT"],
+                    windows=[(1_000, 2_000, "30d"),
+                             (3_000, 4_000, "60d")],
+                    config={"x": 1, "y": 2},
+                    seed=DEFAULT_CAMPAIGN_SEED,
+                    output_dir=Path(td) / "reports",
+                    models_dir=Path(td) / "models",
+                    config_snapshot_hash="dead" * 16,
+                    pair_runner=runner,
+                    pair_runner_kwargs={
+                        "exchange": "binance",
+                        "params": {"tick_size": 0.01},
+                        "k_range": [3],
+                        "timeout_s": 10.0,
+                    },
+                )
+            return [
+                (r.symbol, r.window_label, r.winner, r.win_ratio,
+                 r.median_sharpe_delta, r.median_cagr_delta,
+                 r.max_drawdown, r.trade_count, r.seed,
+                 r.config_snapshot_hash)
+                for r in results
+            ]
+
+        a = go()
+        b = go()
+        self.assertEqual(a, b)
+
+    def test_real_pair_runner_seed_changes_trainer_call_seed(self):
+        """Even though HMMTrainer is currently deterministic-by-init,
+        Phase 16 spec requires the seed to be threaded through to the
+        trainer call. Capture the seed argument received by the
+        ``_train_hmm_from_capture`` helper."""
+        from tools.hmm_abtest import run_abtest
+        import tempfile
+
+        score_evidence = [
+            [0.8, 0.1, 0.1, 0.1, 0.1, 0.1],
+            [0.8, 0.1, 0.1, 0.1, 0.1, 0.1],
+            [0.1, 0.8, 0.1, 0.1, 0.1, 0.1],
+            [0.1, 0.8, 0.1, 0.1, 0.1, 0.1],
+            [0.1, 0.8, 0.1, 0.1, 0.1, 0.1],
+        ]
+        score_state_assignments = [2, 2, 3, 3, 3]
+        runner, _ = _make_stub_runner(
+            score_evidence=score_evidence,
+            score_state_assignments=score_state_assignments,
+            score_metrics={"pnl": 1.0, "max_drawdown": 0.05,
+                           "num_trades": 5, "sharpe_ratio": 0.5,
+                           "cagr": 1.0},
+            hmm_metrics={"pnl": 2.0, "max_drawdown": 0.05,
+                         "num_trades": 6, "sharpe_ratio": 0.6,
+                         "cagr": 1.5},
+        )
+        captured: List[int] = []
+        import tools.hmm_abtest as mod
+        original_train = mod._train_hmm_from_capture
+
+        def capturing_train(evidence, sa, *, k_range, seed):
+            captured.append(seed)
+            return original_train(evidence, sa, k_range=k_range, seed=seed)
+
+        with mock.patch.object(mod, "_train_hmm_from_capture",
+                               capturing_train):
+            with tempfile.TemporaryDirectory() as td:
+                run_abtest(
+                    symbol="BTCUSDT", exchange="binance",
+                    from_time_ms=1, to_time_ms=2,
+                    label="seed-test", k_range=[3], seed=999,
+                    output_dir=Path(td) / "reports",
+                    models_dir=Path(td) / "models",
+                    params={"tick_size": 0.01}, timeout_s=10.0,
+                    ofe_module=object(), backtest_runner=runner,
+                )
+        self.assertEqual(captured, [999])
+
+    def test_no_global_numpy_seed_pollution(self):
+        """Trainer-helper must not call ``np.random.seed()`` (that would
+        clobber global numpy state). We assert by snapshotting global
+        RNG state before and after and checking it is unchanged."""
+        from tools.hmm_abtest import _train_hmm_from_capture
+        evidence = [[0.5] * 6 for _ in range(8)]
+        sa = [1] * 8
+        before = np.random.get_state()
+        _train_hmm_from_capture(evidence, sa, k_range=[3], seed=12345)
+        after = np.random.get_state()
+        # Global state must be byte-identical (no np.random.seed call).
+        self.assertEqual(before[0], after[0])
+        np.testing.assert_array_equal(before[1], after[1])
+        self.assertEqual(before[2], after[2])
+        self.assertEqual(before[3], after[3])
+        self.assertEqual(before[4], after[4])
+
+
+# ---------------------------------------------------------------------------
+# Default fallback (hmm_enabled=False preserves V1)
+# ---------------------------------------------------------------------------
+
+class TestDefaultFallback(unittest.TestCase):
+    def test_run_campaign_does_not_mutate_caller_params(self):
+        # The caller hands in params with no HMM keys; the campaign
+        # harness must not write hmm_enabled / hmm_model_path back
+        # into that dict. (The per-pair run_abtest does mutate a
+        # *copy* internally, but the harness's own dict is untouched.)
+        import tempfile
+        score = {"pnl": 1.0, "max_drawdown": 0.05, "num_trades": 5,
+                 "sharpe_ratio": 0.5, "cagr": 1.0}
+        hmm = {"pnl": 2.0, "max_drawdown": 0.05, "num_trades": 6,
+               "sharpe_ratio": 0.7, "cagr": 1.5}
+        runner, _ = _make_pair_runner_double(score, hmm)
+        original_params = {"tick_size": 0.01, "feature_window_ms": 5000}
+        with tempfile.TemporaryDirectory() as td:
+            run_campaign(
+                symbols=["BTCUSDT"],
+                windows=[(1_000, 2_000, "30d")],
+                config={}, seed=42,
+                output_dir=Path(td) / "reports",
+                models_dir=Path(td) / "models",
+                pair_runner=runner,
+                pair_runner_kwargs={
+                    "exchange": "binance",
+                    "params": original_params,
+                    "k_range": [3],
+                    "timeout_s": 10.0,
+                },
+            )
+        # Caller's dict is unchanged.
+        self.assertNotIn("hmm_enabled", original_params)
+        self.assertNotIn("hmm_model_path", original_params)
+
+
+# ---------------------------------------------------------------------------
+# CLI dry-run smoke (uses _make_dry_run_backtest_runner internally)
+# ---------------------------------------------------------------------------
+
+class TestCliCampaignDryRun(unittest.TestCase):
+    def test_cli_dry_run_writes_all_reports_and_snapshot(self):
+        import tempfile
+        from tools.hmm_abtest import main
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "reports"
+            mod = Path(td) / "models"
+            rc = main([
+                "--symbols", "BTCUSDT",
+                "--windows", "30d",
+                "--seed", "42",
+                "--dry-run",
+                "--output-dir", str(out),
+                "--models-dir", str(mod),
+                "--now", "1700000000000",
+                "--quiet",
+            ])
+            self.assertEqual(rc, 0)
+            # Per-pair canonical report.
+            self.assertTrue(
+                (out / "hmm_campaign_BTCUSDT_30d_42.md").exists())
+            # Aggregate report (timestamped).
+            agg = list(out.glob("hmm_campaign_summary_*.md"))
+            self.assertEqual(len(agg), 1)
+            agg_md = agg[0].read_text(encoding="utf-8")
+            self.assertIn("CampaignVerdict", agg_md)
+            self.assertIn("promote:", agg_md)
+            # Config snapshot is alongside the reports.
+            snap = out / "config_snapshot.json"
+            self.assertTrue(snap.exists())
+            # Config snapshot SHA-256 in the aggregate matches the
+            # on-disk file's hash.
+            cfg_obj = json.load(open(snap, encoding="utf-8"))
+            expected_hash = compute_config_snapshot_hash(cfg_obj)
+            self.assertIn(expected_hash, agg_md)
+            # Aggregate JSON exists too.
+            agg_json = list(out.glob("hmm_campaign_summary_*.json"))
+            self.assertEqual(len(agg_json), 1)
+            jd = json.loads(agg_json[0].read_text(encoding="utf-8"))
+            self.assertIn("promote", jd)
+            self.assertEqual(jd["config_snapshot_hash"], expected_hash)
+
+    def test_cli_dry_run_full_acceptance_command(self):
+        # Mirror the Phase 16 acceptance criterion #1 invocation:
+        #   python tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT
+        #     --windows 30d,60d --seed 42
+        # (with --dry-run + --now to keep the test offline + deterministic).
+        import tempfile
+        from tools.hmm_abtest import main
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "reports"
+            mod = Path(td) / "models"
+            rc = main([
+                "--symbols", "BTCUSDT,ETHUSDT",
+                "--windows", "30d,60d",
+                "--seed", "42",
+                "--dry-run",
+                "--output-dir", str(out),
+                "--models-dir", str(mod),
+                "--now", "1700000000000",
+                "--quiet",
+            ])
+            self.assertEqual(rc, 0)
+            for sym in ("BTCUSDT", "ETHUSDT"):
+                for win in ("30d", "60d"):
+                    p = out / f"hmm_campaign_{sym}_{win}_42.md"
+                    self.assertTrue(p.exists(), f"missing {p}")
+
+    def test_cli_invalid_verdict_threshold_errors(self):
+        from tools.hmm_abtest import main
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                main([
+                    "--symbols", "BTCUSDT",
+                    "--windows", "30d",
+                    "--verdict-threshold", "not-a-pair",
+                    "--dry-run",
+                    "--output-dir", str(Path(td) / "reports"),
+                    "--models-dir", str(Path(td) / "models"),
+                    "--now", "1700000000000",
+                    "--quiet",
+                ])
+
+
+# ---------------------------------------------------------------------------
+# Pair report formatter
+# ---------------------------------------------------------------------------
+
+class TestFormatCampaignPairReport(unittest.TestCase):
+    def test_pair_report_header_includes_campaign_metadata(self):
+        s = AbtestSummary(
+            symbol="BTCUSDT", from_time_ms=0, to_time_ms=1,
+            score_metrics={"pnl": 1.0, "max_drawdown": 0.05,
+                           "num_trades": 5, "sharpe_ratio": 0.5,
+                           "cagr": 1.0},
+            hmm_metrics={"pnl": 2.0, "max_drawdown": 0.05,
+                         "num_trades": 6, "sharpe_ratio": 0.7,
+                         "cagr": 1.5},
+            window_label="30d", seed=42,
+            config_snapshot_hash="cafe" * 16,
+            captured_at_iso="2026-05-12T00:00:00Z",
+        )
+        md = format_campaign_pair_report(s)
+        self.assertIn("# HMM Campaign Pair — BTCUSDT / 30d", md)
+        self.assertIn("**Symbol:** `BTCUSDT`", md)
+        self.assertIn("**Window:** `30d`", md)
+        self.assertIn("**Seed:** `42`", md)
+        self.assertIn("cafe" * 16, md)
+        # Embeds the standard comparison table from Phase 7V's
+        # format_comparison_report() so per-pair reports are full
+        # audit trails.
+        self.assertIn("## Metric comparison", md)
+        self.assertIn("## Phase 16 verdict (this pair)", md)
+
+
+class TestFormatCampaignSummaryReport(unittest.TestCase):
+    def test_summary_report_includes_verdict_block(self):
+        results = [
+            _summary_with_winner(winner="hmm", symbol="BTCUSDT",
+                                 window_label="30d"),
+            _summary_with_winner(winner="hmm", symbol="ETHUSDT",
+                                 window_label="60d"),
+        ]
+        verdict = aggregate_verdict(
+            results, VerdictThreshold(),
+            config_snapshot_hash="abcd" * 16,
+            recorded_by="unit-test",
+            recorded_at="2026-05-12T00:00:00Z",
+        )
+        md = format_campaign_summary_report(
+            results, verdict, timestamp_iso="2026-05-12T00:00:00Z")
+        self.assertIn("# HMM A/B Campaign Summary — Phase 16", md)
+        self.assertIn("CampaignVerdict", md)
+        self.assertIn("promote:", md)
+        self.assertIn("abcd" * 16, md)
+        self.assertIn("BTCUSDT", md)
+        self.assertIn("ETHUSDT", md)
+        self.assertIn("Phase 17 hard gate", md)
+
+
 if __name__ == "__main__":
     unittest.main()

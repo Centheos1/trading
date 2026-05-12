@@ -1,0 +1,25 @@
+{
+  "config_snapshot_hash": "8a3a9078c20db6f56011558626ec1f658af0a02bf975b75d336e4e1231ac5448",
+  "max_drawdown_delta": 0.0,
+  "median_cagr_delta": 0.5,
+  "median_sharpe_delta": 0.25,
+  "n_pairs": 4,
+  "promote": true,
+  "recorded_at": "2026-05-12T04:09:17Z",
+  "recorded_by": "tools.hmm_abtest",
+  "schema": 1,
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "threshold": {
+    "median_sharpe_delta_min": 0.1,
+    "win_ratio_min": 0.6
+  },
+  "trade_count_delta": 1,
+  "win_ratio": 1.0,
+  "windows": [
+    "30d",
+    "60d"
+  ]
+}

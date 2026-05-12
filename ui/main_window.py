@@ -1,6 +1,7 @@
 import sys
 import os
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal as QtSignal, QSettings
 from PySide6.QtGui import QFont, QAction, QPainter, QColor, QPen
 
+from data_feed import DEFAULT_KLINES_LIMIT
 from ui.heatmap_widget import HeatmapWidget
 from ui.live_trading_session import LiveTradingSession
 from ui.orderflow_viewmodel import OrderFlowViewModel
@@ -216,6 +218,15 @@ class MainWindow(QMainWindow):
     _new_signal = QtSignal(object)
     _new_order = QtSignal(object)
     _new_ripple = QtSignal(object)
+    # Phase 8A — emitted by the background kline-fetch worker thread
+    # with ``(request_token, klines)``.  Queued connection marshals the
+    # payload back onto the GUI thread for ``_on_klines_ready``.
+    _klines_ready = QtSignal(object)
+
+    # Phase 8A — candle preload constants.  Default fetch size is large
+    # enough to fill the chart's ``_visible_candles`` (80) plus headroom
+    # at every supported timeframe (Acceptance Criterion #1).
+    _CANDLE_PRELOAD_LIMIT = DEFAULT_KLINES_LIMIT
 
     def __init__(self):
         super().__init__()
@@ -235,6 +246,12 @@ class MainWindow(QMainWindow):
         self._new_signal.connect(self._on_signal_received)
         self._new_order.connect(self._on_order_received)
         self._new_ripple.connect(self._on_ripple_received)
+        # Phase 8A — historical candle preload state.  ``_klines_token``
+        # is bumped on every preload kickoff so stale results from an
+        # earlier timeframe / symbol can be discarded when they finally
+        # land on the GUI thread.
+        self._klines_token: int = 0
+        self._klines_ready.connect(self._on_klines_ready)
 
         self._ripple_mode = RippleMode.LOG_ONLY
         self._ripple_cooldown = _RippleCooldown()
@@ -583,8 +600,18 @@ class MainWindow(QMainWindow):
 
     def _on_chart_tf_changed(self, _index):
         ms = self._chart_tf_combo.currentData()
-        if ms:
-            self._candle_view.set_bucket_duration(ms)
+        if not ms:
+            return
+        self._candle_view.set_bucket_duration(ms)
+        # Phase 8A — when live, re-fetch klines at the new bucket
+        # duration so the chart is repopulated instantly instead of
+        # waiting another timeframe-worth of ticks (Acceptance
+        # Criterion #5).  ``set_bucket_duration`` already cleared the
+        # deque above; the loading overlay rendered until results land.
+        if self._engine is not None:
+            symbol = self._symbol_input.text().strip().upper()
+            if symbol:
+                self._kickoff_candle_preload(symbol, int(ms))
 
     def _apply_stylesheet(self):
         self.setStyleSheet("""
@@ -705,6 +732,71 @@ class MainWindow(QMainWindow):
             logger.error("Failed to open strategy store: %s", e)
             self._strategy_store = None
 
+        # Phase 8A — kick off the historical candle preload so the chart
+        # is populated within a few seconds instead of forcing the user
+        # to wait ~80 minutes of live ticks at 1m timeframe (see
+        # UI_STRATEGY_INTEGRATION_PLAN.md §16.2).
+        self._kickoff_candle_preload(symbol, self._candle_view.bucket_ms)
+
+    # ------------------------------------------------------------------
+    # Phase 8A — Candle preload
+    # ------------------------------------------------------------------
+
+    def _kickoff_candle_preload(self, symbol: str, bucket_ms: int) -> None:
+        """Spawn a daemon worker to fetch historical klines off the GUI
+        thread, then marshal the result back via ``_klines_ready``.
+
+        ``_klines_token`` is bumped so a fetch in flight when the user
+        switches timeframe / symbol is ignored on completion
+        (Acceptance Criterion #5).
+        """
+        if not symbol or bucket_ms <= 0:
+            return
+        self._klines_token += 1
+        token = self._klines_token
+        self._candle_view.set_loading(True)
+        limit = self._CANDLE_PRELOAD_LIMIT
+
+        def _worker(sym=symbol, ms=bucket_ms, tk=token):
+            try:
+                klines = self._session.fetch_historical_klines(
+                    sym, ms, limit=limit)
+            except Exception:
+                logger.exception(
+                    "Historical klines worker crashed (symbol=%s ms=%d)",
+                    sym, ms)
+                klines = []
+            try:
+                self._klines_ready.emit((tk, klines))
+            except RuntimeError:
+                # MainWindow torn down before the worker returned —
+                # safe to swallow (the signal target is gone).
+                pass
+
+        threading.Thread(
+            target=_worker,
+            name=f"klines-preload-{token}",
+            daemon=True,
+        ).start()
+
+    def _on_klines_ready(self, payload) -> None:
+        """Phase 8A — apply preloaded klines on the GUI thread.
+
+        Drops stale results from earlier fetches by comparing the
+        request token; an empty list (network failure) just clears the
+        loading overlay so the chart falls back to "Waiting for live
+        data" (Acceptance Criterion #4).
+        """
+        try:
+            token, klines = payload
+        except (TypeError, ValueError):
+            return
+        if token != self._klines_token:
+            return
+        if klines:
+            self._candle_view.preload_candles(klines)
+        self._candle_view.set_loading(False)
+
     def _on_disconnect(self):
         if self._strategy_ui_state != StrategyUIState.DISARMED:
             self._disarm_strategy()
@@ -716,6 +808,12 @@ class MainWindow(QMainWindow):
 
         self._paper_engine = None
         self._update_arm_button_style()
+
+        # Phase 8A — invalidate any preload still in flight and clear
+        # the loading overlay so a stale background worker cannot push
+        # candles into a chart that has just been disconnected.
+        self._klines_token += 1
+        self._candle_view.set_loading(False)
 
         self._session.stop()
 

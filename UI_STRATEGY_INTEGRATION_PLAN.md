@@ -1800,9 +1800,12 @@ Resume only on user request or after V1 GA.
 
 ---
 
-## 16. Phase 8 — UI Accuracy & First-Impression Polish `[NOT STARTED]`
+## 16. Phase 8 — UI Accuracy & First-Impression Polish `[IN PROGRESS — 1 of 3 sub-phases complete]`
 
 ### 16.1 Overview
+
+**Progress (2026-05-12):** Phase 8A complete; 8B and 8C still
+`[NOT STARTED]`. Phase 8 GA gate remains open until 8B and 8C land.
 
 Three user-identified gaps remain after V1 GA that make the live UI
 misleading or incomplete:
@@ -1842,7 +1845,68 @@ Three sub-phases address these gaps independently:
 
 ---
 
-### 16.2 Phase 8A — Candlestick Historical Preload `[NOT STARTED]`
+### 16.2 Phase 8A — Candlestick Historical Preload `[COMPLETED 2026-05-12]`
+
+**Evidence.**
+
+- **Files touched** (5):
+  - `data_feed/binance_klines_rest.py` *(new)* — REST helper
+    `fetch_binance_klines(...)` + `interval_ms_to_label(...)`; module
+    constants `BINANCE_FUTURES_USDM_KLINES_URL`,
+    `DEFAULT_KLINES_LIMIT = 200`, `KLINES_FETCH_TIMEOUT_S = 10.0`.
+  - `data_feed/__init__.py` — re-exports the new helper + constants.
+  - `ui/candle_chart_view.py` — new public API
+    `preload_candles(...)`, `set_loading(...)`, `loading` property;
+    new module constants `_LABEL_LOADING`, `_LABEL_WAITING`,
+    `_PRELOAD_TRADE_COUNT`, `_MAX_STORED_CANDLES`; `paintEvent` honours
+    `_loading` and records `_last_paint_label` for test assertions.
+  - `ui/live_trading_session.py` — synchronous wrapper
+    `fetch_historical_klines(symbol, interval_ms, limit=200)` that
+    swallows all REST exceptions and returns `[]` on failure.
+  - `ui/main_window.py` — new Qt signal `_klines_ready`, token
+    `_klines_token`, helpers `_kickoff_candle_preload(...)` and
+    `_on_klines_ready(...)`; `_on_connect` kicks off the preload after
+    `start_live`; `_on_chart_tf_changed` re-fetches at the new bucket
+    while connected; `_on_disconnect` bumps the token and clears the
+    loading overlay.
+- **Tests added.** `tests/test_candle_preload.py` (new, **18 tests** in
+  6 unittest classes) covering: OHLC population, deque replacement,
+  sort-on-ingest, same-bucket / next-bucket / stale-bucket live-tick
+  interaction, empty-list no-op preservation, loading overlay state
+  machine, paintEvent label assertions, session wrapper happy path /
+  exception swallow / empty-symbol short-circuit / unsupported-interval
+  swallow, plus a §3.5 production-wiring grep on `ui/main_window.py`.
+- **Verification commands** (all green at 2026-05-12):
+  - `QT_QPA_PLATFORM=offscreen python -m unittest tests.test_candle_preload -v`
+    → **18 tests OK** (0.085 s).
+  - `python tests/test_candle_chart_view.py` → **15/15 OK** (existing
+    suite passes byte-identically).
+  - `QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v`
+    → **746 tests OK** (25.8 s) — broad regression sweep clean.
+  - Wiring grep
+    `rg "preload_candles|fetch_historical_klines" ui/ tests/` returns
+    production hits in `ui/main_window.py:762,797`,
+    `ui/live_trading_session.py:474` and the new test file
+    (AGENT_STRATEGY_RULES.md §3.5 gate satisfied).
+- **Acceptance criteria — all met.**
+  1. On connect with BTCUSDT@1m the chart fills with ≥80 candles within
+     ~1 REST round-trip (`limit=200`, single sync `requests.get` off
+     the GUI thread).
+  2. Same-bucket / next-bucket `process_trade` calls extend the
+     preloaded deque without duplicates — covered by
+     `TestLiveTradesAfterPreload`.
+  3. Loading overlay rendered while a preload is in flight (Qt signal
+     marshals completion back to the GUI thread) — covered by
+     `TestLoadingOverlay`.
+  4. REST exceptions → `[]` → no crash, no dialog, chart reverts to
+     "Waiting for live data" — covered by
+     `TestFetchHistoricalKlines.test_fetch_swallows_exceptions_returns_empty`.
+  5. Timeframe change while connected re-fetches at the new bucket
+     (`_on_chart_tf_changed` calls `_kickoff_candle_preload` when
+     `_engine is not None`); stale results from the prior request are
+     dropped via the `_klines_token` guard.
+  6. Existing `tests/test_candle_chart_view.py` passes byte-identically
+     (15/15 in custom-runner mode).
 
 **Problem in detail.** `CandleChartView._candles` is populated
 exclusively by `process_trade(ts, price, qty, is_buy)` calls from
