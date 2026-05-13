@@ -4,13 +4,13 @@
 # Copies data/binance_ticks.h5 (and any per-symbol files under data/) to S3.
 # Logs to logs/s3_sync.log.
 #
-# Environment variables (sourced from /app/.env if present):
+# Environment variables (sourced from /home/ubuntu/app/trading/.env if present):
 #   S3_BUCKET   — required; target bucket name
-#   APP_DIR     — defaults to /app
+#   APP_DIR     — defaults to /home/ubuntu/app/trading
 
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/app}"
+APP_DIR="${APP_DIR:-/home/ubuntu/app/trading}"
 LOG_FILE="${APP_DIR}/logs/s3_sync.log"
 
 cd "${APP_DIR}"

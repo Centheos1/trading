@@ -193,8 +193,9 @@ ssh -T git@github.com
 ### 3.3 Clone the repo and run setup
 
 ```bash
-git clone git@github.com:Centheos1/trading.git /app
-cd /app
+mkdir -p ~/app
+git clone git@github.com:Centheos1/trading.git ~/app/trading
+cd ~/app/trading
 
 # Bootstrap: installs Docker, builds the image, enables auto-start on reboot
 bash scripts/setup_ec2.sh
@@ -230,8 +231,8 @@ docker ps   # should show an empty table, not a permissions error
 ### 3.5 Configure .env
 
 ```bash
-cp /app/.env.template /app/.env
-nano /app/.env
+cp ~/app/trading/.env.template ~/app/trading/.env
+nano ~/app/trading/.env
 ```
 
 Set the following values:
@@ -249,7 +250,7 @@ Save: `Ctrl+O` → Enter. Exit: `Ctrl+X`.
 ## Part 4 — Start data collection
 
 ```bash
-cd /app
+cd ~/app/trading
 
 # Start BTCUSDT collector
 docker compose up -d
@@ -292,7 +293,7 @@ To trigger manually:
 
 ```bash
 sudo bash /etc/cron.hourly/s3_sync
-cat /app/logs/s3_sync.log
+cat ~/app/trading/logs/s3_sync.log
 
 # Confirm files in S3
 aws s3 ls s3://trading-data-centheos/ticks/
@@ -322,7 +323,7 @@ docker compose ps
 ### Update after a code push
 
 ```bash
-cd /app
+cd ~/app/trading
 git pull
 docker compose build
 docker compose up -d
@@ -437,6 +438,6 @@ to pass before checking status.
 ### S3 sync shows FAILED in logs
 
 ```bash
-cat /app/logs/s3_sync.log
+cat ~/app/trading/logs/s3_sync.log
 aws s3 ls s3://trading-data-centheos/ticks/
 ```

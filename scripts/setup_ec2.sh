@@ -11,13 +11,13 @@
 #
 # Environment variables (optional):
 #   REPO_URL    Git repo URL to clone (leave blank if repo already present)
-#   APP_DIR     Destination directory (default: /app)
+#   APP_DIR     Destination directory (default: /home/ubuntu/app/trading)
 #   S3_BUCKET   Pre-fill .env S3_BUCKET (can also be set interactively after)
 #   SYMBOLS     Primary symbol to collect (default: BTCUSDT)
 
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/app}"
+APP_DIR="${APP_DIR:-/home/ubuntu/app/trading}"
 REPO_URL="${REPO_URL:-}"
 SERVICE_USER="${SERVICE_USER:-ubuntu}"
 

@@ -3094,8 +3094,8 @@ evaluated before Phase 17 work begins.
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
-| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — Docker/scripts delivered 2026-05-13; EC2 deployment PENDING` | — | None (infrastructure prerequisite) |
-| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (blocked by Phase 16P)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (NOT STARTED) |
+| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting since 2026-05-13; unblocks Phase 16 on ~2026-06-13 (30 days)` | — | None (infrastructure prerequisite) |
+| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked ~2026-06-13 when 30 days of data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
 | **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
@@ -3212,9 +3212,16 @@ test case to `test_replay_determinism.py` verifying this.
 
 ---
 
-### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — 2026-05-13]`
+### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — COLLECTING since 2026-05-13]`
 
-**Docker/scripts delivered 2026-05-13. EC2 deployment pending.**
+**EC2 collector live as of 2026-05-13 22:47 AEST. BTCUSDT + ETHUSDT collecting continuously.**
+
+**Phase 16 unblock date: ~2026-06-13** (30 days of data required for HMM A/B campaign windows).
+Hourly S3 sync to `s3://trading-data-centheos/ticks/` is active. Verify at any time:
+```bash
+aws s3 ls s3://trading-data-centheos/ticks/
+docker compose -f ~/app/trading/docker-compose.yml logs --tail 20 collector   # on EC2
+```
 
 **Evidence (delivered 2026-05-13).**
 
@@ -3238,7 +3245,7 @@ test case to `test_replay_determinism.py` verifying this.
 
 **Regression:** 862/862 tests pass (2026-05-13).
 
-**Remaining step to complete Phase 16P:** Launch the `t3.small` EC2 instance and run `scripts/setup_ec2.sh`. See `docs/DEPLOYMENT.md §1` for the procedure.
+**EC2 is live.** `t3.small` (`i-0f92a7647e330d9d6`, `ap-southeast-2`) running Docker Compose with BTCUSDT and ETHUSDT collectors since 2026-05-13. See `docs/DEPLOYMENT.md` for the full runbook.
 
 **Objective.** The Phase 16 HMM A/B campaign requires ≥ 30 days of continuous tick data (trades + L2 depth) per symbol. Running `main.py` in `data` mode on a developer laptop for 30+ days is not viable. Phase 16P makes the data collection path deployment-ready for a headless Linux EC2 instance with data persisted to AWS S3.
 
