@@ -27,7 +27,10 @@ x-base: &base
   volumes:
     - ./data:/app/data                 # HDF5 files survive container restarts
     - ./logs:/app/logs                 # rotating log files
-    - .:/app                           # live source mount (dev / local use)
+    # NOTE: .:/app is intentionally NOT in the base anchor.
+    # Mounting the host source over /app hides the .venv built into the image,
+    # breaking the 'python' entrypoint on EC2.  Add it explicitly only in
+    # services that need live-reload (app, test).
   restart: "no"                        # overridden per-service below
 
 services:
@@ -78,7 +81,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - .:/app
+      - .:/app                         # live source mount for local UI dev
       - /tmp/.X11-unix:/tmp/.X11-unix  # X11 passthrough (Linux / XQuartz)
     profiles: ["ui"]
     stdin_open: true
@@ -97,5 +100,5 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - .:/app
+      - .:/app                         # live source mount for local test iteration
     profiles: ["test"]
