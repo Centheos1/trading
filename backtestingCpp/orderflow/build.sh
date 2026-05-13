@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
@@ -29,8 +29,16 @@ CMAKE_ARGS=(
 
 cmake .. "${CMAKE_ARGS[@]}"
 
+# Limit parallel jobs in low-memory environments (t3.small = 2 GB RAM).
+# OOM-killed make jobs exit code 1 with no error message.
 NPROC=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2)
-make -j"${NPROC}"
+MEM_GB=$(awk '/MemTotal/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 8)
+if [ "${MEM_GB}" -lt 4 ]; then
+    JOBS=1
+else
+    JOBS="${NPROC}"
+fi
+make -j"${JOBS}"
 
 echo ""
 echo "=== Build complete ==="
