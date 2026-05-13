@@ -58,12 +58,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     # Headless display for Qt tests
     xvfb \
-    # AWS CLI (for manual s3 cp in scripts)
-    awscli \
     # Utilities
     curl \
+    unzip \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 — not available as an apt package on Ubuntu 24.04
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
 
 # pybind11 needs to be findable by CMake; install system dev package as well
 RUN apt-get update && apt-get install -y --no-install-recommends \

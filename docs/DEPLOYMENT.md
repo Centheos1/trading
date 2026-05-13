@@ -1,47 +1,101 @@
 # Deployment Guide
 
-The app ships as a Docker Compose project. `docker compose up` is the
-single entry point for every environment.
+This is the complete end-to-end runbook for deploying the tick data collector
+to EC2. Follow the steps in order on a fresh instance.
+
+**S3 bucket:** `trading-data-centheos` (all trading data lives here — do not change)
+
+---
+
+## Overview
 
 ```
-docker compose up -d                           # EC2: start BTCUSDT collector
-docker compose --profile multi up -d           # EC2: add ETHUSDT collector
-docker compose --profile ui up app             # Local: start trading UI
-docker compose --profile test run --rm test    # CI: run full test suite
+Local Mac  ──git push──►  GitHub
+                              │
+                              │ git clone (SSH)
+                              ▼
+                         EC2 t3.small (Ubuntu 24.04)
+                              │
+                         docker compose up -d
+                              │
+                    ┌─────────┴─────────┐
+                    │                   │
+              collector             collector-eth
+            (BTCUSDT)               (ETHUSDT)
+                    │                   │
+                    └─────────┬─────────┘
+                              │ hourly cron
+                              ▼
+                   S3: trading-data-centheos
+                       ticks/binance_ticks.h5
+                       ticks/binance_ticks_ETHUSDT.h5
 ```
 
 ---
 
-## Quick-start: Ship the collector to EC2 in 10 minutes
+## Part 1 — One-time setup (run on your local Mac, not EC2)
 
+### 1.1 Install AWS CLI on your Mac
+
+```bash
+brew install awscli
+aws configure
+# AWS Access Key ID:     <your key>
+# AWS Secret Access Key: <your secret>
+# Default region:        ap-southeast-2
+# Default output format: json
 ```
-1. Launch EC2 t3.small (Ubuntu 24.04, IAM role with S3 write)
-2. SSH in and clone the repo
-3. bash scripts/setup_ec2.sh
-4. nano .env  →  set S3_BUCKET=your-bucket
-5. docker compose up -d
-6. docker compose logs -f collector
+
+### 1.2 Create the S3 bucket
+
+> **Important:** Create the bucket from your local Mac. The EC2 IAM role
+> intentionally does not have `s3:CreateBucket` — it only writes objects.
+> Running `aws s3 mb` from EC2 will return `AccessDenied`.
+
+```bash
+# Create
+aws s3 mb s3://trading-data-centheos --region ap-southeast-2
+
+# Enable versioning (protects against accidental overwrites during hourly sync)
+aws s3api put-bucket-versioning \
+    --bucket trading-data-centheos \
+    --versioning-configuration Status=Enabled
+
+# Enable SSE-S3 encryption at rest (free, no key management required)
+aws s3api put-bucket-encryption \
+    --bucket trading-data-centheos \
+    --server-side-encryption-configuration '{
+        "Rules": [{
+            "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
+            "BucketKeyEnabled": true
+        }]
+    }'
+
+# Lifecycle: auto-delete old versions after 30 days to control storage cost
+aws s3api put-bucket-lifecycle-configuration \
+    --bucket trading-data-centheos \
+    --lifecycle-configuration '{
+        "Rules": [{
+            "ID": "expire-old-versions",
+            "Status": "Enabled",
+            "Filter": {"Prefix": ""},
+            "NoncurrentVersionExpiration": {"NoncurrentDays": 30}
+        }]
+    }'
+
+# Verify
+aws s3 ls s3://trading-data-centheos
 ```
 
-Data starts flowing immediately. S3 sync runs hourly via cron.
+### 1.3 Create the IAM role
 
----
+In **AWS Console → IAM → Roles → Create role:**
 
-## Part 1 — EC2 Tick Data Collector
+1. Trusted entity: **AWS service → EC2**
+2. Skip managed policies
+3. Role name: `TradingCollectorRole`
 
-### 1.1 EC2 Instance Configuration
-
-| Parameter | Value | Notes |
-|---|---|---|
-| Instance type | `t3.small` | 2 vCPU, 2 GB RAM — I/O-bound, not compute-bound |
-| AMI | Ubuntu 24.04 LTS | `ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*` |
-| Root volume | EBS `gp3`, 30 GB | HDF5 grows ~200–400 MB/day at 2 symbols × 2 streams |
-| Security group | Outbound 443 only | No inbound rules needed |
-| IAM instance profile | `TradingCollectorRole` | See §1.2 |
-
-### 1.2 IAM Instance Profile
-
-Create a role `TradingCollectorRole` with an inline policy:
+After creating, add this inline policy:
 
 ```json
 {
@@ -51,106 +105,261 @@ Create a role `TradingCollectorRole` with an inline policy:
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
       "Resource": [
-        "arn:aws:s3:::YOUR-BUCKET-NAME",
-        "arn:aws:s3:::YOUR-BUCKET-NAME/ticks/*"
+        "arn:aws:s3:::trading-data-centheos",
+        "arn:aws:s3:::trading-data-centheos/*"
       ]
     }
   ]
 }
 ```
 
-Attach this role to the EC2 instance. **No access keys in `.env`** —
-the instance profile provides credentials automatically.
+---
 
-### 1.3 S3 Bucket Setup
+## Part 2 — Launch EC2
+
+In **AWS Console → EC2 → Launch Instance:**
+
+| Setting | Value |
+|---|---|
+| Name | `trading-collector` |
+| AMI | Ubuntu Server 24.04 LTS (Canonical) — **64-bit x86, not ARM** |
+| Instance type | `t3.small` (2 vCPU, 2 GB RAM) |
+| Key pair | Create new → RSA → `.pem` → save to `~/Downloads/` |
+| Security group | New — SSH inbound from My IP only; all outbound open |
+| Storage | 30 GB gp3 |
+| IAM instance profile | `TradingCollectorRole` |
+
+> If you forgot to attach the IAM role at launch, you can add it without
+> stopping the instance: **EC2 console → select instance → Actions →
+> Security → Modify IAM role → TradingCollectorRole**.
+
+SSH in:
 
 ```bash
-aws s3 mb s3://YOUR-BUCKET-NAME --region ap-southeast-2
-aws s3api put-bucket-versioning \
-    --bucket YOUR-BUCKET-NAME \
-    --versioning-configuration Status=Enabled
+ssh -i ~/Downloads/trading-collector.pem ubuntu@<EC2-PUBLIC-IP>
 ```
 
-### 1.4 First-Time EC2 Setup
+---
+
+## Part 3 — First-time EC2 setup (run once per instance)
+
+### 3.1 Install AWS CLI v2
+
+> **Note:** `sudo apt install awscli` fails on Ubuntu 24.04 — the package
+> is not available in the apt repo. Install the official v2 binary instead.
 
 ```bash
-# Clone the repo
-git clone https://github.com/YOUR_ORG/YOUR_REPO.git /app
+sudo apt install -y unzip curl
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+aws --version   # should show: aws-cli/2.x.x
+```
+
+No `aws configure` needed — the `TradingCollectorRole` instance profile
+provides credentials automatically. Verify:
+
+```bash
+aws s3 ls s3://trading-data-centheos
+```
+
+### 3.2 Set up GitHub SSH authentication
+
+> GitHub removed password authentication in 2021. Attempting to clone with
+> a password returns: `remote: Invalid username or token. Password
+> authentication is not supported for Git operations.`
+> Use SSH instead — it never expires.
+
+```bash
+# Generate a key for this instance
+ssh-keygen -t ed25519 -C "trading-ec2" -f ~/.ssh/id_ed25519 -N ""
+
+# Print the public key — copy this entire output
+cat ~/.ssh/id_ed25519.pub
+```
+
+In your browser: **github.com → Settings → SSH and GPG keys → New SSH key**
+- Title: `trading-ec2`
+- Paste the public key
+- Click **Add SSH key**
+
+Test the connection:
+
+```bash
+ssh -T git@github.com
+# Expected: Hi Centheos1! You've successfully authenticated...
+```
+
+### 3.3 Clone the repo and run setup
+
+```bash
+git clone git@github.com:Centheos1/trading.git /app
 cd /app
 
-# Bootstrap: installs Docker, builds image, enables auto-start on reboot
+# Bootstrap: installs Docker, builds the image, enables auto-start on reboot
 bash scripts/setup_ec2.sh
-
-# Set your S3 bucket (the only required config)
-nano .env   # set S3_BUCKET=YOUR-BUCKET-NAME
-
-# Start the collector
-docker compose up -d
 ```
 
-### 1.5 Docker Compose Services
+### 3.4 Fix Docker group permissions
 
-| Service | Profile | Command | Purpose |
-|---|---|---|---|
-| `collector` | *(default)* | `python collect_ticks.py --symbol BTCUSDT` | Primary BTC collector |
-| `collector-eth` | `multi` | `python collect_ticks.py --symbol ETHUSDT` | Add ETH collection |
-| `app` | `ui` | `python main.py` | Trading UI (needs display) |
-| `test` | `test` | `python -m unittest discover -s tests` | Full test suite |
+> `setup_ec2.sh` adds your user to the `docker` group, but Linux only applies
+> group membership to **new** login sessions. Your current SSH session was
+> already open when the script ran, so Docker commands return:
+> `permission denied while trying to connect to the Docker daemon socket at
+> unix:///var/run/docker.sock`
+
+Fix — either run:
 
 ```bash
-# Start BTCUSDT collector (default)
+newgrp docker
+```
+
+Or disconnect and reconnect your SSH session:
+
+```bash
+exit
+ssh -i ~/Downloads/trading-collector.pem ubuntu@<EC2-PUBLIC-IP>
+```
+
+Verify:
+
+```bash
+docker ps   # should show an empty table, not a permissions error
+```
+
+### 3.5 Configure .env
+
+```bash
+cp /app/.env.template /app/.env
+nano /app/.env
+```
+
+Set the following values:
+
+```
+S3_BUCKET=trading-data-centheos
+SYMBOLS=BTCUSDT
+LOG_LEVEL=INFO
+```
+
+Save: `Ctrl+O` → Enter. Exit: `Ctrl+X`.
+
+---
+
+## Part 4 — Start data collection
+
+```bash
+cd /app
+
+# Start BTCUSDT collector
 docker compose up -d
 
-# Also start ETHUSDT
+# Start ETHUSDT collector
 docker compose --profile multi up -d
 
-# Watch logs
-docker compose logs -f
-docker compose logs -f collector       # single service
-
-# Stop everything
-docker compose down
-
-# Restart after code update
-git pull && docker compose build && docker compose up -d
+# Verify both are running
+docker compose ps
 ```
 
-### 1.6 Auto-start on EC2 Reboot
+Expected output:
 
-`setup_ec2.sh` installs a systemd unit `docker-compose@trading` that runs
-`docker compose up -d` on boot. No manual restart needed after an EC2
-stop/start or OS update:
+```
+NAME                          STATUS
+trading-collector-btcusdt     Up X seconds (healthy)
+trading-collector-ethusdt     Up X seconds
+```
+
+Watch live logs:
 
 ```bash
-sudo systemctl status docker-compose@trading
-sudo journalctl -u docker-compose@trading -f
+docker compose logs -f                   # both collectors together
+docker compose logs -f collector         # BTCUSDT only
+docker compose logs -f collector-eth     # ETHUSDT only
 ```
 
-### 1.7 Verify S3 Sync
+Expected log line every 10 seconds:
+
+```
+2026-05-13T10:00:00 [INFO] data_service :: Collected 842 trades, 3100 depth updates
+```
+
+---
+
+## Part 5 — Verify S3 upload
 
 The hourly cron at `/etc/cron.hourly/s3_sync` runs automatically.
 To trigger manually:
 
 ```bash
 sudo bash /etc/cron.hourly/s3_sync
-cat logs/s3_sync.log
-aws s3 ls s3://YOUR-BUCKET-NAME/ticks/
+cat /app/logs/s3_sync.log
+
+# Confirm files in S3
+aws s3 ls s3://trading-data-centheos/ticks/
 ```
 
-### 1.8 Download Data to Dev Machine
+Expected:
 
-After data has accumulated, download it for the HMM campaign:
+```
+ticks/binance_ticks.h5
+ticks/binance_ticks_ETHUSDT.h5
+```
+
+---
+
+## Part 6 — Ongoing operations
+
+### Auto-start on reboot
+
+The `docker-compose@trading` systemd service auto-starts both collectors
+on EC2 reboot — no manual action needed. Verify:
 
 ```bash
-export S3_BUCKET=YOUR-BUCKET-NAME
-bash scripts/download_ticks.sh               # BTCUSDT only
-bash scripts/download_ticks.sh BTCUSDT ETHUSDT  # both symbols
+sudo systemctl status docker-compose@trading
+docker compose ps
+```
+
+### Update after a code push
+
+```bash
+cd /app
+git pull
+docker compose build
+docker compose up -d
+docker compose --profile multi up -d
+```
+
+### Check logs after a restart
+
+```bash
+docker compose logs --tail 50 collector
+docker compose logs --tail 50 collector-eth
+```
+
+### Stop collection temporarily
+
+```bash
+docker compose down                      # stops all services
+docker compose up -d                     # restart BTCUSDT
+docker compose --profile multi up -d     # restart ETHUSDT
+```
+
+---
+
+## Part 7 — Download data to dev machine
+
+After data has accumulated, download before running the HMM campaign:
+
+```bash
+# On your local Mac
+export S3_BUCKET=trading-data-centheos
+bash scripts/download_ticks.sh BTCUSDT ETHUSDT
 
 # Verify
 python -c "import h5py; f=h5py.File('data/binance_ticks.h5'); print(list(f.keys()))"
 ```
 
-### 1.9 Running the HMM Campaign (after ≥30 days of data)
+### Run the HMM campaign (after ≥30 days of data)
 
 ```bash
 source .venv/bin/activate
@@ -158,159 +367,76 @@ python tools/hmm_abtest.py \
     --symbols BTCUSDT,ETHUSDT \
     --windows 30d,60d \
     --seed 42
-# Results in reports/hmm_campaign_summary_*.md
+# Results written to reports/hmm_campaign_summary_*.md
 ```
 
 ---
 
-## Part 2 — Local Development
+## Part 8 — Local development
 
-### 2.1 Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (macOS / Windows)
-  or Docker Engine (Linux)
-- Cursor IDE with Dev Containers extension (optional — for in-container editing)
-
-On macOS Apple Silicon, Docker Desktop uses Rosetta 2 to run `linux/amd64`
-images. The C++ engine compiled inside the container is the **same binary
-that runs on EC2**.
-
-### 2.2 Run Tests (offscreen, no display needed)
+### Run tests (Linux parity, no display needed)
 
 ```bash
 docker compose --profile test run --rm test
 ```
 
-Or via the dev container in Cursor (auto-detected from `.devcontainer/`):
+### Open in Cursor dev container
 
-```bash
-python -m unittest discover -s tests -v   # inside container terminal
-```
+1. Open project in Cursor → click **"Reopen in Container"** when prompted
+2. First open builds the image (~5–10 min); subsequent opens reuse cache
 
-### 2.3 Run the Trading UI Locally
-
-**macOS — XQuartz required:**
-
-```bash
-# 1. Install XQuartz: https://www.xquartz.org/
-# 2. XQuartz → Preferences → Security → ✅ "Allow connections from network clients"
-# 3. In a terminal (not inside Docker):
-xhost +localhost
-
-# 4. Set DISPLAY in .env or export it:
-export DISPLAY=host.docker.internal:0
-
-# 5. Start the UI service
-docker compose --profile ui up app
-```
-
-**Linux (including EC2 with X11 forwarding):**
-
-```bash
-# X11 socket is mounted automatically via docker-compose.yml
-docker compose --profile ui up app
-```
-
-**macOS native (fastest for UI iteration):**
-
-Run the app directly outside Docker with the local Metal backend:
+### Run trading UI (native macOS — fastest for UI iteration)
 
 ```bash
 source .venv/bin/activate
-python main.py   # choose 'ui' mode
-```
-
-### 2.4 Open in Cursor Dev Container
-
-1. Open the project folder in Cursor.
-2. Click **"Reopen in Container"** when prompted (detected from `.devcontainer/`).
-3. First open builds the image (~5–10 minutes); subsequent opens reuse cache.
-4. `postCreateCommand` rebuilds the C++ engine against the mounted workspace.
-
-### 2.5 Common Commands
-
-```bash
-# Build / rebuild image (after Dockerfile changes)
-docker compose build
-
-# Interactive shell in the dev image
-docker run --rm -it -v "$(pwd)":/app \
-    $(docker compose config --images | head -1) bash
-
-# Run a single test file
-docker compose --profile test run --rm test \
-    python -m unittest tests.test_collect_ticks -v
-
-# C++ unit tests
-docker compose --profile test run --rm test bash -c \
-    "cd backtestingCpp/orderflow/build && ./test_ripple && ./test_schemas"
-```
-
-### 2.6 CI/CD Integration
-
-```yaml
-# GitHub Actions example
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose --profile test run --rm test
-        env:
-          QT_QPA_PLATFORM: offscreen
+python main.py   # choose 'ui' mode — uses Metal GPU directly
 ```
 
 ---
 
-## Part 3 — EC2 GPU Instance (Phase 9 — UI Deployment)
+## Part 9 — EC2 GPU instance (Phase 9 — future)
 
-> Phase 9 (Qt Quick/QML migration) is not yet started. This section will
-> be completed when Phase 9A ships.
-
-Target: `g5.xlarge` (NVIDIA A10G), Ubuntu 24.04, NICE DCV.
-A `Dockerfile.gpu` will extend `Dockerfile.dev` with the NVIDIA Container
-Toolkit and `QSG_RHI_BACKEND=opengl`. The compose file will gain a
-`gpu` profile:
-
-```bash
-docker compose --profile gpu up app   # future Phase 9 command
-```
+> Not yet implemented. Target: `g5.xlarge` (NVIDIA A10G), Ubuntu 24.04,
+> NICE DCV remote display. A `Dockerfile.gpu` will extend `Dockerfile.dev`
+> with the NVIDIA Container Toolkit and `QSG_RHI_BACKEND=opengl`.
 
 ---
 
 ## Troubleshooting
 
-### `docker compose build` fails: "cannot find Boost"
-The Dockerfile installs `libboost-all-dev` from apt. If you're building
-manually outside Docker:
-```bash
-sudo apt-get install libboost-all-dev
-```
+### `aws: command not found` on Ubuntu 24.04
+The apt package is unavailable. Use the official v2 installer — see §3.1.
 
-### `orderflow_engine` not found at runtime
-```bash
-# Check the build output inside the container
-docker compose --profile test run --rm test \
-    find backtestingCpp/orderflow/build -name 'orderflow_engine*.so'
-```
+### `make_bucket failed: AccessDenied`
+The EC2 IAM role cannot create buckets — by design. Create the bucket from
+your local Mac — see §1.2.
 
-### Qt platform plugin error: "xcb"
-```bash
-# Force offscreen for tests — already set in docker-compose.yml
-export QT_QPA_PLATFORM=offscreen
-```
+### `permission denied: /var/run/docker.sock`
+Your session pre-dates the Docker group change from `setup_ec2.sh`. Run
+`newgrp docker` or reconnect your SSH session — see §3.4.
 
-### S3 upload fails: "Unable to locate credentials"
-- Verify the EC2 instance has `TradingCollectorRole` attached under
-  **Actions → Security → Modify IAM role** in the EC2 console.
-- No access keys should be in `.env`.
+### `Authentication failed` cloning from GitHub
+GitHub no longer accepts passwords. Set up SSH key authentication — see §3.2.
+
+### `Unable to locate credentials` on EC2
+The IAM instance profile is not attached. Go to EC2 console →
+**Actions → Security → Modify IAM role → TradingCollectorRole**.
+No instance restart required.
 
 ### Container keeps restarting
+
 ```bash
-docker compose logs collector --tail 50   # read the crash reason
+docker compose logs collector --tail 50
 ```
 
-### Healthcheck fails
-The `collector` healthcheck checks that `data/binance_ticks.h5` was
-modified within the last 2 minutes. If the file doesn't exist yet
-(first run), wait 30 s for the `start_period` to pass.
+### Healthcheck failing on first start
+The healthcheck waits for `data/binance_ticks.h5` to be written. This file
+is created on first trade receipt. Wait 30 seconds for the `start_period`
+to pass before checking status.
+
+### S3 sync shows FAILED in logs
+
+```bash
+cat /app/logs/s3_sync.log
+aws s3 ls s3://trading-data-centheos/ticks/
+```
