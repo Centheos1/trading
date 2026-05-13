@@ -337,11 +337,11 @@ class OandaAdapter(ExchangeAdapter):
             for c in candles:
                 if not c.get("complete", True):
                     continue
-                t = _oanda_ts_to_ms(c.get("time"))
                 mid = c.get("mid") or {}
                 bid = c.get("bid") or {}
                 ask = c.get("ask") or {}
                 try:
+                    t = _oanda_ts_to_ms(c.get("time"))
                     o = float(mid.get("o"))
                     h = float(mid.get("h"))
                     lo = float(mid.get("l"))
