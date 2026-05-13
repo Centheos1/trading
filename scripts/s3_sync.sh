@@ -46,15 +46,33 @@ sync_file() {
     fi
 }
 
-# Default single-symbol file
+# Default single-symbol tick file
 sync_file "data/binance_ticks.h5" "ticks/binance_ticks.h5"
 
-# Per-symbol files from multi-instance setup (data/<SYMBOL>/binance_ticks.h5)
+# Per-symbol tick files from multi-instance setup (data/<SYMBOL>/binance_ticks.h5)
+# Skip data/ohlcv/ — that's a directory of Parquet files synced separately below.
 for dir in data/*/; do
     sym=$(basename "${dir}")
+    if [ "${sym}" = "ohlcv" ]; then
+        continue
+    fi
     f="${dir}binance_ticks.h5"
     sync_file "${f}" "ticks/binance_ticks_${sym}.h5"
 done
+
+# OHLCV Parquet tree (data/ohlcv/{exchange}/{symbol}/{tf}.parquet → ohlcv/…)
+# Only syncs when DATA_STORE != s3 (when s3, the collector writes directly).
+if [ -d "data/ohlcv" ] && [ "${DATA_STORE:-local_parquet}" != "s3" ]; then
+    if aws s3 sync data/ohlcv "s3://${S3_BUCKET}/ohlcv" \
+            --exclude "*" --include "*.parquet" --only-show-errors; then
+        n_files=$(find data/ohlcv -name '*.parquet' | wc -l | tr -d ' ')
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [OK] ohlcv/ tree synced (${n_files} parquet files)" >> "${LOG_FILE}"
+        UPLOADED=$((UPLOADED + 1))
+    else
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [FAIL] ohlcv/ tree sync" >> "${LOG_FILE}"
+        FAILED=$((FAILED + 1))
+    fi
+fi
 
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [DONE] uploaded=${UPLOADED} failed=${FAILED}" >> "${LOG_FILE}"
 

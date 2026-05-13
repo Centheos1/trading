@@ -1,10 +1,11 @@
 # Trading App — Docker Compose
 #
 # Profiles:
-#   (default)          collector     — BTCUSDT tick data collector (EC2 / headless)
-#   --profile multi    collector-eth — Add ETHUSDT as a second collector
-#   --profile ui       app           — Trading UI (requires X11 / XQuartz)
-#   --profile test     test          — Run full test suite and exit
+#   (default)          collector       — BTCUSDT tick data collector (EC2 / headless)
+#   --profile multi    collector-eth   — Add ETHUSDT as a second collector
+#   --profile ohlcv    ohlcv-collector — Historical OHLCV backfill + continuous polling
+#   --profile ui       app             — Trading UI (requires X11 / XQuartz)
+#   --profile test     test            — Run full test suite and exit
 #
 # Quick-start (EC2 data collection):
 #   cp .env.template .env && nano .env   # set S3_BUCKET
@@ -66,6 +67,27 @@ services:
         --log-level ${LOG_LEVEL:-INFO}
     restart: unless-stopped
     profiles: ["multi"]
+
+  # ── OHLCV historical-data collector (backfill + continuous) ──────
+  # Two-phase, long-lived: backfills 2020→now then polls hourly forever.
+  # Writes Parquet files via ohlcv_store (S3 when DATA_STORE=s3 + S3_BUCKET).
+  ohlcv-collector:
+    <<: *base
+    container_name: trading-ohlcv-collector
+    command: >
+      python collect_ohlcv.py
+        --exchange ${OHLCV_EXCHANGE:-all}
+        --all-symbols
+        --timeframe ${OHLCV_TIMEFRAME:-1m}
+        --from-date ${OHLCV_FROM_DATE:-2020-01-01}
+        --mode ${OHLCV_MODE:-continuous}
+        --poll-interval ${OHLCV_POLL_INTERVAL:-3600}
+        --workers ${OHLCV_WORKERS:-4}
+        --data-store ${DATA_STORE:-local_parquet}
+        --s3-bucket ${S3_BUCKET:-}
+        --log-level ${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    profiles: ["ohlcv"]
 
   # ── Trading UI (local / EC2 g5 with display) ─────────────────────
   app:

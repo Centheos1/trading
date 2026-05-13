@@ -241,6 +241,20 @@ Set the following values:
 S3_BUCKET=trading-data-centheos
 SYMBOLS=BTCUSDT
 LOG_LEVEL=INFO
+
+# OHLCV historical collector — write Parquet straight to S3 on EC2
+DATA_STORE=s3
+OHLCV_EXCHANGE=all
+OHLCV_TIMEFRAME=1m
+OHLCV_FROM_DATE=2020-01-01
+OHLCV_MODE=continuous
+OHLCV_POLL_INTERVAL=3600
+OHLCV_WORKERS=4
+
+# Required for Oanda OHLCV collection
+OANDA_ACCOUNT_ID=...
+OANDA_ACCESS_TOKEN=...
+OANDA_ACCOUNT_TYPE=practice
 ```
 
 Save: `Ctrl+O` → Enter. Exit: `Ctrl+X`.
@@ -252,13 +266,14 @@ Save: `Ctrl+O` → Enter. Exit: `Ctrl+X`.
 ```bash
 cd ~/app/trading
 
-# Start BTCUSDT collector
-docker compose up -d
+# Tick collectors — real-time WebSocket trades + L2 depth (HDF5 → S3)
+docker compose up -d                              # BTCUSDT
+docker compose --profile multi up -d              # ETHUSDT
 
-# Start ETHUSDT collector
-docker compose --profile multi up -d
+# OHLCV collector — backfills 2020→now then polls hourly forever (Parquet → S3)
+docker compose --profile ohlcv up -d
 
-# Verify both are running
+# Verify all three are running
 docker compose ps
 ```
 
@@ -268,21 +283,34 @@ Expected output:
 NAME                          STATUS
 trading-collector-btcusdt     Up X seconds (healthy)
 trading-collector-ethusdt     Up X seconds
+trading-ohlcv-collector       Up X seconds
 ```
 
 Watch live logs:
 
 ```bash
-docker compose logs -f                   # both collectors together
-docker compose logs -f collector         # BTCUSDT only
-docker compose logs -f collector-eth     # ETHUSDT only
+docker compose logs -f                       # everything together
+docker compose logs -f collector             # BTCUSDT ticks only
+docker compose logs -f collector-eth         # ETHUSDT ticks only
+docker compose logs -f ohlcv-collector       # OHLCV historical
 ```
 
-Expected log line every 10 seconds:
+Expected tick collector log line every 10 seconds:
 
 ```
 2026-05-13T10:00:00 [INFO] data_service :: Collected 842 trades, 3100 depth updates
 ```
+
+Expected OHLCV collector log line during backfill:
+
+```
+2026-05-13T10:00:00 [INFO] collect_ohlcv :: [binance/BTCUSDT/1m] 2020-01-01 00:00 → 2026-05-13 10:00 — 3,159,840 new rows (12.4s)
+```
+
+> **OHLCV backfill runtime:** the first run takes ~30–40 hours to fill 6 years
+> of 1-minute data for ~300 Binance perpetuals + ~100 Oanda instruments.
+> It runs detached and survives SSH disconnects. After backfill it enters
+> the hourly continuous loop automatically.
 
 ---
 
@@ -304,6 +332,27 @@ Expected:
 ```
 ticks/binance_ticks.h5
 ticks/binance_ticks_ETHUSDT.h5
+```
+
+Verify OHLCV Parquet uploads (written directly by the collector when
+`DATA_STORE=s3`):
+
+```bash
+aws s3 ls s3://trading-data-centheos/ohlcv/binance/ --recursive | head
+aws s3 ls s3://trading-data-centheos/ohlcv/oanda/   --recursive | head
+```
+
+Expected:
+
+```
+ohlcv/binance/BTCUSDT/1m.parquet
+ohlcv/binance/ETHUSDT/1m.parquet
+ohlcv/binance/SOLUSDT/1m.parquet
+…
+ohlcv/oanda/EUR_USD/1m.parquet
+ohlcv/oanda/XAU_USD/1m.parquet
+ohlcv/oanda/SPX500_USD/1m.parquet
+…
 ```
 
 ---
@@ -349,7 +398,7 @@ docker compose --profile multi up -d     # restart ETHUSDT
 
 ## Part 7 — Download data to dev machine
 
-After data has accumulated, download before running the HMM campaign:
+### Tick data (HDF5) — needed for HMM campaign
 
 ```bash
 # On your local Mac
@@ -359,6 +408,42 @@ bash scripts/download_ticks.sh BTCUSDT ETHUSDT
 # Verify
 python -c "import h5py; f=h5py.File('data/binance_ticks.h5'); print(list(f.keys()))"
 ```
+
+### OHLCV (Parquet) — needed for backtests / PCA / cross-asset analysis
+
+There are two ways to read OHLCV from a dev machine:
+
+**Option A — read directly from S3** (no download; recommended for large
+multi-symbol analyses). In `.env`:
+
+```
+DATA_STORE=s3
+S3_BUCKET=trading-data-centheos
+```
+
+`tide_backtest.load_ohlcv()` and any PCA/correlation tooling will read
+Parquet straight from S3 via `s3fs` + `pyarrow`.
+
+**Option B — download specific symbols locally** (faster for repeated
+backtests on one symbol):
+
+```bash
+# A single symbol
+bash scripts/download_ohlcv.sh --exchange binance --symbol BTCUSDT
+
+# All Binance OHLCV (~30 GB)
+bash scripts/download_ohlcv.sh --exchange binance
+
+# All Oanda OHLCV (~8 GB)
+bash scripts/download_ohlcv.sh --exchange oanda
+
+# Verify
+python -c "import pandas as pd; df=pd.read_parquet('data/ohlcv/binance/BTCUSDT/1m.parquet'); print(df.tail())"
+```
+
+When `DATA_STORE=local_parquet` (default in `.env.template`), all
+backtests automatically read from `data/ohlcv/…` first and fall back
+to the legacy `data/{exchange}.h5` if the symbol isn't present.
 
 ### Run the HMM campaign (after ≥30 days of data)
 

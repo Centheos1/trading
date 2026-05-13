@@ -420,23 +420,50 @@ def load_ohlcv(
     from_time: Optional[int] = None,
     to_time: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Load OHLCV from the project HDF5 store and resample to ``timeframe``.
+    """Load OHLCV for backtesting and resample to ``timeframe``.
+
+    Reads from the OHLCV store selected by the ``DATA_STORE`` environment
+    variable (``local_parquet`` by default, ``s3`` on EC2).  Falls back to
+    the legacy ``data/{exchange}.h5`` HDF5 file when the requested
+    symbol/timeframe is not present in the Parquet store.
 
     Returns the canonical ``open/high/low/close/volume`` DataFrame indexed
     by ``DatetimeIndex`` (UTC, tz-naive — matches existing convention).
     """
-    from database import Hdf5Client
     from utils import TF_EQUIV, resample_timeframe
 
     if timeframe not in TF_EQUIV:
         raise ValueError(f"unknown timeframe '{timeframe}'")
 
-    client = Hdf5Client(exchange)
     if from_time is None:
         from_time = 0
     if to_time is None:
         to_time = int(2**63 - 1)
-    df = client.get_data(symbol, from_time, to_time)
+
+    df: Optional[pd.DataFrame] = None
+
+    try:
+        from ohlcv_store import get_ohlcv_store
+
+        store = get_ohlcv_store()
+        # Native 1m fetch — resampling to the requested timeframe happens below
+        candidate = store.read(
+            exchange, symbol, "1m", from_ts=from_time, to_ts=to_time
+        )
+        if not candidate.empty:
+            df = candidate
+    except Exception:  # noqa: BLE001
+        df = None
+
+    if df is None or df.empty:
+        from database import Hdf5Client
+
+        try:
+            client = Hdf5Client(exchange)
+            df = client.get_data(symbol, from_time, to_time)
+        except (KeyError, OSError):
+            df = None
+
     if df is None or df.empty:
         raise RuntimeError(
             f"No data for {exchange}/{symbol} in [{from_time}, {to_time}]"

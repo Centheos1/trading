@@ -3095,6 +3095,7 @@ evaluated before Phase 17 work begins.
 |---|---|---|---|---|
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
 | **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting since 2026-05-13; unblocks Phase 16 on ~2026-06-13 (30 days)` | — | None (infrastructure prerequisite) |
+| **16Q** | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; backfill 2020→now running` | — | Phase 16P infrastructure |
 | **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked ~2026-06-13 when 30 days of data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
@@ -3310,6 +3311,88 @@ python tools/hmm_abtest.py \
 #    "to be recorded" block. Then flip Phase 16 status to [DONE — YYYY-MM-DD].
 #    If promote: true, Phase 17 is unblocked.
 ```
+
+---
+
+### Phase 16Q — Cross-Asset OHLCV Historical Data Collection `[IN PROGRESS — DEPLOYED 2026-05-13]`
+
+**Objective.** Maintain a comprehensive 1-minute OHLCV archive in S3 for
+**every symbol on Binance USD-M futures (~300 perpetuals) and every Oanda
+instrument (~100 FX, indices, commodities, crypto, bonds)** from 2020-01-01
+to present, refreshed hourly. Required for cross-asset PCA, correlation
+research, and Tide/Wave backtests beyond BTCUSDT + ETHUSDT.
+
+**Architecture.**
+
+- **Storage**: Parquet per `{exchange}/{symbol}/{timeframe}` under `ohlcv/`.
+  - Local: `data/ohlcv/{exchange}/{symbol}/1m.parquet`
+  - S3: `s3://trading-data-centheos/ohlcv/{exchange}/{symbol}/1m.parquet`
+- **Backend selection**: `DATA_STORE` env var (`local_parquet` default, `s3`
+  on EC2). The `ohlcv_store.get_ohlcv_store()` factory returns the right
+  backend; backtests and PCA tooling read transparently from either.
+- **Collector** (`collect_ohlcv.py`): two-phase, long-lived process
+  (`docker compose --profile ohlcv up -d`):
+  - **Phase 1 (backfill)** — for each (exchange, symbol), reads `last_ts`
+    from the store; fetches from `--from-date` if no data, else from
+    `last_ts`; appends to the Parquet file. Runs once (~30–40 hours on
+    first deployment).
+  - **Phase 2 (continuous)** — every `--poll-interval` seconds (default
+    3600), fetches new candles for all symbols in parallel (4 workers)
+    and appends to the store. Runs forever.
+- **Symbol discovery** — fully dynamic at startup:
+  - Binance: `/fapi/v1/exchangeInfo` filtered to `status=TRADING`,
+    `contractType=PERPETUAL`, `quoteAsset=USDT`.
+  - Oanda: `accounts.AccountInstruments` — returns every instrument on
+    the account (FX, indices, commodities, crypto, bonds).
+- **Idempotency** — every fetch is gated on the Parquet store's
+  `last_ts`. Restarts and EC2 reboots resume exactly where they left off.
+- **Rate limiting** — Binance token-bucket at 8 req/s (well under the
+  1200 weight/min limit); Oanda at 1.5 req/s with exponential backoff
+  on `V20Error`.
+
+**Delivered artefacts (2026-05-13).**
+
+| Artefact | Status |
+|---|---|
+| `ohlcv_store.py` | `LocalParquetStore`, `S3ParquetStore`, `get_ohlcv_store()` factory; idempotent `append`, `get_last_timestamp`, `read`, `list_symbols` |
+| `collect_ohlcv.py` | Headless CLI: `--exchange`, `--all-symbols`, `--timeframe`, `--from-date`, `--mode backfill\|continuous`, `--workers`, `--data-store`, `--s3-bucket`, SIGTERM-safe |
+| `tide/tide_backtest.py` `load_ohlcv()` | Reads Parquet via `get_ohlcv_store()`; falls back to `Hdf5Client` when symbol/timeframe missing |
+| `docker-compose.yml` | New `ohlcv-collector` service under `--profile ohlcv`, `restart: unless-stopped` |
+| `scripts/s3_sync.sh` | Extended to sync `data/ohlcv/` → `s3://…/ohlcv/` when `DATA_STORE != s3` |
+| `scripts/download_ohlcv.sh` | Developer-side helper: per-symbol, per-exchange, or full sync |
+| `requirements.txt` / `requirements-collector.txt` | `pyarrow>=15`, `s3fs>=2024.2` added |
+| `.env.template` | `DATA_STORE`, `OHLCV_*`, `OANDA_*` keys added |
+| `docs/DEPLOYMENT.md` Parts 3, 4, 5, 7 | OHLCV collector startup, S3 verification, dev download instructions |
+
+**Storage estimate.** ~38 GB total (~$0.87/month at S3 Standard):
+- Binance ~300 perpetuals × ~100MB avg = ~30 GB
+- Oanda ~100 instruments × ~75MB avg = ~7–8 GB
+
+**Backfill estimate.** ~30–40 hours on `t3.small`. Runs detached, fully
+resumable on restart. No SLA — Phase 16Q is non-blocking; PCA and
+cross-asset research begin as soon as enough history is in the store.
+
+**Verification.**
+
+```bash
+# On EC2
+docker compose --profile ohlcv ps
+docker compose logs -f ohlcv-collector | head -50
+aws s3 ls s3://trading-data-centheos/ohlcv/binance/ --recursive | wc -l
+aws s3 ls s3://trading-data-centheos/ohlcv/oanda/   --recursive | wc -l
+
+# On dev machine — single symbol smoke test
+bash scripts/download_ohlcv.sh --exchange binance --symbol BTCUSDT
+python -c "import pandas as pd; df=pd.read_parquet('data/ohlcv/binance/BTCUSDT/1m.parquet'); print(df.tail()); print('rows:', len(df))"
+```
+
+**Future extensions.**
+
+- Multi-timeframe pre-aggregation (`5m`, `15m`, `1h`, `4h`, `1d` Parquet)
+  is optional — the current loader resamples from 1m at read time, so
+  these can be added later for query speed if needed.
+- Cross-exchange spot symbols (Coinbase, Kraken) can be plugged in by
+  adding a new `ExchangeAdapter` subclass in `collect_ohlcv.py`.
 
 ---
 
