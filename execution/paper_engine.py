@@ -139,6 +139,18 @@ class PaperEngine:
     def realized_pnl(self) -> float:
         return self._metrics.realized_pnl
 
+    # Phase 8B — unified session-stats API (mirrors ExecutionManager surface).
+
+    @property
+    def session_realized_pnl(self) -> float:
+        """Session realized PnL; aliases ``_metrics.realized_pnl``."""
+        return self._metrics.realized_pnl
+
+    @property
+    def session_trade_count(self) -> int:
+        """Completed exit fills this session; aliases ``_metrics.exits_filled``."""
+        return self._metrics.exits_filled
+
     def unrealized_pnl(self, current_price: float) -> float:
         if self._position.side is None or self._position.quantity <= 0:
             return 0.0

@@ -157,6 +157,8 @@ class SignalEntry:
     risk_budget_pct: float = 0.0
     lifecycle_state: str = ""
     archetype: str = ""
+    # Phase 8C — realized PnL delta for EXIT TRADE_LIFECYCLE entries
+    realized_pnl: float = 0.0
 
 
 @dataclass

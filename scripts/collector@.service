@@ -1,0 +1,30 @@
+# Template unit for running multiple symbols as separate service instances.
+# Instantiate with: sudo systemctl start collector@ETHUSDT
+# See: scripts/add_symbol.sh
+
+[Unit]
+Description=Binance Tick Data Collector — %i
+Documentation=file:///app/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/app
+EnvironmentFile=/app/.env
+ExecStart=/app/.venv/bin/python /app/collect_ticks.py \
+    --symbol %i \
+    --s3-bucket ${S3_BUCKET} \
+    --s3-key ticks/binance_ticks_%i.h5 \
+    --data-dir data/%i \
+    --log-level INFO
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=collector@%i
+
+[Install]
+WantedBy=multi-user.target

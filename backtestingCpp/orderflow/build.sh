@@ -20,14 +20,17 @@ echo "Python:  ${PYTHON}"
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_PREFIX_PATH="/opt/homebrew" \
-    -DPython_EXECUTABLE="${PYTHON}" \
-    -DPython_ROOT_DIR="$(dirname "$(dirname "${PYTHON}")")" \
+CMAKE_ARGS=(
+    -DCMAKE_BUILD_TYPE=Release
+    -DPython_EXECUTABLE="${PYTHON}"
+    -DPython_ROOT_DIR="$(dirname "$(dirname "${PYTHON}")")"
     -Dpybind11_DIR="$("${PYTHON}" -m pybind11 --cmakedir)"
+)
 
-make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+cmake .. "${CMAKE_ARGS[@]}"
+
+NPROC=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2)
+make -j"${NPROC}"
 
 echo ""
 echo "=== Build complete ==="

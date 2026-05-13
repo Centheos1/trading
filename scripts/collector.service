@@ -1,0 +1,25 @@
+[Unit]
+Description=Binance Tick Data Collector
+Documentation=file:///app/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/app
+EnvironmentFile=/app/.env
+ExecStart=/app/.venv/bin/python /app/collect_ticks.py \
+    --symbol ${SYMBOLS:-BTCUSDT} \
+    --s3-bucket ${S3_BUCKET} \
+    --log-level INFO
+Restart=on-failure
+RestartSec=30
+# Allow 15 s for graceful flush + S3 upload on shutdown
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=collector
+
+[Install]
+WantedBy=multi-user.target

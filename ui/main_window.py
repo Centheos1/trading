@@ -35,8 +35,20 @@ from execution.binance_broker import BinanceBroker
 from execution.execution_manager import ExecutionManager
 from execution.paper_engine import PaperEngine
 from strategy_store import StrategyStore
+from ui.account_panel import (
+    _MODE_LABEL_PAPER, _MODE_LABEL_LIVE, _MODE_LABEL_OBSERVE,
+)
 
 logger = logging.getLogger(__name__)
+
+# Phase 8C — signal type string constants (§20 no magic constants)
+_SIGNAL_TYPE_BIAS_CHANGE = "BIAS_CHANGE"
+_SIGNAL_TYPE_REGIME_CHANGE = "REGIME_CHANGE"
+
+# Phase 8C — prefixes that classify engine signals as CONTEXT (not LEGACY_RAW).
+# Mirrors _CONTEXT_SIGNAL_PREFIXES in trade_blotter.py; kept local to avoid
+# a cross-module import between the UI layout layer and the blotter.
+_LEGACY_CONTEXT_PREFIXES = ("EXHAUSTION_", "ABSORPTION_", "SWEEP_", "FLIP_")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__),
                                  '..', 'backtestingCpp', 'orderflow', 'build'))
@@ -261,6 +273,9 @@ class MainWindow(QMainWindow):
         self._strategy_ui_state = StrategyUIState.DISARMED
         self._prev_strategy_ui_state = StrategyUIState.DISARMED
         self._last_strategy_snap = None
+        # Phase 8C §Issue2 — Tide/Wave transition caches (None = not yet seen)
+        self._last_tide_bias: Optional[str] = None
+        self._last_wave_regime: Optional[str] = None
         self._strategy_store: Optional[StrategyStore] = None
         self._ripple_min_confidence = 0.0
         self._is_replay_mode = False
@@ -1169,6 +1184,17 @@ class MainWindow(QMainWindow):
             entry.tide_bias = tide_bias
             entry.wave_regime = wave_regime
             entry.lifecycle_state = self._strategy_ui_state.value
+
+        # Phase 8C §Issue3 — capture session PnL before processing exit
+        # intents so we can compute the delta afterwards.  Uses getattr so
+        # the code is safe when Phase 8B's session_realized_pnl attribute
+        # hasn't merged yet (returns 0.0 in that case).
+        _is_exit = intent_name.startswith("EXIT_")
+        _pnl_before = (getattr(self._exec_manager, "session_realized_pnl", 0.0)
+                       if _is_exit else 0.0)
+
+        # Broadcast non-exit entries immediately (preserve existing ordering)
+        if entry and not _is_exit:
             self._broadcast_entry(entry)
 
         # Record emission
@@ -1229,11 +1255,23 @@ class MainWindow(QMainWindow):
                             block, int(intent.timestamp or 0))
                     except Exception:
                         logger.exception("record_block failed")
+                    # Broadcast exit entry before early return so it
+                    # is not lost (exits cannot be blocked by the gate,
+                    # but guard defensively).
+                    if entry and _is_exit:
+                        self._broadcast_entry(entry)
                     return
                 try:
                     self._exec_manager.on_intent(intent)
                 except Exception:
                     logger.exception("exec_manager.on_intent failed")
+
+        # Phase 8C §Issue3 — annotate realized PnL delta on exit entries
+        # and broadcast them (delayed to capture the post-execution delta).
+        if entry and _is_exit:
+            _pnl_after = getattr(self._exec_manager, "session_realized_pnl", 0.0)
+            entry.realized_pnl = _pnl_after - _pnl_before
+            self._broadcast_entry(entry)
 
     def _on_order_received(self, order):
         status = order.status.value
@@ -1251,7 +1289,8 @@ class MainWindow(QMainWindow):
 
     def _on_signal_received(self, signal):
         self._signal_count += 1
-        is_buy = "BUY" in signal.type_name() or "BULL" in signal.type_name()
+        type_name = signal.type_name()
+        is_buy = "BUY" in type_name or "BULL" in type_name
         fill_price = signal.price
         if self._engine:
             ob = self._engine.get_order_book()
@@ -1259,12 +1298,21 @@ class MainWindow(QMainWindow):
             if p > 0:
                 fill_price = p
 
-        self._strategy_dashboard.blotter.add_signal(
-            signal.timestamp, signal.type_name(),
-            fill_price, signal.strength, signal.description
-        )
+        # Phase 8C §Issue1 — suppress LEGACY_RAW flood when strategy is armed.
+        # EXEC_ signals route through _on_order_received (never reach here).
+        # CONTEXT signals (EXHAUSTION_ etc.) are strategically meaningful and
+        # always admitted; all other engine signals are LEGACY_RAW and are
+        # hidden from the blotter while armed (still visible via Debug filter
+        # when toggled manually, since they reach the blotter when DISARMED).
+        _armed = self._strategy_ui_state != StrategyUIState.DISARMED
+        _is_context = any(type_name.startswith(p) for p in _LEGACY_CONTEXT_PREFIXES)
+        if not _armed or _is_context:
+            self._strategy_dashboard.blotter.add_signal(
+                signal.timestamp, type_name,
+                fill_price, signal.strength, signal.description
+            )
         self._heatmap.add_signal(
-            signal.timestamp, fill_price, signal.type_name(), signal.strength
+            signal.timestamp, fill_price, type_name, signal.strength
         )
 
     # ------------------------------------------------------------------
@@ -1273,6 +1321,43 @@ class MainWindow(QMainWindow):
 
     def _on_timer_tick(self):
         self._session.on_timer_tick()
+
+        # Phase 8C §Issue2 — emit Tide/Wave transition entries when bias or
+        # regime changes between ticks.  _last_strategy_snap is updated by
+        # session.on_timer_tick() above, so _snap_metadata() sees the latest
+        # values.  On first tick (_last_X is None) we only initialise the
+        # cache without emitting to avoid a spurious "None → NEUTRAL" event.
+        if self._last_strategy_snap is not None:
+            try:
+                tide_bias, wave_regime = self._snap_metadata()
+                now_ms = int(time.time() * 1000)
+
+                if (self._last_tide_bias is not None
+                        and tide_bias != self._last_tide_bias):
+                    self._broadcast_entry(SignalEntry(
+                        timestamp=now_ms,
+                        signal_type=_SIGNAL_TYPE_BIAS_CHANGE,
+                        source="strategy",
+                        category=SignalCategory.TIDE,
+                        description=f"{self._last_tide_bias} \u2192 {tide_bias}",
+                        tide_bias=tide_bias,
+                    ))
+                self._last_tide_bias = tide_bias
+
+                if (self._last_wave_regime is not None
+                        and wave_regime != self._last_wave_regime):
+                    self._broadcast_entry(SignalEntry(
+                        timestamp=now_ms,
+                        signal_type=_SIGNAL_TYPE_REGIME_CHANGE,
+                        source="strategy",
+                        category=SignalCategory.WAVE,
+                        description=f"{self._last_wave_regime} \u2192 {wave_regime}",
+                        wave_regime=wave_regime,
+                    ))
+                self._last_wave_regime = wave_regime
+            except Exception:
+                logger.exception("Tide/Wave transition detection failed")
+
         # Phase 14F.4 — surface the latest risk-gate block on the
         # strategy dashboard so operators don't have to grep the log.
         try:
@@ -1289,6 +1374,53 @@ class MainWindow(QMainWindow):
                 self._session.layered_push_status())
         except Exception:
             logger.exception("strategy dashboard wiring update failed")
+        # Phase 8B — push authoritative strategy PnL / trade count into
+        # the account panel.  The panel never performs its own FIFO
+        # matching; all data flows from the execution layer here.
+        try:
+            self._update_account_panel_strategy_stats()
+        except Exception:
+            logger.exception("account panel strategy stats update failed")
+
+    def _update_account_panel_strategy_stats(self) -> None:
+        """Push strategy-attributed stats into the account panel (Phase 8B).
+
+        Reads from ``_exec_manager`` (live mode) or ``_paper_engine``
+        (paper mode).  Sends zeros + ``_MODE_LABEL_OBSERVE`` when the
+        strategy is in OBSERVE mode or disarmed so the panel stays clean.
+        """
+        panel = self._strategy_dashboard.account_panel
+
+        if self._strategy_mode == StrategyMode.PAPER and self._paper_engine is not None:
+            pos = self._paper_engine.position
+            side = pos.side.value if pos.side is not None else None
+            qty = pos.quantity
+            entry = pos.entry_price
+            last_price = getattr(self._paper_engine, "_last_price", 0.0)
+            upnl = self._paper_engine.unrealized_pnl(last_price)
+            realized = self._paper_engine.session_realized_pnl
+            count = self._paper_engine.session_trade_count
+            panel.update_strategy_stats(
+                side, qty, entry, upnl, realized, count, _MODE_LABEL_PAPER)
+            return
+
+        if (self._strategy_mode == StrategyMode.LIVE
+                and self._exec_manager is not None
+                and self._exec_manager.armed):
+            side_enum = self._exec_manager.current_side
+            side = side_enum.value if side_enum is not None else None
+            qty = self._exec_manager.current_qty
+            entry = getattr(self._exec_manager, "_current_entry_price", 0.0)
+            upnl = 0.0  # live uPnL is sourced from the broker account
+            realized = self._exec_manager.session_realized_pnl
+            count = self._exec_manager.session_trade_count
+            panel.update_strategy_stats(
+                side, qty, entry, upnl, realized, count, _MODE_LABEL_LIVE)
+            return
+
+        # OBSERVE mode, or live/paper but not yet armed — show clean state.
+        panel.update_strategy_stats(
+            None, 0.0, 0.0, 0.0, 0.0, 0, _MODE_LABEL_OBSERVE)
 
     def show(self):
         super().show()

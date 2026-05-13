@@ -1048,12 +1048,14 @@ Tests that depend on configuration should either:
 | `test_bubble_pipeline.py` (Python) | 63 checks | Passing | UI-Phase 1 |
 | `test_bucket_model.py` (Python) | 64 checks | Passing | UI-Phase 1 |
 | `test_strategy_ui.py` (Python) | 163 checks | Passing | UI-Phase 2 + Signal Log |
+| `test_signal_log_accuracy.py` (Python) | 26 tests | Passing | UI-8C |
 | `test_ui_cleanup.py` (Python) | 38 checks | Passing | UI-Phase 3 |
 | `test_strategy_store.py` (Python) | 63 checks | Passing | UI-Phase 4 |
 | `test_integration_e2e.py` (Python) | 57 checks | Passing | UI-Phase 5 |
 | `test_performance_profile.py` (Python) | 13 checks | Passing | UI-Phase 5 |
 | `test_replay_overlay.py` (Python) | 34 checks | Passing | UI-Phase 5 |
 | `test_bubble_aggregation.py` (Python) | 67 checks | Passing | UI-Opt, PG, TS |
+| `test_account_panel.py` (Python) | 28 tests | Passing | UI-8B |
 
 ### 19.2 Planned Test Suites by Phase
 
@@ -1084,6 +1086,8 @@ Tests that depend on configuration should either:
 | UI-5 | `test_performance_profile.py` | Heatmap paint timing, bucket update throughput, signal log throughput, HDF5 write throughput, overlay marginal cost, large trade set render | **Done** (13 checks) |
 | UI-5 | `test_replay_overlay.py` | Replay overlay reconstruction, signal playback into blotter, event timeline, deterministic read-back, time-windowed partial replay, diagnostics panel from replay, heatmap with replay overlay | **Done** (34 checks) |
 | UI-Opt, PG, TS | `test_bubble_aggregation.py` | Price-axis bucketing, time-axis merging (100 ms slices), volume aggregation, VWAP positioning, buy/sell imbalance coloring, deterministic aggregation, reduction ratio, viewport filtering, diagnostics, performance throughput, auto-scroll regression, time-ordering, hard caps, dynamic coarsening, volume culling, deque bounds, trade-slice incremental insert, slice pruning, slice rebuild, steady-state perf, boundary stability | **Done** (67 checks) |
+| UI-8C | `test_signal_log_accuracy.py` | Signal log: legacy gating (LEGACY_RAW suppressed when armed, visible when disarmed), Tide BIAS_CHANGE events, Wave REGIME_CHANGE events, no-spurious-event stability, exit PnL annotation (realized_pnl delta via session_realized_pnl), Trades-Only filter, Debug filter, PnL column rendering (+x.xx / -x.xx / blank), wiring test §3.5 | **Done** (26 tests) |
+| UI-8B | `test_account_panel.py` | FIFO accumulator absent; `update_strategy_stats` renders Paper/Live/Observe modes, session PnL, trade count; Reason column populated from `ripple_reason`; wiring test: `_on_timer_tick` calls `update_strategy_stats` | **Done** (28 tests) |
 
 ### 19.3 Test Architecture
 

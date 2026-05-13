@@ -1800,12 +1800,13 @@ Resume only on user request or after V1 GA.
 
 ---
 
-## 16. Phase 8 — UI Accuracy & First-Impression Polish `[IN PROGRESS — 1 of 3 sub-phases complete]`
+## 16. Phase 8 — UI Accuracy & First-Impression Polish `[IN PROGRESS — 2 of 3 sub-phases complete]`
 
 ### 16.1 Overview
 
-**Progress (2026-05-12):** Phase 8A complete; 8B and 8C still
-`[NOT STARTED]`. Phase 8 GA gate remains open until 8B and 8C land.
+**Progress (2026-05-12):** Phase 8A complete; Phase 8B complete (2026-05-12); Phase 8C
+complete (2026-05-12). All 3 sub-phases landed — Phase 8 GA gate pending synthesising
+agent confirmation.
 
 Three user-identified gaps remain after V1 GA that make the live UI
 misleading or incomplete:
@@ -1950,7 +1951,7 @@ be non-blocking (async background task) to avoid freezing the UI.
 
 ---
 
-### 16.3 Phase 8B — Strategy-Attributed PnL & Trade Tracking `[NOT STARTED]`
+### 16.3 Phase 8B — Strategy-Attributed PnL & Trade Tracking `[COMPLETED 2026-05-12]`
 
 **Problem in detail.** `AccountPanel` maintains its own FIFO PnL
 accumulator (`_last_entry_price` / `_last_entry_side` /
@@ -2007,9 +2008,43 @@ trade counts.
 6. All existing `tests/test_strategy_store.py` and
    `tests/test_integration_e2e.py` tests pass unchanged.
 
+**Evidence (2026-05-12).**
+
+```
+# New tests — all pass
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest tests.test_account_panel -v
+# Ran 28 tests in 2.049s — OK
+
+# Backward-compat tests — pass unchanged
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_ui_cleanup.py
+# UI cleanup tests: 38/38 passed, 0 failed
+
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_strategy_store.py
+# Strategy store tests: 63/63 passed, 0 failed
+
+QT_QPA_PLATFORM=offscreen .venv/bin/python tests/test_integration_e2e.py
+# Integration E2E tests: 55/55 passed, 0 failed
+
+# Broad regression sweep
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests
+# Ran 840 tests in 31.846s — OK
+
+# Wired live? grep
+grep -rn "session_realized_pnl|session_trade_count|reset_session_stats" execution/ ui/
+# Hits: execution/execution_manager.py, execution/paper_engine.py, ui/main_window.py
+```
+
+Acceptance criteria:
+1. ✅ "Session PnL (strategy)" sourced from `ExecutionManager.session_realized_pnl` / `PaperEngine.session_realized_pnl` — never FIFO.
+2. ✅ "Strategy Trades" increments per completed exit fill.
+3. ✅ Mode label shows "Paper", "Live", or "Observe".
+4. ✅ Order rows show `order.ripple_reason` in Reason column.
+5. ✅ Observe mode shows "Strategy not armed" — no stale PnL.
+6. ✅ `test_strategy_store.py` and `test_integration_e2e.py` pass unchanged.
+
 ---
 
-### 16.4 Phase 8C — Signal Log Accuracy `[NOT STARTED]`
+### 16.4 Phase 8C — Signal Log Accuracy `[COMPLETED 2026-05-12]`
 
 **Problem in detail.** Three distinct issues pollute or thin the
 signal log in the current implementation:
@@ -2073,6 +2108,27 @@ trade. Operators must cross-reference the Account Panel separately.
 7. "Debug" filter shows `LEGACY_RAW` + `DIAGNOSTIC` entries.
 8. All existing `tests/test_strategy_ui.py` (163 checks) pass unchanged.
 
+**Evidence (2026-05-12).**
+
+```
+Files modified:
+  execution/models.py       — realized_pnl: float = 0.0 added to SignalEntry
+  ui/main_window.py         — Issue 1 gate, Issue 2 Tide/Wave tick detection,
+                              Issue 3 PnL delta annotation; named constants
+                              _SIGNAL_TYPE_BIAS_CHANGE, _SIGNAL_TYPE_REGIME_CHANGE,
+                              _LEGACY_CONTEXT_PREFIXES; cache vars _last_tide_bias,
+                              _last_wave_regime
+  ui/trade_blotter.py       — _FILTER_DEBUG, _PNL_DISPLAY_THRESHOLD, PnL column
+                              (col 7), _btn_trades_only (renamed from _btn_trade),
+                              _btn_debug, _on_trades_only_toggled, _on_debug_toggled
+  tests/test_signal_log_accuracy.py — NEW, 26 tests (9 spec + extras)
+
+Test results:
+  python -m unittest tests.test_signal_log_accuracy -v → Ran 26 tests in 0.665s OK
+  python tests/test_strategy_ui.py → 163/163 passed, 0 failed
+  python -m unittest discover -s tests → Ran 840 tests in 30.894s OK
+```
+
 ---
 
 ### 16.5 Phase 8 Dependency Graph
@@ -2089,11 +2145,79 @@ Phase 8 GA requires all three sub-phases complete.
 
 ---
 
+## 21. Phase 16D — Docker Dev Container & EC2 Deployment Infrastructure `[COMPLETED 2026-05-13]`
+
+### 21.1 Overview
+
+Phase 16D establishes a unified development and deployment environment
+so that local dev (macOS M3 Pro) and EC2 production (Ubuntu 24.04) run
+identical code and the same compiled C++ extension.
+
+**Two problems solved simultaneously:**
+
+1. **Phase 16P EC2 deployment** — get the tick data collector running on
+   EC2 to start the 30-day data accumulation clock (blocker for Phase 16).
+2. **Phase 9 dev environment** — provide an Ubuntu 24.04 dev container
+   for Phase 9 QML development without waiting for a GPU EC2 instance.
+
+### 21.2 Delivered artefacts
+
+| File | Purpose |
+|---|---|
+| `Dockerfile.dev` | Ubuntu 24.04 image; C++ engine + Python venv; Qt XCB runtime; default `QT_QPA_PLATFORM=offscreen` |
+| `.devcontainer/devcontainer.json` | Cursor/VS Code dev container; `linux/amd64` via Rosetta; X11 socket mount for optional GUI passthrough |
+| `collect_ticks.py` | Headless CLI tick collector (`--symbol`, `--duration`, `--s3-bucket`, SIGTERM-safe) |
+| `requirements-collector.txt` | Stripped EC2 deps — no Qt, no matplotlib |
+| `backtestingCpp/orderflow/build.sh` | Cross-platform (macOS Homebrew or Linux system packages) |
+| `backtestingCpp/orderflow/CMakeLists.txt` | `APPLE` guard around Homebrew prefix and `Boost_NO_SYSTEM_PATHS` |
+| `scripts/setup_ec2.sh` | Full Ubuntu 24.04 bootstrap: apt, venv, C++ build, systemd, cron |
+| `scripts/collector.service` | systemd unit for BTCUSDT collector |
+| `scripts/collector@.service` | Template unit for multi-symbol instances |
+| `scripts/s3_sync.sh` | Hourly S3 cron sync |
+| `scripts/download_ticks.sh` | Developer download helper |
+| `scripts/add_symbol.sh` | Add a second collector instance (e.g. ETHUSDT) |
+| `docs/DEPLOYMENT.md` | Step-by-step deployment guide |
+| `tests/test_collect_ticks.py` | 22 tests; 862/862 broad regression |
+
+### 21.3 Cross-platform GPU strategy
+
+| Environment | GPU | Qt RHI backend | Set by |
+|---|---|---|---|
+| macOS M3 Pro (local native) | Apple Silicon / Metal | `metal` | `_configure_rhi_backend()` in Phase 9A |
+| Docker (local dev container) | None / software | `software` + `offscreen` | `devcontainer.json` env vars |
+| EC2 t3.small (data collection) | None — headless only | N/A | No Qt dependency |
+| EC2 g5.xlarge (Phase 9 UI) | NVIDIA A10G / OpenGL | `opengl` + `xcb` | `Dockerfile.gpu` (Phase 9A) |
+
+Running the Qt GUI locally uses the **native macOS app** (outside Docker)
+with Metal. Docker is for tests, C++ builds, and the headless collector.
+The `_configure_rhi_backend()` function specified in Phase 9A §22.2
+handles backend selection at runtime.
+
+### 21.4 Local dev container quick-start
+
+```bash
+# 1. Open project in Cursor → "Reopen in Container" (auto-detected)
+
+# 2. Run tests (offscreen Qt)
+python -m unittest discover -s tests -v
+
+# 3. Optional: GUI passthrough via XQuartz on macOS
+export DISPLAY=host.docker.internal:0
+export QT_QPA_PLATFORM=xcb
+python main.py  # choose 'ui' mode
+```
+
+---
+
 ## 22. Phase 9 — Qt Quick/QML Migration, GPU Acceleration & UI Cleanup
 
 > **Deployment target:** Ubuntu 24.04 on AWS EC2 g5.xlarge (NVIDIA A10G),
 > streamed via NICE DCV. All constraints in `AGENT_STRATEGY_RULES.md §22`
 > apply to every component built in this phase.
+>
+> **Dev environment:** Use the `Dockerfile.dev` dev container (Phase 16D)
+> for local development. Phase 9A adds `Dockerfile.gpu` as an extension
+> for the g5.xlarge production target.
 
 ### 22.1 Overview
 
@@ -2123,30 +2247,71 @@ at 60 FPS on g5.xlarge. NICE DCV session stable for ≥ 30 minutes.
 
 ---
 
-### 22.2 Phase 9A — QML Scaffold & OpenGL Backend Setup `[NOT STARTED]`
+### 22.2 Phase 9A — QML Scaffold & Cross-Platform GPU Backend Setup `[NOT STARTED]`
 
 **Problem in detail.**
 
 The application currently uses `QApplication` + `QMainWindow` (QWidget
 stack). Migrating to Qt Quick requires replacing the application root
 with `QGuiApplication` + `QQmlApplicationEngine` and establishing the
-OpenGL scene graph backend before any window is shown.
+correct scene graph backend before any window is shown.
+
+**Cross-platform GPU topology.**
+
+The app targets two execution environments with different GPU stacks:
+
+| Environment | GPU | Native Qt RHI backend | Platform plugin |
+|---|---|---|---|
+| macOS M-series (local dev) | Apple Silicon integrated (Metal) | `metal` | `cocoa` |
+| Ubuntu 24.04 EC2 g5.xlarge (production) | NVIDIA A10G (OpenGL / Vulkan) | `opengl` | `xcb` (NICE DCV) |
+
+Verify the local GPU at any time with:
+
+```bash
+# macOS
+system_profiler SPDisplaysDataType | grep -E "Chipset|VRAM|Metal|Vendor"
+
+# Linux EC2
+nvidia-smi
+lspci | grep -i vga
+glxinfo | grep "OpenGL renderer"
+```
+
+Qt Quick defaults to `metal` on macOS and `opengl` (or `vulkan`) on
+Linux. Both are hardware-accelerated — neither is the software fallback.
+The GPU verification check (9A-2) must accept `Metal` and `OpenGL` as
+valid backends; only `Software` is an error.
 
 **Proposed solution.**
 
-*9A-1 — Switch application root to QML engine.*
+*9A-1 — Switch application root to QML engine with platform-aware backend.*
 
 Replace `ui/app.py`'s `QApplication` + `MainWindow()` with:
 
 ```python
+import platform, os, sys
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 
-# Force OpenGL scene graph — must be set BEFORE QGuiApplication creation
-os.environ.setdefault("QSG_RHI_BACKEND", "opengl")
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")       # Linux/NICE DCV
-os.environ.setdefault("QSG_RENDER_LOOP", "threaded")   # Scene graph off GUI thread
+def _configure_rhi_backend() -> None:
+    """Set Qt RHI env vars before QGuiApplication is created.
+
+    macOS  → Metal  (native; OpenGL is a deprecated compat layer on Darwin)
+    Linux  → OpenGL (NVIDIA driver; required for NICE DCV streaming)
+
+    All vars use setdefault so a developer can override from the shell
+    without editing source (e.g. QSG_RHI_BACKEND=vulkan for testing).
+    """
+    if platform.system() == "Darwin":
+        os.environ.setdefault("QSG_RHI_BACKEND", "metal")
+        # No QT_QPA_PLATFORM override needed — cocoa is the default on macOS.
+    else:
+        os.environ.setdefault("QSG_RHI_BACKEND", "opengl")
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")   # X11 via NICE DCV
+    os.environ.setdefault("QSG_RENDER_LOOP", "threaded")  # scene graph off GUI thread
+
+_configure_rhi_backend()   # MUST be called before QGuiApplication()
 
 app = QGuiApplication(sys.argv)
 engine = QQmlApplicationEngine()
@@ -2157,7 +2322,29 @@ engine.load("ui/qml/main.qml")
 
 After the first `QQuickWindow` is created, call `_check_gpu(window)`
 (see `AGENT_STRATEGY_RULES.md §22.2`). Log at ERROR and display an
-in-app banner if software rendering is detected.
+in-app banner if **software** rendering is detected. Metal and OpenGL
+are both accepted as valid hardware backends:
+
+```python
+_HW_BACKENDS = {
+    QSGRendererInterface.GraphicsApi.Metal,
+    QSGRendererInterface.GraphicsApi.OpenGL,
+    QSGRendererInterface.GraphicsApi.Vulkan,
+}
+
+def _check_gpu(window: QQuickWindow) -> None:
+    api = window.rendererInterface().graphicsApi()
+    if api not in _HW_BACKENDS:
+        logger.error(
+            "Qt Quick is using software rendering (%s). "
+            "GPU acceleration unavailable — frame budget will be exceeded.",
+            api,
+        )
+        # Surface a dismissible banner in the QML root window.
+        window.rootObject().setProperty("gpuWarning", True)
+    else:
+        logger.info("Qt Quick GPU backend: %s", api)
+```
 
 *9A-3 — NICE DCV frame pacing.*
 
@@ -2195,7 +2382,7 @@ a reference; Python garbage collection must not collect them.
 
 | File | Change |
 |---|---|
-| `ui/app.py` | Replace `QApplication`/`QMainWindow` with `QGuiApplication`/`QQmlApplicationEngine`. Set env vars. Add `_check_gpu`. |
+| `ui/app.py` | Replace `QApplication`/`QMainWindow` with `QGuiApplication`/`QQmlApplicationEngine`. Add `_configure_rhi_backend()` (platform-aware: Metal on macOS, OpenGL on Linux). Add `_check_gpu` (accepts Metal + OpenGL; errors on Software). |
 | `ui/qml/main.qml` (NEW) | Root `ApplicationWindow` with three detachable `Window` items: OrderFlow, Chart, Strategy. |
 | `ui/qml/components/` (NEW) | Stub QML files for each component (empty `Item {}` placeholders for 9A; filled in 9B/9C). |
 | `ui/models/snapshot_model.py` (NEW) | `QObject` exposing `tide_bias`, `wave_regime`, `risk_budget_pct`, `unrealized_pnl` as `Q_PROPERTY`. |
@@ -2203,13 +2390,25 @@ a reference; Python garbage collection must not collect them.
 
 **Acceptance criteria.**
 
-1. `python -m ui.app` opens three QML windows without Python exceptions.
-2. `QSGRendererInterface.graphicsApi()` ≠ `Software` on a machine with
-   a GPU and NVIDIA drivers installed.
-3. `QSG_RHI_BACKEND=opengl` is set before `QGuiApplication` creation.
-4. `_check_gpu` logs `ERROR` when `QSG_RHI_BACKEND=software` is forced.
+1. `python -m ui.app` opens three QML windows without Python exceptions
+   on both macOS (M-series) and Linux (Ubuntu 24.04 with NVIDIA driver).
+2. On macOS: `QSGRendererInterface.graphicsApi()` == `Metal`.
+   On Linux (EC2): `QSGRendererInterface.graphicsApi()` == `OpenGL`.
+   Neither platform produces `Software`.
+3. `_configure_rhi_backend()` selects the correct `QSG_RHI_BACKEND` for
+   the current OS and is called before `QGuiApplication()` is
+   instantiated. A developer can override via shell env var without
+   editing source.
+4. `_check_gpu` logs `ERROR` when `QSG_RHI_BACKEND=software` is forced,
+   and does **not** log an error for `metal` or `opengl`.
 5. All existing `tests/test_strategy_ui.py` checks pass (QWidget paths
    remain available during migration — they are deprecated, not deleted).
+6. `tests/test_qml_scaffold.py` (offscreen) covers:
+   - engine loads `main.qml` without error;
+   - `_configure_rhi_backend()` sets `metal` on Darwin and `opengl` on
+     Linux (mock `platform.system`);
+   - `_check_gpu` emits ERROR when forced to `software` mode via
+     `QT_QPA_PLATFORM=offscreen` + `QSG_RHI_BACKEND=software`.
 
 ---
 

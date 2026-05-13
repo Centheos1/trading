@@ -17,10 +17,13 @@ from PySide6.QtGui import QColor, QFont
 from execution.models import SignalEntry, SignalCategory, _CATEGORY_LAYER_MAP
 
 _COLUMNS = ["Time", "Layer", "Category", "Type", "Side", "Price",
-            "Strength", "Description"]
+            "Strength", "PnL", "Description"]
 _COL_COUNT = len(_COLUMNS)
 
 _MAX_ROWS = 2000
+
+# Phase 8C — threshold below which realized_pnl is treated as zero for display
+_PNL_DISPLAY_THRESHOLD = 1e-8
 
 _CAT_COLORS = {
     SignalCategory.TIDE:                 QColor(210, 170, 60),
@@ -76,6 +79,13 @@ _FILTER_RIPPLE = {
 _FILTER_RAW = {
     SignalCategory.LEGACY_RAW,
     SignalCategory.CONTEXT,
+    SignalCategory.DIAGNOSTIC,
+}
+
+# Phase 8C — debug filter: raw legacy + diagnostics (excludes CONTEXT which
+# is strategically meaningful and visible in the Strategy filter).
+_FILTER_DEBUG = {
+    SignalCategory.LEGACY_RAW,
     SignalCategory.DIAGNOSTIC,
 }
 
@@ -156,6 +166,12 @@ class _SignalTableModel(QAbstractTableModel):
         if col == 6:
             return f"{e.strength:.2f}" if e.strength else ""
         if col == 7:
+            # Phase 8C — PnL column: show +x.xx / -x.xx when non-zero
+            pnl = getattr(e, "realized_pnl", 0.0)
+            if abs(pnl) > _PNL_DISPLAY_THRESHOLD:
+                return f"{pnl:+.2f}"
+            return ""
+        if col == 8:
             desc = e.description
             if e.state_summary:
                 desc = f"[{e.state_summary}] {desc}"
@@ -237,10 +253,12 @@ class TradeBlotter(QWidget):
         self._btn_strategy.toggled.connect(self._on_strategy_toggled)
         header_row.addWidget(self._btn_strategy)
 
-        self._btn_trade = QCheckBox("Trade")
-        self._btn_trade.setStyleSheet("color: #dceeff; font-size: 10px; font-weight: bold;")
-        self._btn_trade.toggled.connect(self._on_trade_toggled)
-        header_row.addWidget(self._btn_trade)
+        # Phase 8C: renamed from "Trade" → "Trades" (_btn_trades_only)
+        self._btn_trades_only = QCheckBox("Trades")
+        self._btn_trades_only.setStyleSheet(
+            "color: #dceeff; font-size: 10px; font-weight: bold;")
+        self._btn_trades_only.toggled.connect(self._on_trades_only_toggled)
+        header_row.addWidget(self._btn_trades_only)
 
         self._btn_ripple = QCheckBox("Ripple")
         self._btn_ripple.setStyleSheet("color: #64a0dc; font-size: 10px;")
@@ -251,6 +269,12 @@ class TradeBlotter(QWidget):
         self._btn_raw.setStyleSheet("color: #828296; font-size: 10px;")
         self._btn_raw.toggled.connect(self._on_raw_toggled)
         header_row.addWidget(self._btn_raw)
+
+        # Phase 8C: "Debug" filter — shows LEGACY_RAW + DIAGNOSTIC
+        self._btn_debug = QCheckBox("Debug")
+        self._btn_debug.setStyleSheet("color: #606070; font-size: 10px;")
+        self._btn_debug.toggled.connect(self._on_debug_toggled)
+        header_row.addWidget(self._btn_debug)
 
         clear_btn = QPushButton("Clear")
         clear_btn.setMaximumWidth(50)
@@ -286,6 +310,7 @@ class TradeBlotter(QWidget):
         self._table.setColumnWidth(4, 40)   # Side
         self._table.setColumnWidth(5, 80)   # Price
         self._table.setColumnWidth(6, 55)   # Strength
+        self._table.setColumnWidth(7, 65)   # PnL (Phase 8C)
 
         self._table.setStyleSheet("""
             QTableView {
@@ -356,9 +381,9 @@ class TradeBlotter(QWidget):
         else:
             self._apply_filter(None)
 
-    def _on_trade_toggled(self, checked):
+    def _on_trades_only_toggled(self, checked):
         if checked:
-            self._clear_checkboxes(skip="trade")
+            self._clear_checkboxes(skip="trades")
             self._apply_filter(_FILTER_TRADE)
         else:
             self._apply_filter(None)
@@ -377,11 +402,20 @@ class TradeBlotter(QWidget):
         else:
             self._apply_filter(None)
 
+    def _on_debug_toggled(self, checked):
+        # Phase 8C — Debug filter: LEGACY_RAW + DIAGNOSTIC
+        if checked:
+            self._clear_checkboxes(skip="debug")
+            self._apply_filter(_FILTER_DEBUG)
+        else:
+            self._apply_filter(None)
+
     def _clear_checkboxes(self, skip=""):
         for name, btn in [("strategy", self._btn_strategy),
-                          ("trade", self._btn_trade),
+                          ("trades", self._btn_trades_only),
                           ("ripple", self._btn_ripple),
-                          ("raw", self._btn_raw)]:
+                          ("raw", self._btn_raw),
+                          ("debug", self._btn_debug)]:
             if name != skip:
                 btn.blockSignals(True)
                 btn.setChecked(False)

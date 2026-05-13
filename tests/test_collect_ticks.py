@@ -1,0 +1,364 @@
+"""Tests for collect_ticks.py CLI entrypoint.
+
+These tests stub out the C++ engine and network dependencies so they run
+headlessly on any platform (macOS, Linux CI, Docker).
+"""
+
+import argparse
+import importlib
+import logging
+import os
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch, call
+
+
+# ---------------------------------------------------------------------------
+# Helpers to load the module with the C++ import stubbed out
+# ---------------------------------------------------------------------------
+
+def _load_module():
+    """Import collect_ticks with orderflow_engine stubbed."""
+    ofe_stub = MagicMock()
+    ofe_stub.TickStore = MagicMock
+    ofe_stub.OrderFlowEngine = MagicMock
+    ofe_stub.Trade = MagicMock
+    ofe_stub.DepthUpdate = MagicMock
+    ofe_stub.DepthLevel = MagicMock
+
+    with patch.dict(sys.modules, {"orderflow_engine": ofe_stub}):
+        # Also stub data_service's TickDataCollector so we don't need a real store
+        import collect_ticks  # noqa: PLC0415
+        importlib.reload(collect_ticks)
+        return collect_ticks
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+class TestArgParsing(unittest.TestCase):
+
+    def setUp(self):
+        self.ct = _load_module()
+
+    def test_defaults(self):
+        args = self.ct._parse_args.__wrapped__ if hasattr(
+            self.ct._parse_args, "__wrapped__") else None
+        # Call with empty argv
+        with patch("sys.argv", ["collect_ticks.py"]):
+            args = self.ct._parse_args()
+        self.assertEqual(args.symbol, "BTCUSDT")
+        self.assertIsNone(args.symbols)
+        self.assertEqual(args.exchange, "binance")
+        self.assertTrue(args.futures)
+        self.assertEqual(args.duration, 0)
+        self.assertIsNone(args.s3_bucket)
+        self.assertEqual(args.s3_key, "ticks/binance_ticks.h5")
+        self.assertEqual(args.log_level, "INFO")
+
+    def test_custom_symbol(self):
+        with patch("sys.argv", ["collect_ticks.py", "--symbol", "ETHUSDT"]):
+            args = self.ct._parse_args()
+        self.assertEqual(args.symbol, "ETHUSDT")
+
+    def test_symbols_list(self):
+        with patch("sys.argv",
+                   ["collect_ticks.py", "--symbols", "BTCUSDT,ETHUSDT"]):
+            args = self.ct._parse_args()
+        self.assertEqual(args.symbols, "BTCUSDT,ETHUSDT")
+
+    def test_duration(self):
+        with patch("sys.argv",
+                   ["collect_ticks.py", "--duration", "60"]):
+            args = self.ct._parse_args()
+        self.assertEqual(args.duration, 60)
+
+    def test_s3_bucket(self):
+        with patch("sys.argv",
+                   ["collect_ticks.py", "--s3-bucket", "my-bucket"]):
+            args = self.ct._parse_args()
+        self.assertEqual(args.s3_bucket, "my-bucket")
+
+    def test_no_futures(self):
+        with patch("sys.argv", ["collect_ticks.py", "--no-futures"]):
+            args = self.ct._parse_args()
+        self.assertFalse(args.futures)
+
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+class TestLoggingSetup(unittest.TestCase):
+
+    def setUp(self):
+        self.ct = _load_module()
+
+    def test_setup_logging_creates_log_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = os.path.join(tmpdir, "logs")
+            self.ct._setup_logging("INFO", log_dir=log_dir)
+            self.assertTrue(os.path.isdir(log_dir))
+
+    def test_setup_logging_invalid_level_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Should not raise even with an unknown level string
+            self.ct._setup_logging("BOGUS", log_dir=tmpdir)
+
+
+# ---------------------------------------------------------------------------
+# S3 upload helper
+# ---------------------------------------------------------------------------
+
+class TestS3Upload(unittest.TestCase):
+    """boto3 is an EC2-only dependency; stub it via sys.modules so tests
+    run without the package installed locally."""
+
+    def _s3_context(self, mock_s3_client):
+        boto3_stub = MagicMock()
+        boto3_stub.client.return_value = mock_s3_client
+        return patch.dict(sys.modules, {"boto3": boto3_stub})
+
+    def setUp(self):
+        self.ct = _load_module()
+
+    def test_upload_success(self):
+        mock_s3 = MagicMock()
+        with self._s3_context(mock_s3):
+            with tempfile.NamedTemporaryFile() as f:
+                result = self.ct._upload_to_s3(f.name, "bucket", "key/file.h5")
+        self.assertTrue(result)
+        mock_s3.upload_file.assert_called_once()
+
+    def test_upload_failure_boto3_import_error_returns_false(self):
+        """If boto3 raises on import (not installed), return False gracefully."""
+        with patch.dict(sys.modules, {"boto3": None}):
+            result = self.ct._upload_to_s3("/nonexistent/path.h5",
+                                           "bucket", "key.h5")
+        self.assertFalse(result)
+
+    def test_upload_s3_error_returns_false(self):
+        mock_s3 = MagicMock()
+        mock_s3.upload_file.side_effect = Exception("access denied")
+        with self._s3_context(mock_s3):
+            with tempfile.NamedTemporaryFile() as f:
+                result = self.ct._upload_to_s3(f.name, "bucket", "key.h5")
+        self.assertFalse(result)
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM handler
+# ---------------------------------------------------------------------------
+
+class TestSigtermHandler(unittest.TestCase):
+
+    def setUp(self):
+        self.ct = _load_module()
+
+    def test_sigterm_sets_event(self):
+        import asyncio
+        loop = asyncio.new_event_loop()
+        event = loop.run_until_complete(self._make_event(loop))
+        self.ct._shutdown_event = event
+        self.ct._handle_sigterm(15, None)
+        self.assertTrue(event.is_set())
+        loop.close()
+
+    async def _make_event(self, loop):
+        import asyncio
+        return asyncio.Event()
+
+    def test_sigterm_no_event_no_crash(self):
+        self.ct._shutdown_event = None
+        self.ct._handle_sigterm(15, None)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Main function integration (with TickDataCollector stubbed)
+# ---------------------------------------------------------------------------
+
+class TestMainFunction(unittest.TestCase):
+
+    def _make_mock_collector(self):
+        collector = MagicMock()
+        collector.store = MagicMock()
+        return collector
+
+    def test_main_single_symbol_collects_and_exits_0(self):
+        ct = _load_module()
+        mock_collector = self._make_mock_collector()
+
+        with patch("sys.argv", ["collect_ticks.py", "--symbol", "BTCUSDT",
+                                 "--duration", "1"]):
+            with patch.object(ct, "TickDataCollector",
+                              return_value=mock_collector):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with patch("sys.argv",
+                               ["collect_ticks.py",
+                                "--symbol", "BTCUSDT",
+                                "--duration", "1",
+                                "--data-dir", tmpdir]):
+                        rc = ct.main()
+        self.assertEqual(rc, 0)
+        mock_collector.collect.assert_called_once_with("BTCUSDT",
+                                                       duration_seconds=1)
+        mock_collector.store.flush.assert_called_once()
+        mock_collector.store.close.assert_called_once()
+
+    def test_main_s3_upload_called_on_clean_exit(self):
+        ct = _load_module()
+        mock_collector = self._make_mock_collector()
+        upload_calls = []
+
+        def mock_upload(path, bucket, key):
+            upload_calls.append((path, bucket, key))
+            return True
+
+        with patch.object(ct, "TickDataCollector", return_value=mock_collector):
+            with patch.object(ct, "_upload_to_s3", side_effect=mock_upload):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with patch("sys.argv",
+                               ["collect_ticks.py",
+                                "--symbol", "BTCUSDT",
+                                "--duration", "1",
+                                "--s3-bucket", "my-bucket",
+                                "--data-dir", tmpdir]):
+                        rc = ct.main()
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(upload_calls), 1)
+        _, bucket, _ = upload_calls[0]
+        self.assertEqual(bucket, "my-bucket")
+
+    def test_main_s3_upload_failure_returns_exit_2(self):
+        ct = _load_module()
+        mock_collector = self._make_mock_collector()
+
+        with patch.object(ct, "TickDataCollector", return_value=mock_collector):
+            with patch.object(ct, "_upload_to_s3", return_value=False):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with patch("sys.argv",
+                               ["collect_ticks.py",
+                                "--symbol", "BTCUSDT",
+                                "--duration", "1",
+                                "--s3-bucket", "bad-bucket",
+                                "--data-dir", tmpdir]):
+                        rc = ct.main()
+
+        self.assertEqual(rc, 2)
+
+    def test_main_exception_returns_exit_1(self):
+        ct = _load_module()
+        mock_collector = self._make_mock_collector()
+        mock_collector.collect.side_effect = RuntimeError("boom")
+
+        with patch.object(ct, "TickDataCollector", return_value=mock_collector):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch("sys.argv",
+                           ["collect_ticks.py",
+                            "--symbol", "BTCUSDT",
+                            "--duration", "1",
+                            "--data-dir", tmpdir]):
+                    rc = ct.main()
+
+        self.assertEqual(rc, 1)
+        mock_collector.store.flush.assert_called_once()
+
+    def test_main_no_s3_upload_when_bucket_not_set(self):
+        ct = _load_module()
+        mock_collector = self._make_mock_collector()
+        upload_calls = []
+
+        with patch.object(ct, "TickDataCollector", return_value=mock_collector):
+            with patch.object(ct, "_upload_to_s3",
+                              side_effect=lambda *a: upload_calls.append(a) or True):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with patch("sys.argv",
+                               ["collect_ticks.py",
+                                "--symbol", "BTCUSDT",
+                                "--duration", "1",
+                                "--data-dir", tmpdir]):
+                        ct.main()
+
+        self.assertEqual(len(upload_calls), 0)
+
+    def test_main_multi_symbol_calls_collect_for_each(self):
+        ct = _load_module()
+        mock_collector = self._make_mock_collector()
+
+        with patch.object(ct, "TickDataCollector", return_value=mock_collector):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch("sys.argv",
+                           ["collect_ticks.py",
+                            "--symbols", "BTCUSDT,ETHUSDT",
+                            "--duration", "1",
+                            "--data-dir", tmpdir]):
+                    rc = ct.main()
+
+        self.assertEqual(rc, 0)
+        calls = mock_collector.collect.call_args_list
+        symbols_called = [c[0][0] for c in calls]
+        self.assertIn("BTCUSDT", symbols_called)
+        self.assertIn("ETHUSDT", symbols_called)
+
+    def test_main_keyboard_interrupt_exits_0(self):
+        ct = _load_module()
+        mock_collector = self._make_mock_collector()
+        mock_collector.collect.side_effect = KeyboardInterrupt()
+
+        with patch.object(ct, "TickDataCollector", return_value=mock_collector):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch("sys.argv",
+                           ["collect_ticks.py",
+                            "--symbol", "BTCUSDT",
+                            "--data-dir", tmpdir]):
+                    rc = ct.main()
+
+        self.assertEqual(rc, 0)
+        mock_collector.store.flush.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TickDataCollector store_path parameter
+# ---------------------------------------------------------------------------
+
+class TestTickDataCollectorStorePath(unittest.TestCase):
+
+    def test_default_store_path_is_data_dir(self):
+        """TickDataCollector default store path is data/{exchange}_ticks.h5."""
+        import importlib
+        ofe_stub = MagicMock()
+        ofe_stub.TickStore = MagicMock(return_value=MagicMock())
+        ofe_stub.OrderFlowEngine = MagicMock(return_value=MagicMock())
+
+        with patch.dict(sys.modules, {"orderflow_engine": ofe_stub}):
+            import data_service
+            importlib.reload(data_service)
+            # Patch makedirs so no real directory is created
+            with patch("os.makedirs"):
+                data_service.TickDataCollector(exchange="binance")
+            # The TickStore should have been called with the relative default path
+            call_arg = ofe_stub.TickStore.call_args[0][0]
+            self.assertEqual(call_arg, os.path.join("data", "binance_ticks.h5"))
+
+    def test_custom_store_path_is_respected(self):
+        """store_path kwarg overrides the default path."""
+        ofe_stub = MagicMock()
+        ofe_stub.TickStore = MagicMock(return_value=MagicMock())
+        ofe_stub.OrderFlowEngine = MagicMock(return_value=MagicMock())
+
+        with patch.dict(sys.modules, {"orderflow_engine": ofe_stub}):
+            import data_service
+            importlib.reload(data_service)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                custom = os.path.join(tmpdir, "my_ticks.h5")
+                data_service.TickDataCollector(
+                    exchange="binance", store_path=custom
+                )
+                ofe_stub.TickStore.assert_called_with(custom)
+
+
+if __name__ == "__main__":
+    unittest.main()

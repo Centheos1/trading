@@ -3094,7 +3094,7 @@ evaluated before Phase 17 work begins.
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
-| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `NOT STARTED` | — | None (infrastructure prerequisite) |
+| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — Docker/scripts delivered 2026-05-13; EC2 deployment PENDING` | — | None (infrastructure prerequisite) |
 | **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (blocked by Phase 16P)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (NOT STARTED) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
@@ -3212,7 +3212,33 @@ test case to `test_replay_determinism.py` verifying this.
 
 ---
 
-### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[NOT STARTED]`
+### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — 2026-05-13]`
+
+**Docker/scripts delivered 2026-05-13. EC2 deployment pending.**
+
+**Evidence (delivered 2026-05-13).**
+
+| Artefact | Status |
+|---|---|
+| `backtestingCpp/orderflow/CMakeLists.txt` | Linux-compatible (`APPLE` guard around Homebrew prefix; `Boost_NO_SYSTEM_PATHS` only on macOS) |
+| `backtestingCpp/orderflow/build.sh` | Cross-platform (`CMAKE_ARGS` array; `sysctl`/`nproc` fallback; no hardcoded Homebrew path) |
+| `collect_ticks.py` | Headless CLI: `--symbol/--symbols`, `--duration`, `--s3-bucket`, `--s3-key`, `--data-dir`, `--log-level`; SIGTERM → flush → upload |
+| `requirements-collector.txt` | Stripped EC2 deps (no Qt/matplotlib/oandapyV20) |
+| `Dockerfile.dev` | Ubuntu 24.04 image: C++ engine build, Python 3.11 venv, Qt XCB runtime, Xvfb |
+| `.devcontainer/devcontainer.json` | Cursor/VS Code dev container; `linux/amd64`; `offscreen` Qt default; X11 mount |
+| `scripts/setup_ec2.sh` | Full Ubuntu 24.04 bootstrap: apt, venv, C++ build, systemd, cron |
+| `scripts/collector.service` | systemd unit: `Restart=on-failure`, `TimeoutStopSec=30`, `EnvironmentFile=/app/.env` |
+| `scripts/collector@.service` | Template unit for multi-symbol instances |
+| `scripts/s3_sync.sh` | Hourly cron sync; handles default + per-symbol paths |
+| `scripts/download_ticks.sh` | Developer download helper; supports multiple symbols |
+| `scripts/add_symbol.sh` | Adds a second collector instance (e.g. ETHUSDT) |
+| `docs/DEPLOYMENT.md` | Step-by-step guide: IAM, EC2, systemd, S3, dev container, GUI passthrough |
+| `tests/test_collect_ticks.py` | 22 new tests; all pass |
+| `data_service.TickDataCollector` | `store_path` kwarg added (backward compat) |
+
+**Regression:** 862/862 tests pass (2026-05-13).
+
+**Remaining step to complete Phase 16P:** Launch the `t3.small` EC2 instance and run `scripts/setup_ec2.sh`. See `docs/DEPLOYMENT.md §1` for the procedure.
 
 **Objective.** The Phase 16 HMM A/B campaign requires ≥ 30 days of continuous tick data (trades + L2 depth) per symbol. Running `main.py` in `data` mode on a developer laptop for 30+ days is not viable. Phase 16P makes the data collection path deployment-ready for a headless Linux EC2 instance with data persisted to AWS S3.
 
@@ -3977,7 +4003,7 @@ config-driven (§20), and `num_trades` is a Pareto objective (§22.2 #15).
 
 **Outstanding for V2 GA (see §7.2 for detailed phase specs):**
 - Phase 15 ✅ — LIMIT / OCO / partial-fill order types in `BinanceBroker` and `PaperEngine` (2026-05-12).
-- Phase 16P ⬜ — EC2 / S3 tick data collection infrastructure. **Blocker for Phase 16 real-data campaign.** Requires Linux-aware C++ build (`build.sh` + `CMakeLists.txt`), non-interactive `collect_ticks.py` CLI, `requirements-collector.txt`, systemd service, hourly S3 sync cron, `setup_ec2.sh`, and `docs/DEPLOYMENT.md`. Spec: §7.2 Phase 16P.
+- Phase 16P 🔷 — EC2 / S3 tick data collection infrastructure. **Docker/scripts delivered 2026-05-13 — EC2 instance launch PENDING** (run `scripts/setup_ec2.sh` on a fresh `t3.small`). See `docs/DEPLOYMENT.md`. Spec: §7.2 Phase 16P.
 - Phase 16 🟡 — HMM A/B campaign harness delivered 2026-05-12. Real-data `CampaignVerdict` recording **blocked by Phase 16P** (need ≥ 30 days continuous tick data from EC2 before `tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT --windows 30d,60d --seed 42` can run meaningfully). Phase 17 hard-gated until verdict recorded.
 - Phase 17 ⬜ — HMM-based Wave regime classifier (hard-gated on Phase 16 real-data verdict).
 - Phase 18 ⬜ — Cross-venue features inside C++ Ripple (today Python WaveEngine only).

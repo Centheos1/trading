@@ -120,9 +120,101 @@ Each layer is backtested independently (isolated) and in combination (stacked) t
 
 ---
 
+## Deployment & Workflow
+
+The app ships as a **Docker Compose project**. `docker compose up` is the
+single entry point for every environment — local development, CI, EC2 data
+collection, and (future) GPU trading UI.
+
+### Quick-start: collect tick data on EC2 (≤10 minutes)
+
+```bash
+# 1. Launch an EC2 t3.small — Ubuntu 24.04, IAM role with s3:PutObject
+
+# 2. SSH in and clone the repo
+git clone https://github.com/Centheos1/trading.git /app && cd /app
+
+# 3. Bootstrap: installs Docker, builds the image, enables auto-start on reboot
+bash scripts/setup_ec2.sh
+
+# 4. Set your S3 bucket — the only required config
+nano .env          # S3_BUCKET=your-bucket-name
+
+# 5. Start collecting
+docker compose up -d
+
+# 6. Watch it
+docker compose logs -f collector
+```
+
+Data flows to S3 hourly via cron. Download to your dev machine before
+running the HMM campaign:
+
+```bash
+export S3_BUCKET=your-bucket-name
+bash scripts/download_ticks.sh
+```
+
+### Compose services
+
+| Command | What starts | Use case |
+|---|---|---|
+| `docker compose up -d` | `collector` (BTCUSDT) | EC2 data collection |
+| `docker compose --profile multi up -d` | + `collector-eth` | Add ETHUSDT |
+| `docker compose --profile ui up app` | `app` (trading UI) | Local UI (needs XQuartz) |
+| `docker compose --profile test run --rm test` | `test` + exits | CI / regression sweep |
+
+### Local development
+
+```bash
+# Option A — Dev container in Cursor (recommended)
+# Open project → "Reopen in Container" (detected from .devcontainer/)
+# Same Ubuntu 24.04 image as EC2; C++ engine compiled for linux/amd64
+
+# Option B — Native macOS (fastest for UI iteration)
+source .venv/bin/activate
+python main.py   # choose 'ui' mode — uses Metal GPU directly
+
+# Run tests (either environment)
+docker compose --profile test run --rm test          # Docker (Linux parity)
+python -m unittest discover -s tests -v              # Native macOS
+```
+
+### Update and redeploy (EC2)
+
+```bash
+git pull
+docker compose build
+docker compose up -d
+```
+
+### Add a second symbol
+
+```bash
+docker compose --profile multi up -d collector-eth   # ETHUSDT via Compose
+# OR as a separate systemd-managed container instance:
+bash scripts/add_symbol.sh SOLUSDT
+```
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full step-by-step
+guide including IAM policy, S3 setup, S3 sync cron, and troubleshooting.
+
+---
+
 ## Prerequisites
 
-- **macOS** (tested on Apple Silicon)
+### Docker (recommended — matches EC2 exactly)
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) ≥ 4.x
+- Copy `.env.template` → `.env` and fill in `S3_BUCKET`
+
+The Docker image (`Dockerfile.dev`) is Ubuntu 24.04 and installs all
+C++ and Python dependencies automatically. No Homebrew or manual
+`pip install` required.
+
+### Native macOS (local UI / fast iteration)
+
+- **macOS** (tested on Apple Silicon M3 Pro)
 - **Python 3.12+** with a virtual environment at `.venv/`
 - **Homebrew** packages: `boost`, `hdf5`, `openssl`, `cmake`, `nlohmann-json`, `pybind11`
 - **pip** packages: see `requirements.txt`
@@ -130,6 +222,15 @@ Each layer is backtested independently (isolated) and in combination (stacked) t
 ---
 
 ## Setup
+
+### Docker setup (one command)
+
+```bash
+cp .env.template .env   # fill in S3_BUCKET if deploying to EC2
+docker compose build    # builds Ubuntu 24.04 image + C++ engine (~5 min first run)
+```
+
+### Native macOS setup
 
 ### 1. Install system dependencies
 
@@ -310,11 +411,20 @@ predict forward returns over the next $h$ bars?"
 ## Running Tests
 
 ```bash
-# Wave layer tests (46 tests)
-python -m unittest tests/test_wave_backtest.py -v
+# Full regression sweep — Docker (Linux/amd64, matches CI and EC2)
+docker compose --profile test run --rm test
 
-# Tide layer tests
-python -m unittest tests/test_tide_accuracy.py -v
+# Full regression sweep — native macOS
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
+
+# Targeted suites (either environment)
+python -m unittest tests/test_wave_backtest.py -v      # Wave layer (46 tests)
+python -m unittest tests/test_tide_accuracy.py -v      # Tide layer
+python -m unittest tests/test_collect_ticks.py -v      # Collector CLI (22 tests)
+
+# C++ unit tests (native or inside container)
+cd backtestingCpp/orderflow/build
+./test_ripple && ./test_schemas && ./test_trade_lifecycle
 ```
 
 ---
@@ -323,7 +433,20 @@ python -m unittest tests/test_tide_accuracy.py -v
 
 ### Collect tick data
 
+For continuous headless collection (EC2), use `docker compose up -d`
+(see the [Deployment & Workflow](#deployment--workflow) section above).
+
+For a quick local test run:
+
 ```bash
+# Docker (30-second smoke run)
+docker compose run --rm collector \
+    python collect_ticks.py --symbol BTCUSDT --duration 30
+
+# Native macOS
+python collect_ticks.py --symbol BTCUSDT --duration 30
+
+# Legacy interactive prompt (still works)
 python main.py
 # Mode: data | Exchange: binance | Symbol: BTCUSDT | Pull type: ticks | Duration: 30
 ```

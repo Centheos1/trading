@@ -203,7 +203,12 @@ class TickDataCollector:
     """Collects real-time tick and depth data from Binance via Python WebSocket
     and stores it in HDF5 via the C++ engine for order flow backtesting."""
 
-    def __init__(self, exchange: str = "binance", futures: bool = True):
+    def __init__(
+        self,
+        exchange: str = "binance",
+        futures: bool = True,
+        store_path: str | None = None,
+    ):
         if ofe is None:
             raise RuntimeError(
                 "orderflow_engine C++ module not built. "
@@ -213,8 +218,11 @@ class TickDataCollector:
         self.exchange = exchange
         self.futures = futures
 
-        os.makedirs("data", exist_ok=True)
-        store_path = os.path.join("data", f"{exchange}_ticks.h5")
+        if store_path is None:
+            os.makedirs("data", exist_ok=True)
+            store_path = os.path.join("data", f"{exchange}_ticks.h5")
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(store_path)), exist_ok=True)
         self.store = ofe.TickStore(store_path)
         self.engine = ofe.OrderFlowEngine()
         self.engine.set_tick_store(self.store, "")

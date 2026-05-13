@@ -60,6 +60,7 @@ class ExecutionManager:
         self._armed = False
         self._current_side: Optional[OrderSide] = None
         self._current_qty: float = 0.0
+        self._current_entry_price: float = 0.0
         # Event-time milliseconds — used by ``on_intent``. No wall-clock
         # counterpart exists post-14F.
         self._last_intent_ts_ms: int = 0
@@ -67,6 +68,12 @@ class ExecutionManager:
         self._step_size: float = 0.0
         self._orders: Deque[Order] = deque(maxlen=500)
         self._account: AccountInfo = AccountInfo()
+
+        # Phase 8B — session-attributed PnL and trade count.
+        # Reset to zero on each ARM so the panel always shows current-session
+        # data and never accumulates across multiple arm/disarm cycles.
+        self._session_realized_pnl: float = 0.0
+        self._session_trade_count: int = 0
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -92,6 +99,26 @@ class ExecutionManager:
     @property
     def current_qty(self) -> float:
         return self._current_qty
+
+    # ------------------------------------------------------------------
+    # Phase 8B — session stats (read-only; reset on ARM)
+    # ------------------------------------------------------------------
+
+    @property
+    def session_realized_pnl(self) -> float:
+        """Cumulative strategy-attributed realized PnL for the current ARM session."""
+        return self._session_realized_pnl
+
+    @property
+    def session_trade_count(self) -> int:
+        """Number of completed exit fills (round-trip count) for the current ARM session."""
+        return self._session_trade_count
+
+    def reset_session_stats(self) -> None:
+        """Clear session PnL and trade count.  Called automatically on ARM."""
+        self._session_realized_pnl = 0.0
+        self._session_trade_count = 0
+        self._current_entry_price = 0.0
 
     def start(self) -> bool:
         if self._thread and self._thread.is_alive():
@@ -123,6 +150,7 @@ class ExecutionManager:
 
     def arm(self) -> None:
         self._armed = True
+        self.reset_session_stats()
         logger.info("Execution ARMED for %s", self._symbol)
 
     def disarm(self, close_position: bool = True) -> None:
@@ -376,6 +404,8 @@ class ExecutionManager:
                     OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
                 self._current_side = desired_side
                 self._current_qty = order.fill_quantity or qty
+                if order.fill_price and order.fill_price > 0:
+                    self._current_entry_price = order.fill_price
                 await self._refresh_account()
             else:
                 logger.warning(
@@ -415,8 +445,20 @@ class ExecutionManager:
                     )
                     await self._refresh_account()
                     return
+                # Phase 8B — attribute PnL to this session on a confirmed fill.
+                if order.status == OrderStatus.FILLED:
+                    fill_price = order.fill_price or 0.0
+                    entry_price = self._current_entry_price
+                    qty = self._current_qty
+                    side_sign = (1.0 if self._current_side == OrderSide.BUY
+                                 else -1.0)
+                    if fill_price > 0 and entry_price > 0 and qty > 0:
+                        pnl = (fill_price - entry_price) * qty * side_sign
+                        self._session_realized_pnl += pnl
+                    self._session_trade_count += 1
             self._current_side = None
             self._current_qty = 0.0
+            self._current_entry_price = 0.0
             await self._refresh_account()
         except Exception as e:
             logger.error("Execution error (intent exit): %s", e)

@@ -1,0 +1,10 @@
+# Stripped dependency set for the headless EC2 tick data collector.
+# No Qt, no matplotlib, no OANDA client — only what collect_ticks.py needs.
+websockets>=12.0,<15
+requests>=2.31,<3
+h5py>=3.10,<4
+numpy>=1.26,<2.3
+python-binance>=1.0.19,<2
+python-dotenv>=1.0,<2
+pybind11>=2.11,<3
+boto3>=1.34,<2

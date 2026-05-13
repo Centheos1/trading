@@ -7,13 +7,14 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 cmake_policy(SET CMP0167 NEW)
 
-set(HOMEBREW_PREFIX "/opt/homebrew")
-list(PREPEND CMAKE_PREFIX_PATH "${HOMEBREW_PREFIX}")
+if(APPLE)
+    set(HOMEBREW_PREFIX "/opt/homebrew")
+    list(PREPEND CMAKE_PREFIX_PATH "${HOMEBREW_PREFIX}")
+    set(BOOST_ROOT "${HOMEBREW_PREFIX}")
+    set(Boost_NO_SYSTEM_PATHS ON)
+endif()
 
 find_package(HDF5 REQUIRED COMPONENTS C)
-
-set(BOOST_ROOT "${HOMEBREW_PREFIX}")
-set(Boost_NO_SYSTEM_PATHS ON)
 find_package(Boost 1.70 REQUIRED)
 
 find_package(OpenSSL REQUIRED)
