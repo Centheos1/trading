@@ -19,11 +19,17 @@
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG PYTHON_VERSION=3.11
+ARG PYTHON_VERSION=3.12
 
 # ---------------------------------------------------------------------------
 # System packages
 # ---------------------------------------------------------------------------
+# Enable universe repo — required for many packages on Ubuntu 24.04 base image
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository universe \
+    && apt-get update \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Build tools
     build-essential \
