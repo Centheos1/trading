@@ -1,5 +1,11 @@
 # Trading App — Backtesting & Optimisation Platform
 
+### Activate the virtual environment
+
+```bash
+source ./.venv/bin/activate
+```
+
 A multi-layer crypto trading strategy research platform implementing the
 **Tide / Wave / Ripple** hierarchy with event-time backtesting, multi-objective
 parameter optimisation (NSGA-II), and a C++ order flow engine.

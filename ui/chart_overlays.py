@@ -21,7 +21,7 @@ they can be registered via `chart.register_overlay(SmaOverlay(20))`.
 """
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+from typing import ClassVar, Iterable, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainterPath, QPen
@@ -68,6 +68,12 @@ class SmaOverlay:
     `period` is the look-back length. The overlay draws a polyline
     starting at index `period - 1` (the first index with a full window).
     """
+
+    # Phase 9D — stable identifier for the QML toggle row.
+    OVERLAY_NAME: ClassVar[str] = "sma"
+    # Phase 9D — instance-overridable; the candle chart skips overlays
+    # where ``enabled`` is falsy.
+    enabled: bool = True
 
     def __init__(self, period: int = 20,
                  color: QColor = QColor(255, 200, 80, 220),
@@ -117,6 +123,9 @@ class EmaOverlay:
     line starts at index `period - 1` (matching SMA visual).
     """
 
+    OVERLAY_NAME: ClassVar[str] = "ema"
+    enabled: bool = True
+
     def __init__(self, period: int = 50,
                  color: QColor = QColor(120, 180, 255, 220),
                  width: int = 2):
@@ -163,6 +172,9 @@ class VwapOverlay:
     aggregates aren't available from `_Candle` data. Acceptable for a
     visual reference; not a precise tick VWAP.
     """
+
+    OVERLAY_NAME: ClassVar[str] = "vwap"
+    enabled: bool = True
 
     def __init__(self,
                  color: QColor = QColor(180, 100, 220, 220),
@@ -212,6 +224,9 @@ class StructuralLevelsOverlay:
     `extra_candles` is None, the session H/L are derived from the
     visible window only.
     """
+
+    OVERLAY_NAME: ClassVar[str] = "structural"
+    enabled: bool = True
 
     def __init__(self,
                  session_color: QColor = QColor(220, 220, 220, 160),
@@ -311,6 +326,9 @@ class VolProfileOverlay:
     `width_px` controls the maximum overlay width; the bar starts at
     `px + pw` (right edge of plot) and grows leftward into the chart.
     """
+
+    OVERLAY_NAME: ClassVar[str] = "volprofile"
+    enabled: bool = True
 
     def __init__(self,
                  n_bins: int = 32,

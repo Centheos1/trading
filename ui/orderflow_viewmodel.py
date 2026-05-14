@@ -78,6 +78,12 @@ class FrameData:
     depth_img_bytes: bytes | None = None  # prevent GC of backing buffer
     depth_shift_px: float = 0.0
     have_heatmap: bool = False
+    # Phase 9B — toggles every time ``compute_frame`` rebuilds the depth
+    # QImage.  Phase 9B-final's ``HeatmapItem`` uses this to skip
+    # ``QQuickWindow.createTextureFromImage()`` when the image is
+    # unchanged across frames; in the bridge tier the flag is set on
+    # every rebuild so consumers can subscribe to it for diagnostics.
+    depth_texture_dirty: bool = False
 
     # Bubble paths (already aggregated + culled)
     buy_path: QPainterPath = field(default_factory=QPainterPath)
@@ -875,6 +881,11 @@ class OrderFlowViewModel:
         frame.depth_image = img
         frame.depth_img_bytes = self._depth_img_data
         frame.depth_shift_px = shift
+        # Phase 9B — the depth image has been rebuilt on this frame.
+        # ``HeatmapItem`` (Phase 9B-final) reads this flag to decide
+        # whether to re-upload the QSGTexture.  In the bridge tier the
+        # flag is purely informational.
+        frame.depth_texture_dirty = True
 
     @staticmethod
     def _forward_fill_intensity(intensity, fade_out=None,

@@ -264,11 +264,14 @@ Save: `Ctrl+O` → Enter. Exit: `Ctrl+X`.
 ## Part 4 — Start data collection
 
 ```bash
+ssh ec2-trading
+
 cd ~/app/trading
 
 # Build if needed
 # In a second SSH session
-docker compose build --progress=plain 2>&1 | tail -20
+docker compose build --progress=plain > /tmp/build.log 2>&1 &
+tail -f /tmp/build.log
 
 # Tick collectors — real-time WebSocket trades + L2 depth (HDF5 → S3)
 docker compose up -d                              # BTCUSDT

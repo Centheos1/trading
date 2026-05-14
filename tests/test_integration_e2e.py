@@ -199,11 +199,17 @@ def test_strategy_state_gates_ui():
     from ui.main_window import MainWindow
     w = MainWindow()
 
-    # Initial state: DISARMED, sizing disabled, inactive elements hidden
+    # Initial state: DISARMED, sizing disabled.  Phase 9D removed the
+    # ``_tick_size_input`` / ``_imbalance_input`` widgets entirely; the
+    # legacy "hidden but present" assertions are now covered by
+    # ``test_ui_cleanup.py::test_tick_size_removed`` /
+    # ``test_imbalance_removed``.
     check(w._strategy_ui_state == StrategyUIState.DISARMED, "initial DISARMED")
     check(not w._sizing_mode_combo.isEnabled(), "sizing disabled when disarmed")
-    check(not w._tick_size_input.isVisible(), "tick_size hidden")
-    check(not w._imbalance_input.isVisible(), "imbalance hidden")
+    check(not hasattr(w, "_tick_size_input"),
+          "Phase 9D: _tick_size_input fully removed")
+    check(not hasattr(w, "_imbalance_input"),
+          "Phase 9D: _imbalance_input fully removed")
 
     # Arm: sizing enabled
     w._set_strategy_state(StrategyUIState.ARMED_WAITING)

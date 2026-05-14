@@ -1,12 +1,14 @@
-"""Tests for Phase 3: Inactive UI Cleanup.
+"""Tests for Phase 3 / Phase 9D: Inactive UI Cleanup.
 
 Validates:
-- D1: Tick Size and Imbalance inputs hidden
-- D1: Sizing controls disabled when strategy is disarmed
-- D2: Replay option greyed out in mode combo
-- D3: Account panel shows placeholder when not connected
-- D3: Account panel shows content when connected
-- Backward compatibility: hidden elements still exist in code
+- D1 (Phase 9D): Tick Size and Imbalance inputs FULLY REMOVED from
+  ``MainWindow`` (they were previously hidden; Phase 9D drops them).
+  Defaults are hardcoded in ``_on_connect``.
+- D1: Sizing controls disabled when strategy is disarmed.
+- D2 (Phase 9D): Replay item REMOVED from mode combo (it was
+  previously disabled).  ``_mode_combo`` now exposes only ``"Live"``.
+- D3: Account panel shows placeholder when not connected.
+- D3: Account panel shows content when connected.
 """
 import sys
 import os
@@ -33,31 +35,29 @@ def check(cond, msg):
 
 
 # ====================================================================
-# A. Tick Size and Imbalance hidden (D1)
+# A. Tick Size and Imbalance fully removed (Phase 9D, supersedes D1)
 # ====================================================================
 
-def test_tick_size_hidden():
-    print("test_tick_size_hidden")
+def test_tick_size_removed():
+    """Phase 9D: ``_tick_size_input`` / ``_tick_size_label`` removed entirely."""
+    print("test_tick_size_removed")
     from ui.main_window import MainWindow
     w = MainWindow()
-    check(not w._tick_size_input.isVisible(),
-          "Tick Size input is hidden")
-    check(not w._tick_size_label.isVisible(),
-          "Tick Size label is hidden")
-    check(w._tick_size_input.text() == "0.01",
-          f"Tick Size still has default value (got {w._tick_size_input.text()})")
+    check(not hasattr(w, "_tick_size_input"),
+          "Tick Size input attribute removed")
+    check(not hasattr(w, "_tick_size_label"),
+          "Tick Size label attribute removed")
 
 
-def test_imbalance_hidden():
-    print("test_imbalance_hidden")
+def test_imbalance_removed():
+    """Phase 9D: ``_imbalance_input`` / ``_imbalance_label`` removed entirely."""
+    print("test_imbalance_removed")
     from ui.main_window import MainWindow
     w = MainWindow()
-    check(not w._imbalance_input.isVisible(),
-          "Imbalance input is hidden")
-    check(not w._imbalance_label.isVisible(),
-          "Imbalance label is hidden")
-    check(w._imbalance_input.text() == "3.0",
-          f"Imbalance still has default value (got {w._imbalance_input.text()})")
+    check(not hasattr(w, "_imbalance_input"),
+          "Imbalance input attribute removed")
+    check(not hasattr(w, "_imbalance_label"),
+          "Imbalance label attribute removed")
 
 
 # ====================================================================
@@ -94,21 +94,22 @@ def test_sizing_enabled_when_armed():
 
 
 # ====================================================================
-# C. Replay option greyed out (D2)
+# C. Replay item removed from mode combo (Phase 9D, supersedes D2)
 # ====================================================================
 
-def test_replay_greyed_out():
-    print("test_replay_greyed_out")
+def test_replay_item_removed():
+    """Phase 9D: ``_mode_combo`` exposes only "Live" — the disabled
+    "Replay" entry was removed entirely.  Replay scenarios live in
+    the CLI ``backtest`` mode now."""
+    print("test_replay_item_removed")
     from ui.main_window import MainWindow
     w = MainWindow()
-    model = w._mode_combo.model()
-    live_item = model.item(0)
-    replay_item = model.item(1)
-
-    check(live_item.isEnabled(), "Live option is enabled")
-    check(not replay_item.isEnabled(), "Replay option is disabled")
+    check(w._mode_combo.count() == 1,
+          f"mode combo has exactly 1 item (got {w._mode_combo.count()})")
+    check(w._mode_combo.itemText(0) == "Live",
+          f"only item is Live (got '{w._mode_combo.itemText(0)}')")
     check(w._mode_combo.currentText() == "Live",
-          f"default selection is Live (got {w._mode_combo.currentText()})")
+          f"default selection is Live (got '{w._mode_combo.currentText()}')")
 
 
 # ====================================================================
@@ -159,27 +160,33 @@ def test_account_panel_clear_disconnects():
 
 
 # ====================================================================
-# E. Backward compatibility
+# E. Phase 9D — candle combo removed; QML toolbar drives bucket duration
 # ====================================================================
 
-def test_hidden_elements_still_exist():
-    print("test_hidden_elements_still_exist")
+def test_candle_combo_removed():
+    """Phase 9D: ``_candle_combo`` removed from MainWindow toolbar.
+
+    The QML ``CandleChartView.qml`` toolbar owns the timeframe ComboBox
+    now; it drives ``set_candle_duration_ms`` via the bridge.
+    """
+    print("test_candle_combo_removed")
     from ui.main_window import MainWindow
     w = MainWindow()
-    check(hasattr(w, '_tick_size_input'), "tick_size_input still in code")
-    check(hasattr(w, '_imbalance_input'), "imbalance_input still in code")
-    check(hasattr(w, '_tick_size_label'), "tick_size_label still in code")
-    check(hasattr(w, '_imbalance_label'), "imbalance_label still in code")
+    check(not hasattr(w, "_candle_combo"),
+          "_candle_combo attribute removed")
+    check(hasattr(w, "set_candle_duration_ms"),
+          "set_candle_duration_ms mutator exists")
 
 
-def test_tick_size_still_readable_for_connect():
-    print("test_tick_size_still_readable_for_connect")
+def test_set_candle_duration_updates_state():
+    """Phase 9D: ``set_candle_duration_ms`` mirrors the legacy
+    ``_on_candle_changed`` behaviour for QML-driven changes."""
+    print("test_set_candle_duration_updates_state")
     from ui.main_window import MainWindow
     w = MainWindow()
-    val = w._tick_size_input.text()
-    check(float(val) == 0.01, f"tick_size readable as float (got {val})")
-    imb = w._imbalance_input.text()
-    check(float(imb) == 3.0, f"imbalance readable as float (got {imb})")
+    w.set_candle_duration_ms(300_000)
+    check(w._candle_duration_ms == 300_000,
+          f"_candle_duration_ms updated (got {w._candle_duration_ms})")
 
 
 # ====================================================================
@@ -188,17 +195,17 @@ def test_tick_size_still_readable_for_connect():
 
 if __name__ == "__main__":
     tests = [
-        test_tick_size_hidden,
-        test_imbalance_hidden,
+        test_tick_size_removed,
+        test_imbalance_removed,
         test_sizing_disabled_when_disarmed,
         test_sizing_enabled_when_armed,
-        test_replay_greyed_out,
+        test_replay_item_removed,
         test_account_panel_placeholder_on_init,
         test_account_panel_shows_content_on_update,
         test_account_panel_set_connected,
         test_account_panel_clear_disconnects,
-        test_hidden_elements_still_exist,
-        test_tick_size_still_readable_for_connect,
+        test_candle_combo_removed,
+        test_set_candle_duration_updates_state,
     ]
     for t in tests:
         t()

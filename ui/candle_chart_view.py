@@ -513,10 +513,49 @@ class CandleChartView(QWidget):
 
     def _draw_overlays_fn(self, painter, px, py, pw, ph, pmin, pmax, visible):
         for fn in self._overlays:
+            # Phase 9D — skip overlays explicitly toggled off by the QML
+            # toolbar.  External overlays without an ``enabled`` attribute
+            # default to True via ``getattr``.
+            if not getattr(fn, "enabled", True):
+                continue
             try:
                 fn(painter, px, py, pw, ph, pmin, pmax, visible)
             except Exception:
                 pass
+
+    def set_overlay_enabled(self, name: str, enabled: bool) -> bool:
+        """Phase 9D — toggle an overlay by ``OVERLAY_NAME``.
+
+        Returns True if at least one matching overlay was toggled.  The
+        QML toolbar drives this via ``MainWindowBridge.setOverlayEnabled``;
+        unit tests assert that overlay drawing is suppressed when
+        ``enabled=False``.  Triggers a repaint when the flag flips.
+        """
+        target = name.lower()
+        changed = False
+        for fn in self._overlays:
+            overlay_name = getattr(fn, "OVERLAY_NAME", None)
+            if not overlay_name:
+                continue
+            if overlay_name.lower() != target:
+                continue
+            current = bool(getattr(fn, "enabled", True))
+            if current != bool(enabled):
+                fn.enabled = bool(enabled)
+                changed = True
+        if changed:
+            self.update()
+        return changed
+
+    def overlay_enabled_state(self) -> dict[str, bool]:
+        """Phase 9D — snapshot of overlay enable flags by name."""
+        out: dict[str, bool] = {}
+        for fn in self._overlays:
+            overlay_name = getattr(fn, "OVERLAY_NAME", None)
+            if not overlay_name:
+                continue
+            out[overlay_name] = bool(getattr(fn, "enabled", True))
+        return out
 
     # --------------------------------------------------------------- interact
 

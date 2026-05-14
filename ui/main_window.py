@@ -451,13 +451,13 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
 
         toolbar.addWidget(QLabel(" Mode: "))
+        # Phase 9D — replay mode is handled by the CLI ``backtest`` entry
+        # point, so the live UI toolbar no longer offers it.  We keep
+        # ``_mode_combo`` as a single-item ComboBox to preserve the
+        # ``currentText()`` API used by ``_on_connect``.
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("Live")
-        self._mode_combo.addItem("Replay")
         self._mode_combo.setMaximumWidth(100)
-        replay_item = self._mode_combo.model().item(1)
-        replay_item.setEnabled(False)
-        replay_item.setToolTip("Coming soon")
         toolbar.addWidget(self._mode_combo)
 
         toolbar.addSeparator()
@@ -488,35 +488,12 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel(" Candle: "))
-        self._candle_combo = QComboBox()
-        self._candle_combo.addItem("1 min", 60_000)
-        self._candle_combo.addItem("5 min", 300_000)
-        self._candle_combo.addItem("15 min", 900_000)
-        self._candle_combo.addItem("30 min", 1_800_000)
-        self._candle_combo.addItem("1 hr", 3_600_000)
-        self._candle_combo.setCurrentIndex(0)
-        self._candle_combo.setMaximumWidth(90)
-        self._candle_combo.currentIndexChanged.connect(self._on_candle_changed)
-        toolbar.addWidget(self._candle_combo)
-
-        toolbar.addSeparator()
-
-        self._tick_size_label = QLabel(" Tick Size: ")
-        self._tick_size_label.setVisible(False)
-        toolbar.addWidget(self._tick_size_label)
-        self._tick_size_input = QLineEdit("0.01")
-        self._tick_size_input.setMaximumWidth(80)
-        self._tick_size_input.setVisible(False)
-        toolbar.addWidget(self._tick_size_input)
-
-        self._imbalance_label = QLabel(" Imbalance: ")
-        self._imbalance_label.setVisible(False)
-        toolbar.addWidget(self._imbalance_label)
-        self._imbalance_input = QLineEdit("3.0")
-        self._imbalance_input.setMaximumWidth(60)
-        self._imbalance_input.setVisible(False)
-        toolbar.addWidget(self._imbalance_input)
+        # Phase 9D — candle-duration selection moved to the QML
+        # ``CandleChartView.qml`` toolbar.  ``_candle_duration_ms`` is
+        # mutated programmatically via ``set_candle_duration_ms`` (driven
+        # by the QML ComboBox through ``MainWindowBridge``).  The hidden
+        # ``_tick_size_input`` / ``_imbalance_input`` QLineEdits were
+        # also removed; their defaults are now constants below.
 
         toolbar.addSeparator()
 
@@ -690,22 +667,15 @@ class MainWindow(QMainWindow):
         if not symbol:
             return
 
-        try:
-            tick_size = float(self._tick_size_input.text())
-            imbalance = float(self._imbalance_input.text())
-        except ValueError:
-            tick_size = 0.01
-            imbalance = 3.0
+        # Phase 9D — tick size and imbalance threshold defaults are now
+        # hardcoded here.  The previous hidden QLineEdit inputs were
+        # never user-editable in the live UI; the values shipped were the
+        # same as the constants below.
+        tick_size = 0.01
+        imbalance = 3.0
 
         mode = self._mode_combo.currentText()
         self._is_replay_mode = (mode != "Live")
-
-        if mode != "Live":
-            QMessageBox.information(
-                self, "Replay Mode",
-                "For replay, use the CLI backtest mode with the 'orderflow' strategy."
-            )
-            return
 
         window_ms = self._vp_window_combo.currentData()
         ok = self._session.start_live(
@@ -855,12 +825,22 @@ class MainWindow(QMainWindow):
         if window_ms is not None:
             self._session.set_volume_profile_window(int(window_ms))
 
-    def _on_candle_changed(self, _index):
-        duration_ms = self._candle_combo.currentData()
+    def set_candle_duration_ms(self, duration_ms: int) -> None:
+        """Phase 9D — candle-duration mutator used by the QML toolbar.
+
+        Replaces the legacy ``_candle_combo.currentIndexChanged`` handler.
+        The QML ``CandleChartView.qml`` ComboBox calls
+        ``MainWindowBridge.setCandleBucketMs`` which routes to this method.
+        Keeps the VP window combo in sync (legacy behaviour) and refreshes
+        the bucket duration on the heatmap + market state.
+        """
+        duration_ms = int(duration_ms)
+        if duration_ms <= 0:
+            return
         self._candle_duration_ms = duration_ms
         self._heatmap.set_bucket_duration_ms(duration_ms)
         self._market_state.bucket_duration_ms = duration_ms
-        self._session.set_volume_profile_window(int(duration_ms))
+        self._session.set_volume_profile_window(duration_ms)
         vp_idx = self._vp_window_combo.findData(duration_ms)
         if vp_idx >= 0:
             self._vp_window_combo.blockSignals(True)
