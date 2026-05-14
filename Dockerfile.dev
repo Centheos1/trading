@@ -81,26 +81,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pybind11-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ---------------------------------------------------------------------------
-# Python virtual environment
-# ---------------------------------------------------------------------------
 WORKDIR /app
 
-COPY requirements.txt requirements-collector.txt ./
+# ---------------------------------------------------------------------------
+# C++ orderflow_engine — build first so changes to requirements.txt do not
+# bust this expensive layer (~15 min on t3.small).
+#
+# A minimal venv with just pybind11 is created first so build.sh can locate
+# pybind11's CMake directory. The full requirements install comes after so
+# that pip changes never invalidate the C++ build cache.
+# ---------------------------------------------------------------------------
+COPY backtestingCpp/ backtestingCpp/
 
 RUN python${PYTHON_VERSION} -m venv .venv \
-    && .venv/bin/pip install --upgrade pip setuptools wheel \
+    && .venv/bin/pip install --quiet pybind11
+
+RUN bash backtestingCpp/orderflow/build.sh
+
+# ---------------------------------------------------------------------------
+# Python virtual environment (full) — after C++ so pip changes don't trigger
+# a full C++ recompile.
+# ---------------------------------------------------------------------------
+COPY requirements.txt requirements-collector.txt ./
+
+RUN .venv/bin/pip install --upgrade pip setuptools wheel \
     && .venv/bin/pip install -r requirements.txt
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     VIRTUAL_ENV="/app/.venv"
-
-# ---------------------------------------------------------------------------
-# C++ orderflow_engine
-# ---------------------------------------------------------------------------
-COPY backtestingCpp/ backtestingCpp/
-
-RUN bash backtestingCpp/orderflow/build.sh
 
 # ---------------------------------------------------------------------------
 # Application source

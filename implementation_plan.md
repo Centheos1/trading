@@ -3096,6 +3096,7 @@ evaluated before Phase 17 work begins.
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
 | **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting since 2026-05-13; unblocks Phase 16 on ~2026-06-13 (30 days)` | — | None (infrastructure prerequisite) |
 | **16Q** | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; backfill 2020→now running` | — | Phase 16P infrastructure |
+| **16R** | Feed Health Monitor & Data Quality Report | `DONE` | — | Phase 16P (collecting) |
 | **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked ~2026-06-13 when 30 days of data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
@@ -3393,6 +3394,72 @@ python -c "import pandas as pd; df=pd.read_parquet('data/ohlcv/binance/BTCUSDT/1
   these can be added later for query speed if needed.
 - Cross-exchange spot symbols (Coinbase, Kraken) can be plugged in by
   adding a new `ExchangeAdapter` subclass in `collect_ohlcv.py`.
+
+---
+
+### Phase 16R — Feed Health Monitor & Data Quality Report `[DONE — 2026-05-14]`
+
+**Objective.** Provide a single command that answers three questions about the
+running EC2 data feeds:
+
+1. **Is the tick feed alive?** — confirm BTCUSDT and ETHUSDT collectors are
+   active and writing recent data.
+2. **How much data do I have?** — rows collected, date range (first → last
+   timestamp), and approximate file size for each HDF5 and Parquet store.
+3. **Are there gaps?** — identify contiguous breaks in the 1-minute OHLCV
+   Parquet data that exceed a configurable threshold (default 5 minutes),
+   distinguishing expected market-hours gaps (Oanda) from unexpected feed
+   outages (Binance, which trades 24/7).
+
+**Scope.**
+
+| Tool | Description |
+|---|---|
+| `tools/feed_health.py` | **NEW** — CLI report script. Runs locally (reads local Parquet + HDF5) or against S3 (set `DATA_STORE=s3`). |
+| `tools/feed_health.py --report tick` | Tick feed summary: first/last timestamp, total trades, total depth updates, bytes on disk, time since last write (staleness indicator). |
+| `tools/feed_health.py --report ohlcv` | OHLCV summary: per-exchange, per-symbol — row count, date range, file size, gap count and largest gap (minutes). |
+| `tools/feed_health.py --report all` | Both reports combined. |
+| `tools/feed_health.py --gaps-only` | Print only symbols with gaps above threshold. |
+| `--gap-threshold-minutes N` | Alert threshold for OHLCV gaps (default `5` for Binance; `120` for Oanda FX). |
+
+**Output format** — human-readable table to stdout, optionally `--json` for
+programmatic use. Example:
+
+```
+══ Tick feed health ══════════════════════════════════
+  BTCUSDT   first: 2026-05-13 12:47  last: 2026-05-14 01:30  rows: 1,842,311  stale: 2s  ✓
+  ETHUSDT   first: 2026-05-13 12:47  last: 2026-05-14 01:30  rows: 1,203,944  stale: 3s  ✓
+
+══ OHLCV health (binance, 1m) ════════════════════════
+  BTCUSDT   2026-05-13 → 2026-05-14   1,847 rows   gaps: 0        ✓
+  ETHUSDT   2026-05-13 → 2026-05-14   1,847 rows   gaps: 0        ✓
+  SOLUSDT   2026-05-13 → 2026-05-14   1,846 rows   gaps: 1 (max 3m) ⚠
+
+══ OHLCV health (oanda, 1m) ══════════════════════════
+  EUR_USD   2020-01-02 → 2026-05-14   1,498,220 rows   gaps: 0   ✓
+  XAU_USD   2020-01-02 → 2026-05-14     920,447 rows   gaps: 0   ✓
+```
+
+**Gap classification.**
+
+- **Binance** (24/7): any gap > `--gap-threshold-minutes` is flagged as a
+  potential feed outage. Expected zero gaps in normal operation.
+- **Oanda** (market hours): gaps during weekends and daily close windows
+  (17:00–17:05 ET) are normal and suppressed. Only gaps during expected
+  trading hours are flagged.
+
+**Acceptance criteria.**
+
+1. `python tools/feed_health.py --report tick` prints a tick summary for
+   BTCUSDT and ETHUSDT, including staleness in seconds.
+2. `python tools/feed_health.py --report ohlcv --exchange binance` prints
+   a per-symbol OHLCV summary with gap detection.
+3. Binance symbols with a known 5-minute gap are flagged; symbols without
+   gaps show `✓`.
+4. `python tools/feed_health.py --report all --json` produces valid JSON.
+5. Running with `DATA_STORE=s3` reads directly from S3 without downloading
+   files locally.
+6. All new tests pass; full regression 862+ tests pass.
 
 ---
 

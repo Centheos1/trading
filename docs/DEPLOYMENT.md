@@ -266,6 +266,10 @@ Save: `Ctrl+O` → Enter. Exit: `Ctrl+X`.
 ```bash
 cd ~/app/trading
 
+# Build if needed
+# In a second SSH session
+docker compose build --progress=plain 2>&1 | tail -20
+
 # Tick collectors — real-time WebSocket trades + L2 depth (HDF5 → S3)
 docker compose up -d                              # BTCUSDT
 docker compose --profile multi up -d              # ETHUSDT
