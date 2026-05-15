@@ -1,79 +1,148 @@
-# Trading App — Docker Compose
+# Trading App — Docker Compose (local development)
 #
-# Profiles:
-#   (default)          collector       — BTCUSDT tick data collector (EC2 / headless)
-#   --profile multi    collector-eth   — Add ETHUSDT as a second collector
-#   --profile ohlcv    ohlcv-collector — Historical OHLCV backfill + continuous polling
-#   --profile ui       app             — Trading UI (requires X11 / XQuartz)
-#   --profile test     test            — Run full test suite and exit
+# Four services compose the distributed stack:
 #
-# Quick-start (EC2 data collection):
-#   cp .env.template .env && nano .env   # set S3_BUCKET
-#   docker compose up -d
+#   redis     — pub/sub bus between data and strategy services
+#   data      — Binance WS → HDF5 + Redis (trades:{SYM}, depth:{SYM})
+#   strategy  — headless OrderFlowEngine + FastAPI WS (/stream) + REST (/api)
+#   ui        — React/WebGL frontend (Vite dev server with HMR)
 #
-# Local UI (macOS — requires XQuartz running):
-#   xhost +localhost
-#   docker compose --profile ui up app
+# Quick start:
 #
-# Run tests:
+#   cp .env.template .env && nano .env       # set SYMBOLS, S3_BUCKET if any
+#   docker compose up
+#
+# Then open http://localhost:3000.
+#
+# Tests still live under the `test` profile:
+#
 #   docker compose --profile test run --rm test
-
-x-base: &base
-  build:
-    context: .
-    dockerfile: Dockerfile.dev
-  env_file: .env                       # S3_BUCKET, SYMBOLS, BINANCE_* etc.
-  environment:
-    PYTHONUNBUFFERED: "1"
-  volumes:
-    - ./data:/app/data                 # HDF5 files survive container restarts
-    - ./logs:/app/logs                 # rotating log files
-    # NOTE: .:/app is intentionally NOT in the base anchor.
-    # Mounting the host source over /app hides the .venv built into the image,
-    # breaking the 'python' entrypoint on EC2.  Add it explicitly only in
-    # services that need live-reload (app, test).
-  restart: "no"                        # overridden per-service below
+#
+# Production deployment uses docker-compose.prod.yml.
 
 services:
 
-  # ── BTCUSDT tick data collector (always-on, EC2 primary service) ──
-  collector:
-    <<: *base
-    container_name: trading-collector-btcusdt
+  # ------------------------------------------------------------------
+  # Redis pub/sub bus
+  # ------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: trading-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ------------------------------------------------------------------
+  # Data collector — Binance futures WS → HDF5 + Redis pub/sub
+  # ------------------------------------------------------------------
+  data:
+    build:
+      context: .
+      dockerfile: data/Dockerfile
+    container_name: trading-data
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://redis:6379"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     command: >
       python collect_ticks.py
         --symbol ${SYMBOLS:-BTCUSDT}
         --s3-bucket ${S3_BUCKET:-}
         --log-level ${LOG_LEVEL:-INFO}
-    restart: unless-stopped            # survives crashes and EC2 reboots
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import os, time; age=time.time()-os.path.getmtime('data/binance_ticks.h5'); exit(0 if age<120 else 1)"]
+             "import os, time; age=time.time()-os.path.getmtime('/app/data/binance_ticks.h5'); exit(0 if age<120 else 1)"]
       interval: 60s
       timeout: 10s
       retries: 3
       start_period: 30s
 
-  # ── ETHUSDT second collector (opt-in) ────────────────────────────
-  collector-eth:
-    <<: *base
-    container_name: trading-collector-ethusdt
-    command: >
-      python collect_ticks.py
-        --symbol ETHUSDT
-        --s3-bucket ${S3_BUCKET:-}
-        --s3-key ticks/binance_ticks_ETHUSDT.h5
-        --data-dir data/ETHUSDT
-        --log-level ${LOG_LEVEL:-INFO}
+  # ------------------------------------------------------------------
+  # Strategy engine — FastAPI WebSocket + REST control plane
+  # ------------------------------------------------------------------
+  strategy:
+    build:
+      context: .
+      dockerfile: strategy/Dockerfile
+    container_name: trading-strategy
     restart: unless-stopped
-    profiles: ["multi"]
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://redis:6379"
+      SYMBOLS: "${SYMBOLS:-BTCUSDT}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      CANDLE_BUCKET_MS: "${CANDLE_BUCKET_MS:-60000}"
+      BOOK_EMIT_HZ: "${BOOK_EMIT_HZ:-10}"
+      BOOK_LEVELS: "${BOOK_LEVELS:-50}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:3000}"
+    command: >
+      uvicorn strategy.main:app
+        --host 0.0.0.0
+        --port 8000
+        --workers 1
+        --log-level ${LOG_LEVEL_LOWER:-info}
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
 
-  # ── OHLCV historical-data collector (backfill + continuous) ──────
-  # Two-phase, long-lived: backfills 2020→now then polls hourly forever.
-  # Writes Parquet files via ohlcv_store (S3 when DATA_STORE=s3 + S3_BUCKET).
+  # ------------------------------------------------------------------
+  # UI service — Vite dev server (HMR) in local development.
+  # Production builds use the multi-stage Dockerfile target ``runtime``
+  # (nginx) — see docker-compose.prod.yml.
+  # ------------------------------------------------------------------
+  ui:
+    image: node:22-alpine
+    container_name: trading-ui
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    environment:
+      STRATEGY_HTTP_URL: "${STRATEGY_HTTP_URL:-http://strategy:8000}"
+      STRATEGY_WS_URL: "${STRATEGY_WS_URL:-ws://strategy:8000}"
+      # VITE_WS_URL is exposed to the browser bundle.  In local Docker
+      # development the browser connects directly to the strategy service
+      # on the exposed port, bypassing the Vite WS proxy (which has
+      # tunnelling issues in Docker).  In production this var is unset
+      # and the same-origin fallback in StreamClient is used instead.
+      VITE_WS_URL: "${VITE_WS_URL:-ws://localhost:8000/stream}"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./ui:/app
+      - /app/node_modules
+    depends_on:
+      - strategy
+
+  # ------------------------------------------------------------------
+  # OHLCV historical collector (opt-in profile)
+  # ------------------------------------------------------------------
   ohlcv-collector:
-    <<: *base
+    build:
+      context: .
+      dockerfile: data/Dockerfile
     container_name: trading-ohlcv-collector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
     command: >
       python collect_ohlcv.py
         --exchange ${OHLCV_EXCHANGE:-all}
@@ -86,41 +155,24 @@ services:
         --data-store ${DATA_STORE:-local_parquet}
         --s3-bucket ${S3_BUCKET:-}
         --log-level ${LOG_LEVEL:-INFO}
-    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
     profiles: ["ohlcv"]
 
-  # ── Trading UI (local / EC2 g5 with display) ─────────────────────
-  app:
-    <<: *base
-    container_name: trading-app-ui
-    command: python main.py
-    restart: "no"
-    environment:
-      PYTHONUNBUFFERED: "1"
-      DISPLAY: "${DISPLAY:-host.docker.internal:0}"
-      QT_QPA_PLATFORM: "${QT_QPA_PLATFORM:-xcb}"
-      QSG_RHI_BACKEND: "${QSG_RHI_BACKEND:-software}"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - .:/app                         # live source mount for local UI dev
-      - /tmp/.X11-unix:/tmp/.X11-unix  # X11 passthrough (Linux / XQuartz)
-    profiles: ["ui"]
-    stdin_open: true
-    tty: true
-
-  # ── Test runner (CI / smoke check) ───────────────────────────────
+  # ------------------------------------------------------------------
+  # Test runner (kept for parity with the legacy compose file)
+  # ------------------------------------------------------------------
   test:
-    <<: *base
-    container_name: trading-app-test
-    command: python -m unittest discover -s tests -v
-    restart: "no"
+    build:
+      context: .
+      dockerfile: strategy/Dockerfile
+    container_name: trading-test
     environment:
       PYTHONUNBUFFERED: "1"
-      QT_QPA_PLATFORM: offscreen
-      QSG_RHI_BACKEND: software
+    command: python -m unittest discover -s tests -v
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - .:/app                         # live source mount for local test iteration
+      - .:/app
     profiles: ["test"]

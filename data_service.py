@@ -21,6 +21,21 @@ try:
 except ImportError:
     ofe = None
 
+# Redis is optional at import time so unit tests / offline runs work
+# without the distributed stack.  When ``REDIS_URL`` is set the
+# ``TickDataCollector`` publishes raw trades and depth updates to
+# ``trades:{symbol}`` and ``depth:{symbol}`` channels for the strategy
+# service to consume.
+try:
+    import msgpack  # type: ignore
+except ImportError:  # pragma: no cover
+    msgpack = None  # type: ignore
+
+try:
+    import redis as _redis  # type: ignore
+except ImportError:  # pragma: no cover
+    _redis = None  # type: ignore
+
 
 class DataCollector:
     def __init__(self, exchange: str):
@@ -201,13 +216,22 @@ class DataCollector:
 
 class TickDataCollector:
     """Collects real-time tick and depth data from Binance via Python WebSocket
-    and stores it in HDF5 via the C++ engine for order flow backtesting."""
+    and stores it in HDF5 via the C++ engine for order flow backtesting.
+
+    Distributed-architecture extension:
+        When ``REDIS_URL`` is set (or ``redis_url`` is passed) every trade
+        and depth update is also published to the Redis pub/sub channels
+        ``trades:{SYMBOL}`` and ``depth:{SYMBOL}`` as msgpack payloads.
+        The strategy service subscribes to these channels via
+        :class:`strategy.engine.live_engine.LiveEngine`.
+    """
 
     def __init__(
         self,
         exchange: str = "binance",
         futures: bool = True,
         store_path: str | None = None,
+        redis_url: str | None = None,
     ):
         if ofe is None:
             raise RuntimeError(
@@ -233,6 +257,77 @@ class TickDataCollector:
         else:
             self.ws_base = "wss://stream.binance.com:9443/ws/"
             self.rest_base = "https://api.binance.com/api/v3/depth"
+
+        # Optional Redis publisher.  We use the sync client because the
+        # WS reader threads are already in tight per-message loops; the
+        # publish is a single ``socket.send`` and the overhead is
+        # negligible compared to msgpack encoding.
+        self._redis_url = redis_url or os.getenv("REDIS_URL")
+        self._redis = None
+        if self._redis_url:
+            if _redis is None or msgpack is None:
+                logger.warning(
+                    "REDIS_URL set but 'redis'/'msgpack' not installed — "
+                    "data will not be published to the strategy service"
+                )
+            else:
+                try:
+                    self._redis = _redis.from_url(
+                        self._redis_url, socket_timeout=2.0, socket_keepalive=True
+                    )
+                    self._redis.ping()
+                    logger.info("TickDataCollector connected to Redis %s",
+                                self._redis_url)
+                except Exception as exc:  # pragma: no cover - depends on env
+                    logger.warning("Redis connection failed (%s); "
+                                   "publishing disabled", exc)
+                    self._redis = None
+
+    # ------------------------------------------------------ pub helpers
+
+    def _publish_trade(
+        self, symbol: str, ts_ms: int, price: float, qty: float,
+        is_buyer_maker: bool,
+    ) -> None:
+        if self._redis is None or msgpack is None:
+            return
+        try:
+            payload = msgpack.packb(
+                {
+                    "ts_ms": int(ts_ms),
+                    "price": float(price),
+                    "qty": float(qty),
+                    "is_buyer_maker": bool(is_buyer_maker),
+                },
+                use_bin_type=True,
+            )
+            self._redis.publish(f"trades:{symbol}", payload)
+        except Exception:
+            # Publishing is best-effort — the HDF5 store remains canonical.
+            logger.exception("Redis trade publish failed")
+
+    def _publish_depth(
+        self, symbol: str, ts_ms: int, bids: list, asks: list,
+        first_update_id: int = 0, final_update_id: int = 0,
+        is_snapshot: bool = False,
+    ) -> None:
+        if self._redis is None or msgpack is None:
+            return
+        try:
+            payload = msgpack.packb(
+                {
+                    "ts_ms": int(ts_ms),
+                    "is_snapshot": bool(is_snapshot),
+                    "first_update_id": int(first_update_id),
+                    "final_update_id": int(final_update_id),
+                    "bids": [[float(p), float(q)] for p, q in bids],
+                    "asks": [[float(p), float(q)] for p, q in asks],
+                },
+                use_bin_type=True,
+            )
+            self._redis.publish(f"depth:{symbol}", payload)
+        except Exception:
+            logger.exception("Redis depth publish failed")
 
     def collect(self, symbol: str, duration_seconds: int = 0):
         import asyncio
@@ -263,12 +358,21 @@ class TickDataCollector:
                     try:
                         async for msg in ws:
                             j = pyjson.loads(msg)
+                            ts_ms = int(j["T"])
+                            price = float(j["p"])
+                            qty = float(j["q"])
+                            is_buyer_maker = bool(j["m"])
                             trade = ofe.Trade()
-                            trade.timestamp = j["T"]
-                            trade.price = float(j["p"])
-                            trade.quantity = float(j["q"])
-                            trade.is_buyer_maker = j["m"]
+                            trade.timestamp = ts_ms
+                            trade.price = price
+                            trade.quantity = qty
+                            trade.is_buyer_maker = is_buyer_maker
                             self.engine.process_trade(trade)
+                            # Publish to Redis for the strategy service.
+                            self._publish_trade(
+                                symbol_upper, ts_ms, price, qty,
+                                is_buyer_maker,
+                            )
                             trade_count += 1
                     except websockets.ConnectionClosed:
                         logger.warning("Trade WS reconnecting...")
@@ -280,19 +384,24 @@ class TickDataCollector:
                     try:
                         async for msg in ws:
                             j = pyjson.loads(msg)
+                            ts_ms = int(j.get("E", 0))
+                            first_id = int(j.get("U", 0))
+                            final_id = int(j.get("u", 0))
+                            raw_bids = j.get("b", []) or []
+                            raw_asks = j.get("a", []) or []
                             update = ofe.DepthUpdate()
-                            update.timestamp = j.get("E", 0)
-                            update.first_update_id = j.get("U", 0)
-                            update.final_update_id = j.get("u", 0)
+                            update.timestamp = ts_ms
+                            update.first_update_id = first_id
+                            update.final_update_id = final_id
                             update.is_snapshot = False
                             bids = []
-                            for b in j.get("b", []):
+                            for b in raw_bids:
                                 lv = ofe.DepthLevel()
                                 lv.price = float(b[0])
                                 lv.quantity = float(b[1])
                                 bids.append(lv)
                             asks = []
-                            for a in j.get("a", []):
+                            for a in raw_asks:
                                 lv = ofe.DepthLevel()
                                 lv.price = float(a[0])
                                 lv.quantity = float(a[1])
@@ -300,6 +409,13 @@ class TickDataCollector:
                             update.bids = bids
                             update.asks = asks
                             self.engine.process_depth(update)
+                            # Publish to Redis for the strategy service.
+                            self._publish_depth(
+                                symbol_upper, ts_ms, raw_bids, raw_asks,
+                                first_update_id=first_id,
+                                final_update_id=final_id,
+                                is_snapshot=False,
+                            )
                             depth_count += 1
                     except websockets.ConnectionClosed:
                         logger.warning("Depth WS reconnecting...")
@@ -345,19 +461,29 @@ class TickDataCollector:
     def _fetch_depth_snapshot(self, symbol: str):
         """REST bootstrap; HTTP parsing in ``data_feed``."""
         try:
+            ts_ms = int(time.time() * 1000)
             snapshot = fetch_and_build_depth_snapshot(
                 ofe,
                 self.rest_base,
                 symbol,
                 limit=1000,
                 timeout=10.0,
-                timestamp_ms=int(time.time() * 1000),
+                timestamp_ms=ts_ms,
             )
             self.engine.process_depth(snapshot)
             logger.info(
                 "Loaded depth snapshot: %d bids, %d asks",
                 len(snapshot.bids),
                 len(snapshot.asks),
+            )
+            # Publish the initial snapshot so a freshly-started strategy
+            # service has a full book before the diff stream starts.
+            self._publish_depth(
+                symbol,
+                ts_ms,
+                [(lv.price, lv.quantity) for lv in snapshot.bids],
+                [(lv.price, lv.quantity) for lv in snapshot.asks],
+                is_snapshot=True,
             )
         except Exception as e:
             logger.error("Failed to fetch depth snapshot: %s", e)

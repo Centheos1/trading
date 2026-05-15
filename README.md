@@ -6,6 +6,15 @@
 source ./.venv/bin/activate
 ```
 
+### Run the distributed stack (local development)
+
+```bash
+docker compose up
+```
+
+This brings up four services: `redis`, `data`, `strategy`, and `ui`.
+The React UI is available at <http://localhost:3000>.
+
 A multi-layer crypto trading strategy research platform implementing the
 **Tide / Wave / Ripple** hierarchy with event-time backtesting, multi-objective
 parameter optimisation (NSGA-II), and a C++ order flow engine.
