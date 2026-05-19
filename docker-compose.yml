@@ -1,18 +1,15 @@
 # Trading App — Docker Compose (local development)
 #
-# Four services compose the distributed stack:
+# Three services compose the distributed stack:
 #
 #   redis     — pub/sub bus between data and strategy services
 #   data      — Binance WS → HDF5 + Redis (trades:{SYM}, depth:{SYM})
-#   strategy  — headless OrderFlowEngine + FastAPI WS (/stream) + REST (/api)
-#   ui        — React/WebGL frontend (Vite dev server with HMR)
+#   strategy  — headless OrderFlowEngine + FastAPI REST (/api)
 #
 # Quick start:
 #
 #   cp .env.template .env && nano .env       # set SYMBOLS, S3_BUCKET if any
 #   docker compose up
-#
-# Then open http://localhost:3000.
 #
 # Tests still live under the `test` profile:
 #
@@ -71,7 +68,7 @@ services:
       start_period: 30s
 
   # ------------------------------------------------------------------
-  # Strategy engine — FastAPI WebSocket + REST control plane
+  # Strategy engine — FastAPI REST control plane
   # ------------------------------------------------------------------
   strategy:
     build:
@@ -86,9 +83,6 @@ services:
       SYMBOLS: "${SYMBOLS:-BTCUSDT}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       CANDLE_BUCKET_MS: "${CANDLE_BUCKET_MS:-60000}"
-      BOOK_EMIT_HZ: "${BOOK_EMIT_HZ:-10}"
-      BOOK_LEVELS: "${BOOK_LEVELS:-50}"
-      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:3000}"
     command: >
       uvicorn strategy.main:app
         --host 0.0.0.0
@@ -103,33 +97,6 @@ services:
     volumes:
       - ./data:/app/data:ro
       - ./logs:/app/logs
-
-  # ------------------------------------------------------------------
-  # UI service — Vite dev server (HMR) in local development.
-  # Production builds use the multi-stage Dockerfile target ``runtime``
-  # (nginx) — see docker-compose.prod.yml.
-  # ------------------------------------------------------------------
-  ui:
-    image: node:22-alpine
-    container_name: trading-ui
-    working_dir: /app
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
-    environment:
-      STRATEGY_HTTP_URL: "${STRATEGY_HTTP_URL:-http://strategy:8000}"
-      STRATEGY_WS_URL: "${STRATEGY_WS_URL:-ws://strategy:8000}"
-      # VITE_WS_URL is exposed to the browser bundle.  In local Docker
-      # development the browser connects directly to the strategy service
-      # on the exposed port, bypassing the Vite WS proxy (which has
-      # tunnelling issues in Docker).  In production this var is unset
-      # and the same-origin fallback in StreamClient is used instead.
-      VITE_WS_URL: "${VITE_WS_URL:-ws://localhost:8000/stream}"
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./ui:/app
-      - /app/node_modules
-    depends_on:
-      - strategy
 
   # ------------------------------------------------------------------
   # OHLCV historical collector (opt-in profile)

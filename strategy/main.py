@@ -3,9 +3,7 @@
 Wires together:
 
 * :class:`strategy.engine.live_engine.LiveEngine` — consumes Redis,
-  runs the C++ engine, emits msgpack messages.
-* :class:`strategy.api.ws_server.StreamHub` — fans out those messages
-  to connected WebSocket clients.
+  runs the C++ engine, processes signals.
 * :mod:`strategy.api.rest_routes` — control plane (backtest, optimise,
   strategy parameters).
 
@@ -16,15 +14,13 @@ Run with::
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
-from strategy.api import rest_routes, ws_server
+from strategy.api import rest_routes
 from strategy.engine.live_engine import LiveEngine
 
 
@@ -48,8 +44,6 @@ logger = logging.getLogger(__name__)
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT").split(",") if s.strip()]
 BUCKET_MS = int(os.getenv("CANDLE_BUCKET_MS", "60000"))
-BOOK_EMIT_HZ = float(os.getenv("BOOK_EMIT_HZ", "10"))
-BOOK_LEVELS = int(os.getenv("BOOK_LEVELS", "50"))
 
 
 # ---------------------------------------------------------------------------
@@ -92,56 +86,35 @@ class _ParamManager:
 # ---------------------------------------------------------------------------
 
 
-hub = ws_server.StreamHub()
 engine: LiveEngine | None = None
 params_mgr: _ParamManager | None = None
-_health_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global engine, params_mgr, _health_task
+    global engine, params_mgr
 
     engine = LiveEngine(
-        emit=hub.broadcast,
         symbols=SYMBOLS,
         redis_url=REDIS_URL,
         bucket_ms=BUCKET_MS,
-        book_emit_hz=BOOK_EMIT_HZ,
-        book_levels=BOOK_LEVELS,
     )
     params_mgr = _ParamManager(engine)
-    hub.set_engine_status_fn(engine.get_status)
 
     await engine.start()
-    _health_task = asyncio.create_task(hub.health_loop())
     logger.info(
-        "Strategy service running — symbols=%s redis=%s ws_port=8000",
+        "Strategy service running — symbols=%s redis=%s",
         SYMBOLS, REDIS_URL,
     )
 
     try:
         yield
     finally:
-        if _health_task is not None:
-            _health_task.cancel()
         if engine is not None:
             await engine.stop()
 
 
 app = FastAPI(title="Strategy Service", version="1.0.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        o.strip() for o in os.getenv(
-            "ALLOWED_ORIGINS",
-            "http://localhost:3000,http://127.0.0.1:3000",
-        ).split(",")
-    ],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.get("/")
@@ -149,7 +122,6 @@ async def root() -> dict:
     return {
         "service": "strategy",
         "endpoints": {
-            "websocket": "/stream",
             "rest": [
                 "GET  /api/health",
                 "GET  /api/strategy",
@@ -162,9 +134,6 @@ async def root() -> dict:
     }
 
 
-# WebSocket router
-app.include_router(ws_server.make_router(hub))
-
 # REST router — bound to engine accessors via closures.
 app.include_router(
     rest_routes.make_router(
@@ -172,9 +141,6 @@ app.include_router(
         get_engine_params_fn=lambda: (params_mgr.get() if params_mgr else {}),
         set_engine_params_fn=lambda update: (
             params_mgr.patch(update) if params_mgr else {}
-        ),
-        get_engine_candles_fn=lambda symbol, limit: (
-            engine.get_candles(symbol, limit) if engine else []
         ),
     )
 )

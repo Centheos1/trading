@@ -317,9 +317,9 @@ def wave_snapshot_to_ofe(snap, ofe_module):
 # emits a paper fill, but `set_ripple_callback` fires for every
 # non-NO_ACTION decision regardless of risk state (it is a pure
 # observation channel from the C++ side's perspective). The live
-# Python execution path (`execution.live_runner._ripple_cb` and
-# `ui.main_window._on_ripple_received`) MUST therefore re-apply the
-# same gate before forwarding the intent to a real broker — otherwise
+# Python execution path (`execution.live_runner._ripple_cb`) MUST
+# therefore re-apply the same gate before forwarding the intent to a
+# real broker — otherwise
 # `consumed_es >= es_budget`, Wave DISABLED, Tide CRISIS, and over-cap
 # positions would all result in real orders despite the engine having
 # decided NOT to open a trade internally.

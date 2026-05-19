@@ -1,15 +1,11 @@
 """Binance REST historical OHLCV (klines) — futures USDM.
 
 Thin HTTP fetcher that returns ``(open_time_ms, o, h, l, c, v)`` tuples
-sorted oldest-first. Used by ``ui/live_trading_session.py`` to
-pre-populate ``CandleChartView`` on connect / timeframe change so the
-chart shows immediate context instead of an empty grid (see
-``UI_STRATEGY_INTEGRATION_PLAN.md`` §16.2 — Phase 8A).
+sorted oldest-first.
 
 Mirrors the layering of ``binance_depth_rest.py``: this module owns the
-HTTP layer + parsing only; conversion into UI / engine types is the
-caller's responsibility. No Qt imports — keeps the module unit-testable
-without a QApplication.
+HTTP layer + parsing only; conversion into caller-specific types is the
+caller's responsibility.
 """
 from __future__ import annotations
 
@@ -26,10 +22,9 @@ BINANCE_SPOT_KLINES_URL = "https://api.binance.com/api/v3/klines"
 DEFAULT_KLINES_LIMIT = 200
 KLINES_FETCH_TIMEOUT_S = 10.0
 
-# Canonical interval-ms → Binance interval label.  Matches
-# ``ui/candle_chart_view.TIMEFRAMES`` plus a few extra intervals the
-# Binance API supports.  Single source of truth so callers do not embed
-# label literals in their own code (AGENT_STRATEGY_RULES.md §20).
+# Canonical interval-ms → Binance interval label.  Single source of
+# truth so callers do not embed label literals in their own code
+# (AGENT_STRATEGY_RULES.md §20).
 _INTERVAL_MS_TO_LABEL: dict[int, str] = {
     60_000: "1m",
     180_000: "3m",
@@ -97,8 +92,7 @@ def fetch_binance_klines(
         If ``interval_ms`` is not a Binance-supported interval.
     requests.RequestException
         On HTTP failure. Callers should wrap in try/except and treat
-        network failures as a soft no-op (see
-        ``LiveTradingSession.fetch_historical_klines``).
+        network failures as a soft no-op.
     """
     interval = interval_ms_to_label(int(interval_ms))
     if interval is None:

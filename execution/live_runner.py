@@ -69,13 +69,11 @@ def _layered_push_step(
 
     # Phase 14B note: counter increments MUST come AFTER the
     # ``get_ripple()`` check so a transient binding/handle failure
-    # does not drift the cadence relative to ``LiveTradingSession.
-    # _push_layered_strategy`` (which has the same invariant). If we
-    # incremented before the check, a cluster of N failed
-    # ``get_ripple()`` calls would advance the headless counters by N
-    # without firing any pushes, then trigger a spurious early push on
-    # the first recovered iteration — putting the two live entry
-    # points permanently out of phase. See
+    # does not advance the cadence counters without firing any
+    # pushes. If we incremented before the check, a cluster of N
+    # failed ``get_ripple()`` calls would advance the counters by N
+    # and trigger a spurious early push on the first recovered
+    # iteration. See
     # `tests/test_layered_live_wiring.py::test_counters_stall_on_get_ripple_failure`.
     try:
         ripple = engine.get_ripple()

@@ -56,9 +56,8 @@ When in doubt, consult these documents in priority order:
 
 A phase is **NOT done** when its unit tests pass. A phase is done when
 the new capability is **invoked from at least one live runtime entry
-point** (`ui/live_trading_session.py`, `execution/live_runner.py`, or
-`main.py:<mode>`) AND that wiring is itself covered by a regression
-test.
+point** (`execution/live_runner.py` or `main.py:<mode>`) AND that
+wiring is itself covered by a regression test.
 
 Failure mode: the 2026-05 V1 audit found that `RippleEngine::set_risk_budget`,
 `set_wave_snapshot`, and `set_realized_vol` were unit-test-complete since
@@ -243,7 +242,7 @@ The live execute path MUST consume `RippleDecision` intents, not raw `SignalEngi
 - `engine.set_signal_callback(...)` is reserved for **observation / logging / recording** (e.g. `SessionRecorder`). It MUST NOT drive `ExecutionManager.on_signal` or any other order-routing entry point.
 - Cooldowns, throttles, and gating in the execution layer MUST use `intent.timestamp` (event time, ms), never `time.time()` / `time.monotonic()` / `datetime.now()` (wall-clock).
 - The Ripple lifecycle FSM, scaling logic, exit taxonomy, and `RiskEngine` are the source of truth for *whether* an order fires; the execution layer is the source of truth for *how* it fires (broker, sizing, retry).
-- `ExecutionManager.on_signal` is preserved as a **deprecated shim** so the Phase 12 regression suite still pins the legacy surface, but it logs a one-time WARNING and is no longer wired by `live_runner.py`, `main.py:execute`, or `ui/main_window.py`.
+- `ExecutionManager.on_signal` is preserved as a **deprecated shim** so the Phase 12 regression suite still pins the legacy surface, but it logs a one-time WARNING and is no longer wired by `live_runner.py` or `main.py:execute`.
 
 **Rationale.** Routing the live path through raw signals bypasses
 the entire Tide / Wave / Ripple architecture, the V1 §22.2 #4 exit
@@ -255,13 +254,13 @@ suite of 13 tests, and a 419-test wider regression sweep). New code
 MUST NOT re-introduce signal-driven routing on the live path.
 
 **Enforcement check (CI-friendly — both must pass for any commit
-that touches `execution/`, `ui/`, or `main.py`):**
+that touches `execution/` or `main.py`):**
 
 ```bash
 # Gate 1: production code must NOT subscribe execution to signals.
 # Expected output: empty (only doc references in implementation_plan /
 # README / this file are matched against the broader filesystem).
-grep -rn "engine\.set_signal_callback(.*on_signal" execution/ ui/ main.py
+grep -rn "engine\.set_signal_callback(.*on_signal" execution/ main.py
 
 # Gate 2: any time.time() in execution_manager.py must be inside the
 # deprecated on_signal / _execute_signal path (2 surviving hits at
@@ -273,8 +272,8 @@ grep -n "time\.time()" execution/execution_manager.py
 
 ### 7.5 Layered Strategy Wiring Contract `[V1 — Phase 14B — ENFORCED IN CODE 2026-05-11]`
 
-Every live runtime entry point (`ui/live_trading_session.py`,
-`execution/live_runner.py`, `main.py:execute`) MUST push the latest
+Every live runtime entry point (`execution/live_runner.py`,
+`main.py:execute`) MUST push the latest
 Tide budget, Wave snapshot, and realized volatility into the C++
 engine on every tick at the cadences specified in `strategy.md` §5.3
 (Tide 60 s, Wave 5 s, RV 1 s).
@@ -315,9 +314,9 @@ decisions through this thread.
 production hit outside `tests/`):**
 
 ```bash
-grep -rn "set_risk_budget"   ui/ execution/ main.py
-grep -rn "set_wave_snapshot" ui/ execution/ main.py
-grep -rn "set_realized_vol"  ui/ execution/ main.py
+grep -rn "set_risk_budget"   execution/ main.py
+grep -rn "set_wave_snapshot" execution/ main.py
+grep -rn "set_realized_vol"  execution/ main.py
 ```
 
 ### 7.6 Live Risk-Gate Contract `[V1 — Phase 14C — ENFORCED IN CODE 2026-05-12]`
@@ -353,8 +352,6 @@ when the engine is otherwise locked down.
 **Where the helper MUST be wired (V1):**
 - `execution/live_runner.py::_ripple_cb` — both the recorder-attached
   and the no-recorder branches must call it before `exec_mgr.on_intent`.
-- `ui/main_window.py::_on_ripple_received` — the `StrategyMode.LIVE`
-  branch must call it before `self._exec_manager.on_intent`.
 
 **Determinism note.** The gate is a pure function over the strategy
 snapshot at the moment the decision arrives — no wall-clock reads,
@@ -368,11 +365,10 @@ gate decisions every time.
 outside `tests/` for each callsite):**
 
 ```bash
-grep -rn "intent_risk_block_reason" execution/ ui/ main.py
+grep -rn "intent_risk_block_reason" execution/ main.py
 # Expected production hits (post-2026-05-12):
 #   execution/models.py        — def intent_risk_block_reason
 #   execution/live_runner.py   — import + 1 call from _gate_and_dispatch
-#   ui/main_window.py          — import + 1 call from _on_ripple_received (LIVE branch)
 ```
 
 **And the acceptance suite must run without skips:**
@@ -536,7 +532,7 @@ These failures cause trade-derived visualizations (bubbles, CVD) to silently dis
 | Depth-trade skew shifts visible window | `chart_now = max(depth_ts, trade_ts)` lets depth WS event time advance far ahead of trade WS trade time. Caused by network jitter, asyncio scheduling differences, and sparse trade periods. | Bubbles and CVD vanish after a few minutes. Heatmap unaffected. `fT` (filtered-by-time) counter climbs. PERF log shows growing `skew`. | `chart_now` must cap depth lead: `max(t, min(d, t + MAX_DEPTH_LEAD_MS))`. Currently capped at 2 seconds. |
 | Pruning uses depth-influenced time | Trade deque pruning cutoff derived from `chart_now` (which includes depth timestamps). When depth is ahead, cutoff becomes too aggressive and wipes trades that should be visible. | `_trades` deque empties or shrinks drastically. `prn` (pruned) counter spikes. Bubbles disappear even though trades are arriving. | Prune only on `_last_trade_ts`, never `chart_now` or `_last_depth_ts`. Keep 2× visible window buffer. Mirrors CVD's pruning approach. |
 | Render-time filtering too aggressive | `t_start = chart_now - visible_window_ms` with uncapped `chart_now` filters out all trades whose timestamps are behind depth time. | `fT` counter grows while `trd` (total in deque) stays healthy. `bub` declines proportionally to skew growth. | Capping `chart_now` (first row) prevents this. Any change to `t_start` calculation must consider depth-trade skew. |
-| Silent pipeline collapse | No diagnostic, no warning — trade-derived layers simply stop rendering. | User sees heatmap but no bubbles or CVD. Hard to diagnose without instrumentation. | `_bubble_diag` counters + `failure_stage` inference + `BUBBLES_DEAD_WHILE_TRADES_LIVE` regression guard in `main_window.py`. Always-on, cheap. |
+| Silent pipeline collapse | A data-derived layer simply stops emitting events with no diagnostic or warning. | Pipeline appears live but downstream consumers receive nothing. Hard to diagnose without instrumentation. | Always-on counters + `failure_stage` inference with throttled warning logs when a producer reports activity but no consumer sees output. |
 
 **Critical invariants** (must be preserved by any future change to the heatmap/bubble/CVD path):
 
@@ -727,256 +723,3 @@ Agents should organize configuration parameters into these groups:
 | `testing.*` | `replay_tolerance`, `benchmark_latency_target_us` |
 
 **Rule:** Do not scatter magic constants. All tunable parameters belong in configuration with documented defaults and valid ranges.
-
----
-
-## 21. UI Visualization Pipeline Rules
-
-These rules govern the real-time UI rendering pipeline (`heatmap_widget.py`, `cvd_widget.py`, `main_window.py`). They exist because **two separate regressions** silently killed the bubble layer and CVD, both caused by timestamp handling errors in the trade-derived rendering path.
-
-### 21.1 Timestamp Discipline
-
-The UI receives data from two independent WebSocket streams with independent timestamps:
-
-| Stream | Field | Meaning | Update Rate |
-|---|---|---|---|
-| Depth WS (`@depth@100ms`) | `E` (event time) | When Binance generated the depth batch | Every 100ms, continuous |
-| Trade WS (`@trade`) | `T` (trade time) | When the trade was executed | Per-trade, sparse in quiet markets |
-
-**Key fact:** These timestamps can and do drift apart. Depth `E` advances continuously; trade `T` advances only when trades execute. Network batching, asyncio scheduling, and sparse trade periods cause depth to lead trade by seconds to tens of seconds. This is normal and must be handled.
-
-### 21.2 `chart_now` Rules
-
-`chart_now` is the unified "now" timestamp used for:
-- Computing the visible window: `t_start = chart_now - visible_window_ms`
-- CVD time reference: `set_time_ref(chart_now, ...)`
-- PERF log reporting
-
-**Invariant:** `chart_now` must be capped to prevent depth-trade skew from shifting the visible window:
-
-```
-chart_now = max(trade_ts, min(depth_ts, trade_ts + MAX_DEPTH_LEAD_MS))
-```
-
-Where `MAX_DEPTH_LEAD_MS = 2000` (configurable via `_MAX_DEPTH_LEAD_MS`).
-
-**Prohibited:** `chart_now = max(depth_ts, trade_ts)` — this is the exact pattern that caused both regressions.
-
-### 21.3 Trade Pruning Rules
-
-Trade deques (`_trades`) must be pruned using **trade-derived time only**:
-
-```
-trade_now = _last_trade_ts
-trade_cutoff = trade_now - visible_window_ms * 2
-```
-
-**Prohibited:** Pruning based on `chart_now`, `_last_depth_ts`, or any depth-influenced timestamp. This is what CVD does correctly (using `trade_time_only`) and what the bubble path previously got wrong.
-
-### 21.4 Render-Time Filtering
-
-When drawing bubbles, the visible window is:
-```
-t_start = chart_now - visible_window_ms   (chart_now is capped)
-t_end   = chart_now
-```
-
-Because `chart_now` is capped, trade-derived data (bubbles, CVD bins) always falls within this window as long as trade data is flowing.
-
-### 21.5 Pipeline Diagnostics (Always-On)
-
-The `_bubble_diag` dictionary in `heatmap_widget.py` tracks stage-by-stage counters:
-
-| Stage | Key Counters | What They Detect |
-|---|---|---|
-| A. Trade Input | `trades_added_total`, `trades_rejected_price`, `last_trade_add_ts` | Trade feed alive? Ingestion working? |
-| B. Storage | `total_in_deque`, `max_deque_depth`, `trades_pruned_total` | Over-pruning? Deque growing unbounded? |
-| C. Render Filter | `filtered_by_time`, `filtered_by_x`, `filtered_by_y`, `visible` | Where are trades being lost? |
-| D. Render Output | `min_radius`, `max_radius`, `min_alpha`, `max_alpha` | Visible but invisible (zero radius/alpha)? |
-| E. Failure Stage | `failure_stage` | Single string: `NONE`, `NO_TRADES_IN`, `PRUNED_TO_ZERO`, `OFFSCREEN_PRICE`, etc. |
-
-These counters are cheap (integer increments) and must remain active in production. Do not gate them behind a debug flag.
-
-### 21.6 Regression Guard
-
-`main_window.py` must emit a throttled `BUBBLES_DEAD_WHILE_TRADES_LIVE` warning when:
-- Trade feed is live (`trades_added_total > 0`)
-- But visible bubble count is zero for N consecutive frames
-- While heatmap is still rendering
-
-The warning must include: `failure_stage`, `depth-trade skew`, `trades_pruned_total`, `filtered_by_time`, `deque depth`, and `p95_size`.
-
-### 21.7 Mandatory Regression Tests
-
-Any change to the bubble/CVD rendering path must pass these tests in `tests/test_bubble_pipeline.py`:
-
-| Test | What It Validates |
-|---|---|
-| `test_pruning_uses_trade_time_not_depth_time` | Pruning survives 120-second depth-ahead skew |
-| `test_chart_now_caps_depth_lead` | `chart_now` capped at `MAX_DEPTH_LEAD_MS` when depth leads |
-| `test_stress_harness` | Visible bubbles never collapse to zero under 30-second growing skew |
-| `test_bubble_visibility_in_time_window` | Trades within visible window are rendered |
-| `test_trade_burst_does_not_wipe_visible` | Bursty high-volume trades don't wipe the visible set |
-
-### 21.8 Common Mistakes to Avoid
-
-1. **Do not use `max(depth_ts, trade_ts)` for any rendering-time calculation.** Always use `chart_now` (which is capped).
-2. **Do not prune trade deques based on depth timestamps.** Use `_last_trade_ts` only.
-3. **Do not remove `_bubble_diag` instrumentation.** It is the only way to diagnose pipeline failures without a live debugger.
-4. **Do not assume depth and trade timestamps are synchronized.** They drift by seconds in normal operation.
-5. **Do not add new time-dependent rendering logic without checking `test_bubble_pipeline.py`.** If you touch `t_start`, `chart_now`, pruning cutoffs, or visible window calculations, add a test that injects a 14-second depth-trade skew and verifies the data survives.
-6. **Do not use local system time (`datetime.now()`, `time.time()`) for any rendering timestamp.** The initial REST depth snapshot already does this (a known wart); it must not be introduced elsewhere.
-
----
-
-## 22. UI Architecture Constraints — GPU / Linux / NICE DCV
-
-This section defines **non-negotiable architectural guardrails** for all
-UI development. The target deployment is Ubuntu 24.04 on AWS EC2
-GPU instances (g5.xlarge, NVIDIA A10G) with NICE DCV remote rendering.
-All UI phases (Phase 9, 10, 11 and beyond) must conform to these rules.
-Violations block PR merge.
-
----
-
-### 22.1 Rendering Stack — What Is Permitted
-
-| Decision | Rule |
-|---|---|
-| **UI framework** | Qt 6 only. Qt 5 APIs must not be used. |
-| **Widget toolkit** | Qt Quick / QML for all new visual components. New `QWidget` subclasses are **forbidden** for production UI elements. Existing QWidget components may remain until migrated in Phase 9. |
-| **GPU backend** | OpenGL (primary). Vulkan (optional, Phase 11+). Software rendering (`llvmpipe`, `softpipe`, Mesa CPU) is **forbidden** in production. |
-| **Raster-only paths** | `QPainter` on `QWidget` is forbidden for new chart / dashboard components. `QQuickPaintedItem` is permitted as a **temporary bridge** during migration; it must be annotated `# TODO: migrate to QSGNode` and removed within one phase. |
-| **Animations** | Discrete state transitions only. Continuous timer-driven animations that cause permanent redraws are forbidden. |
-| **Transparency** | Solid-background panels preferred. Semi-transparent overlays may be used sparingly but must not be stacked (no more than one alpha-blended layer per screen region). |
-
-### 22.2 GPU Verification — Mandatory Startup Check
-
-Every application startup must verify hardware acceleration is active
-and log the result. If software rendering is detected, a visible warning
-must be emitted and the startup sequence must log at ERROR level.
-
-**Required startup code pattern:**
-
-```python
-# ui/app.py — before QQuickWindow.show()
-from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
-
-def _check_gpu(window: QQuickWindow) -> None:
-    api = window.rendererInterface().graphicsApi()
-    name = QSGRendererInterface.GraphicsApi(api).name
-    if api in (QSGRendererInterface.GraphicsApi.Software,
-               QSGRendererInterface.GraphicsApi.Unknown):
-        logger.error(
-            "FATAL: Qt scene graph using SOFTWARE rendering (%s). "
-            "Check NVIDIA drivers and QSG_RHI_BACKEND.", name)
-    else:
-        logger.info("Qt scene graph backend: %s (hardware)", name)
-```
-
-This check must run for every `QQuickWindow` opened (main, chart, strategy).
-
-**Required environment variables for OpenGL backend:**
-
-```bash
-export QSG_RHI_BACKEND=opengl        # Force OpenGL (not Vulkan/Metal)
-export QML_DISABLE_DISK_CACHE=0      # Enable QML compilation cache
-export QT_ENABLE_GLYPH_CACHE_WORKAROUND=1  # NVIDIA text rendering fix
-```
-
-These must be set in the systemd unit file and documented in the
-deployment README.
-
-### 22.3 Threading — Hard Rules
-
-| Rule | Rationale |
-|---|---|
-| **GUI thread renders only.** The Qt main thread (QML scene graph thread) must not call broker APIs, parse WebSocket frames, or run Tide/Wave computation. | Thread starvation causes frame drops visible in NICE DCV stream. |
-| **All market data ingestion runs on worker threads.** WS feed, depth snapshot fetch, and engine callbacks run on `QThread` or `threading.Thread` worker threads. | Matches current design; must remain true after QML migration. |
-| **Cross-thread data delivery uses lock-free ring buffers.** Worker threads write to bounded `collections.deque` (with GIL-protected `append`/`popleft`) or `queue.Queue`. The GUI thread drains these buffers once per render frame. | Avoids mutex contention on the hot path. |
-| **No `QMutex` on the GUI thread inside `updatePaintNode` or `paint`.** Scene graph callbacks must complete within the frame budget (< 8 ms at 60 FPS, < 16 ms at 30 FPS). | Blocking calls here stall the entire scene graph. |
-| **Engine service runs in a separate OS process (Phase UI-10B).** A crash in the Qt process must not terminate the trading engine. | 24/7 requirement: engine availability > UI availability. |
-
-### 22.4 Render Loop — FPS and Batching Rules
-
-| Rule | Value |
-|---|---|
-| **Target frame rate** | 60 FPS on local GPU; 30 FPS minimum on NICE DCV (network-limited). |
-| **Render timer interval** | 16 ms (60 FPS). Never shorter. Never longer than 33 ms (30 FPS floor). |
-| **Updates per frame** | Each widget/`QQuickItem` receives at most **one** `update()` / `markDirty()` call per render frame, regardless of incoming data rate. |
-| **Batch threshold** | Market data events between two render frames are accumulated in a ring buffer and applied in a single batch at frame start. |
-| **Coarse operations** | Tide/Wave snapshot push, VP profile rebuild, status-bar refresh: every 6th frame (~100 ms). |
-| **NICE DCV redraws** | A full-screen repaint must not be triggered more than 30 times per second. Dirty-region marking (`QQuickItem::update()` on a leaf item) is preferred over root-level redraws. |
-
-### 22.5 QML Scene Graph Rules
-
-| Rule |
-|---|
-| **Avoid binding loops.** Every QML property binding must have a clear, acyclic dependency graph. Use `onCompleted` or explicit function calls for initialization logic. |
-| **Do not create or destroy QML objects in the render loop.** Use `Loader`, `Repeater`, or `Component.createObject` during initialization only. During steady-state operation, update existing objects' properties — do not recreate them. |
-| **Use `ListView` with fixed-size delegates for the trade blotter.** `Repeater` is forbidden for lists > 50 items. |
-| **Geometry updates for charts must use `QSGGeometryNode` with `QSGGeometry.markVertexDataDirty()`.** Do not replace the geometry node — update vertex data in-place. |
-| **Custom `QSGNode` subclasses must implement `preprocess()` for data upload.** This runs on the render thread before the draw call, keeping the GUI thread free. |
-| **No `Canvas` for high-frequency chart data.** `Canvas` is QML-rasterized (CPU). Use `QQuickItem` with native scene graph nodes or `QQuickPaintedItem` (bridge only). |
-
-### 22.6 NICE DCV Optimization Rules
-
-NICE DCV streams the server-side GPU framebuffer to the remote client.
-Every unnecessary redraw costs network bandwidth and client decode CPU.
-
-| Rule | Rationale |
-|---|---|
-| **Do not use Qt animations (`NumberAnimation`, `SequentialAnimation`, etc.) on visual elements that are always visible.** | Animations force continuous redraws even when data is static. |
-| **Avoid `opacity` bindings that change frequently.** Each opacity change triggers a compositor re-blend pass. | |
-| **Prefer `visible: false` over `opacity: 0` to hide elements.** Hidden items are excluded from the scene graph entirely. | |
-| **Set `QQuickWindow::setRenderTarget` to the default framebuffer.** Do not render to offscreen surfaces unnecessarily. | Offscreen surfaces require a GPU blit back to the framebuffer — extra work for DCV. |
-| **Enable `QSG_RENDER_LOOP=threaded` (the default on Linux).** This moves scene graph submission off the GUI thread. | |
-| **Frame pacing: target a stable 30 or 60 FPS, never variable.** DCV clients buffer and decode at a fixed rate; jitter causes visible stutter. Set `QQuickWindow::setMaximumFrameLatency(1)`. | |
-
-### 22.7 Linux / AWS Deployment Rules
-
-| Rule |
-|---|
-| **Target OS: Ubuntu 24.04 LTS.** No macOS-specific APIs (Metal, CoreAnimation, `NSApplication`) in production paths. |
-| **GPU: NVIDIA A10G (g5.xlarge) with proprietary driver ≥ 535.** OSS `nouveau` driver is forbidden (no Vulkan/OGL perf). |
-| **Qt 6.6+ from official Qt installer or `qt6-base-dev` Ubuntu package.** Do not build Qt from source in production. |
-| **OpenGL context: require `OpenGL 4.5 Core Profile`.** Fail fast with an error if the context is < 4.0. |
-| **NICE DCV server version ≥ 2023.1** (supports GL/Vulkan capture on NVIDIA). |
-| **The trading engine (`engine_service.py`) runs as a systemd service with `Restart=on-failure`.** It must start before the UI and outlive it. |
-| **DISPLAY / Wayland: set `QT_QPA_PLATFORM=xcb` on the DCV server.** Wayland remoting through NICE DCV is not supported. |
-
-### 22.8 What Agents Must Never Do (UI)
-
-1. **Never create a new `QWidget` subclass for a production visual component.** Use `QQuickItem` or `QQuickPaintedItem` (bridge).
-2. **Never call `widget.update()` / `item.update()` from a non-GUI thread.** Use `QMetaObject.invokeMethod(..., Qt.QueuedConnection)` or emit a Qt signal.
-3. **Never call `QApplication.processEvents()` inside a timer callback or data handler.** This re-enters the event loop and causes ordering bugs.
-4. **Never disable `QSG_RHI_BACKEND`.** The RHI backend must always be set explicitly; relying on Qt's auto-detection risks software fallback on headless servers.
-5. **Never hold a Python GIL-protected lock inside `updatePaintNode` or `paint`.** Doing so stalls the scene graph render thread.
-6. **Never log at DEBUG level inside `paintEvent` / `updatePaintNode`.** Logging is IO and can exceed the frame budget.
-7. **Never use `QOpenGLWidget` for new components.** It uses a separate OpenGL context; prefer `QQuickItem` in the scene graph which shares the main context.
-8. **Never deploy with `QSG_RHI_BACKEND=software` or `LIBGL_ALWAYS_SOFTWARE=1` set.** These override GPU selection and force CPU rendering.
-
-### 22.9 Mandatory Performance Diagnostics
-
-Each UI phase must include a profiling baseline captured via:
-
-```bash
-QSG_RENDER_TIMING=1 python -m ui.app          # scene graph frame timings
-QSG_INFO=1 python -m ui.app                   # backend info at startup
-NVRM_PROFILING=1 nvidia-smi dmon -s u         # GPU utilization monitor
-```
-
-The following metrics must be logged at startup and available via the
-`--perf` CLI flag:
-
-| Metric | Pass Threshold |
-|---|---|
-| Scene graph backend API | Must be `OpenGL` or `Vulkan`, never `Software` |
-| Average frame time (60 FPS target) | < 16 ms |
-| P95 frame time | < 20 ms |
-| Qt main thread CPU usage (steady-state) | < 5% on g5.xlarge vCPU |
-| GPU utilization (steady-state, no trades) | < 10% |
-| GPU utilization (peak, 500 trades/s) | < 40% |
-
-These thresholds are tested in `tests/test_perf_baseline.py`
-(offscreen, synthetic load) before any Phase 9+ PR is merged.

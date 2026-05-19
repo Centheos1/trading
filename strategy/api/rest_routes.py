@@ -10,9 +10,8 @@ Endpoints:
                                   a job id.  Status is polled via
                                   ``GET /api/optimise/{job_id}``.
 
-The UI service calls these endpoints; the WebSocket carries only live
-market data.  Long-running operations (backtest, optimise) are dispatched
-to a thread pool so the FastAPI event loop stays responsive.
+Long-running operations (backtest, optimise) are dispatched to a thread
+pool so the FastAPI event loop stays responsive.
 """
 
 from __future__ import annotations
@@ -127,7 +126,6 @@ def make_router(
     engine_status_fn,
     set_engine_params_fn,
     get_engine_params_fn,
-    get_engine_candles_fn=None,
 ) -> APIRouter:
     """Construct the API router.
 
@@ -137,8 +135,6 @@ def make_router(
     set_engine_params_fn : callable(StrategyParamsUpdate) -> dict
         Applies the update and returns the resulting params dict.
     get_engine_params_fn : callable() -> dict
-    get_engine_candles_fn : callable(symbol: str, limit: int) -> list[dict] | None
-        Returns recent OHLCV candles for the given symbol.
     """
     router = APIRouter(prefix="/api")
     jobs = JobRegistry()
@@ -147,19 +143,6 @@ def make_router(
     @router.get("/health")
     async def health() -> dict:
         return {"status": "ok", "engine": engine_status_fn()}
-
-    @router.get("/candles")
-    async def get_candles(symbol: str = "BTCUSDT", limit: int = 200) -> dict:
-        """Return recent OHLCV candles for the given symbol.
-
-        The response always includes the current in-progress (open) candle
-        so the chart is populated immediately on first connection, rather
-        than waiting up to ``bucket_ms`` for the first candle close.
-        """
-        if get_engine_candles_fn is None:
-            return {"symbol": symbol, "candles": []}
-        rows = get_engine_candles_fn(symbol, max(1, min(limit, 500)))
-        return {"symbol": symbol, "candles": rows}
 
     @router.get("/strategy")
     async def get_strategy() -> dict:
@@ -275,7 +258,7 @@ async def _run_optimise(
 ) -> None:
     """Run an NSGA-II optimisation off the event loop.
 
-    Progress is reported via :class:`JobRegistry`; the UI polls
+    Progress is reported via :class:`JobRegistry`; clients poll
     ``GET /api/optimise/{job_id}``.
     """
     loop = asyncio.get_running_loop()
@@ -299,8 +282,7 @@ async def _run_optimise(
             fronts = getattr(nsga, "evaluate_population", None)
             # If the optimiser exposes a higher-level run() we'd prefer
             # that; the existing optimiser.py is interactive.  We expose
-            # the population's parameters as a best-effort result so the
-            # UI sees something concrete.
+            # the population's parameters as a best-effort result.
             if fronts is not None:
                 fronts(population)
             asyncio.run_coroutine_threadsafe(

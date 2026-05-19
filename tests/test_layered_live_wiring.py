@@ -36,7 +36,7 @@ if str(ROOT) not in sys.path:
 
 # The translation tests need the real ofe module. The build script
 # places the shared library at ``backtestingCpp/orderflow/build`` so
-# we mirror the import path used by ``ui/live_trading_session.py``.
+# we mirror the import path used by the live runner.
 _OFE_BUILD = os.path.join(
     str(ROOT), "backtestingCpp", "orderflow", "build"
 )
@@ -458,11 +458,10 @@ class TestLayeredPushStep(unittest.TestCase):
     @unittest.skipIf(ofe is None, "orderflow_engine module not built")
     def test_counters_stall_on_get_ripple_failure(self):
         """Regression — ``_layered_push_step`` used to increment the
-        cadence counters BEFORE the ``get_ripple()`` check, drifting
-        ahead of ``LiveTradingSession._push_layered_strategy`` (which
-        increments AFTER). A failure cluster followed by recovery
-        could fire a Wave/Tide push N iterations earlier than the UI
-        path. Counters must only advance when work was attempted."""
+        cadence counters BEFORE the ``get_ripple()`` check, so a
+        failure cluster followed by recovery could fire a Wave/Tide
+        push N iterations earlier than expected. Counters must only
+        advance when work was actually attempted."""
         ripple = _SpyRipple()
         engine = _SpyEngine(ripple=ripple, get_ripple_raises=True)
         tide = _StubTideEngine()

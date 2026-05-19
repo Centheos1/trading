@@ -1934,7 +1934,7 @@ The permissions matrix determines which trade archetypes Ripple is allowed to ex
 | Deterministic replay execution path | C++ | Consistency across modes |
 | Research, labeling, model fitting | Python | Flexibility, ecosystem |
 | Optimization workflows (NSGA-II, etc.) | Python | Scipy, iteration speed |
-| UI, analytics, offline diagnostics | Python (PySide6) | Existing stack |
+| Analytics, offline diagnostics | Python | Existing stack |
 | Configuration | Python / JSON | Flexibility |
 
 ### 19.2 App Mode Mapping
@@ -1944,7 +1944,6 @@ The permissions matrix determines which trade archetypes Ripple is allowed to ex
 | `data` | Data collection → TickStore (HDF5) | No strategy logic |
 | `backtest` | ReplayFeed → OrderFlowEngine → Ripple → paper fills | Deterministic replay |
 | `optimise` | Backtest in loop with NSGA-II | Parameter search |
-| `ui` | Live or replay with visualization | Heatmap, CVD, VP, status |
 | `execute` | Live feed → Ripple → Binance broker | Real execution |
 
 ### 19.3 Deterministic Replay Contract

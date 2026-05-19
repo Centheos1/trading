@@ -9,14 +9,7 @@
 #   Redis        → ElastiCache (Serverless)            — REDIS_URL env points to it
 #   Data service → ECS Fargate (always-on)             — 1 vCPU / 2 GB
 #   Strategy     → ECS Fargate (always-on)             — 2 vCPU / 4 GB
-#                  ALB WebSocket listener on :8000
-#   UI           → React static bundle → S3 + CloudFront (NOT in this compose file —
-#                  build with ``docker compose --profile build run --rm ui-build``
-#                  and ``aws s3 sync ui/dist/ s3://ui-bucket/``)
-#
-# In production the UI service runs nginx (multi-stage image's
-# ``runtime`` target) so a single ECS task can also serve the UI if the
-# S3+CloudFront path is not desired.
+#                  ALB listener on :8000
 
 services:
 
@@ -49,7 +42,6 @@ services:
       LOG_LEVEL: "INFO"
       REDIS_URL: "${REDIS_URL}"
       SYMBOLS: "${SYMBOLS:-BTCUSDT}"
-      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-https://app.example.com}"
     deploy:
       resources:
         limits:
@@ -61,31 +53,3 @@ services:
         awslogs-region: "${AWS_REGION:-us-east-1}"
         awslogs-group: "/trading/strategy"
         awslogs-stream-prefix: "strategy"
-
-  ui:
-    # Replace the dev-server image with the production nginx image
-    # built from the multi-stage ui/Dockerfile.
-    image: ${UI_IMAGE:-trading-ui:latest}
-    build:
-      context: ./ui
-      dockerfile: Dockerfile
-      target: runtime
-    command: []                              # nginx default
-    environment:
-      STRATEGY_HOST: "${STRATEGY_HOST:-strategy}"
-      STRATEGY_PORT: "${STRATEGY_PORT:-8000}"
-    ports:
-      - "80:80"
-    volumes: []                              # do NOT mount source in prod
-    restart: always
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: "256M"
-    logging:
-      driver: awslogs
-      options:
-        awslogs-region: "${AWS_REGION:-us-east-1}"
-        awslogs-group: "/trading/ui"
-        awslogs-stream-prefix: "ui"

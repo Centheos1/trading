@@ -4,7 +4,6 @@ h5py>=3.10,<4
 requests>=2.31,<3
 oandapyV20>=0.6,<1
 python-dotenv>=1.0,<2
-PySide6>=6.6,<7
 pybind11>=2.11,<3
 websockets>=12.0,<15
 python-binance>=1.0.19,<2

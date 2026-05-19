@@ -1,13 +1,8 @@
 # Development / CI image — Ubuntu 24.04, linux/amd64.
 #
-# Matches the EC2 t3.small (data collection) and g5.xlarge (UI) OS baseline.
+# Matches the EC2 t3.small (data collection) OS baseline.
 # The C++ orderflow_engine is compiled inside this image — same binary
 # locally (Docker Desktop + Rosetta on macOS) and on EC2 (native).
-#
-# GUI usage:
-#   Tests     → QT_QPA_PLATFORM=offscreen (set in devcontainer.json / CI)
-#   Local GUI → mount X11 socket or use XQuartz on macOS
-#   EC2 GUI   → see Dockerfile.gpu; requires nvidia-container-toolkit
 #
 # Build:
 #   docker build -f Dockerfile.dev -t trading-app-dev .
@@ -46,24 +41,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python${PYTHON_VERSION}-venv \
     python${PYTHON_VERSION}-dev \
     python3-pip \
-    # Qt / PySide6 runtime (headless + XCB for X11 passthrough)
-    libgl1 \
-    libglib2.0-0 \
-    libdbus-1-3 \
-    libfontconfig1 \
-    libxcb-cursor0 \
-    libxcb-icccm4 \
-    libxcb-image0 \
-    libxcb-keysyms1 \
-    libxcb-randr0 \
-    libxcb-render-util0 \
-    libxcb-shape0 \
-    libxcb-xinerama0 \
-    libxcb-xkb1 \
-    libxkbcommon-x11-0 \
-    libxkbcommon0 \
-    # Headless display for Qt tests
-    xvfb \
     # Utilities
     curl \
     unzip \
@@ -115,13 +92,7 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 # ---------------------------------------------------------------------------
 COPY . .
 
-# ---------------------------------------------------------------------------
-# Runtime defaults
-# Overridden by devcontainer.json (offscreen) or Dockerfile.gpu (xcb+opengl)
-# ---------------------------------------------------------------------------
-ENV QT_QPA_PLATFORM=offscreen \
-    QSG_RHI_BACKEND=software \
-    PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1
 
 # Default: run the full test suite (CI / smoke check)
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]

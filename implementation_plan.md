@@ -35,7 +35,6 @@ flowchart TB
 
     subgraph PY ["Python"]
         MAIN[main.py]
-        UI[ui/]
         EXEC[execution/]
         STRAT[strategies/]
         DS[data_service.py]
@@ -43,12 +42,10 @@ flowchart TB
         OPT[optimiser.py]
     end
 
-    MAIN --> UI
     MAIN --> EXEC
     MAIN --> BT
     MAIN --> OPT
     MAIN --> DS
-    UI --> OFE
     EXEC --> OFE
     BT --> OFE
     OFE --> OB
@@ -66,7 +63,7 @@ flowchart TB
 ### 2.2 Existing Capabilities
 
 > **Integration legend.** **Implemented + Wired** = unit-tested AND
-> exercised on at least one live runtime path (`ui`, `execute`, or
+> exercised on at least one live runtime path (`execute` or
 > `run_live`). **Implemented (engine only)** = unit-tested in C++ /
 > Python but never invoked by any live entry point — the live path
 > runs against the relevant `Default*` snapshot. The "wired live?"
@@ -74,13 +71,12 @@ flowchart TB
 
 | Capability | Status | Wired live? | Location |
 |---|---|---|---|
-| Binance L2 depth ingestion (UI live) | Implemented + Wired (Phase 10) | ✅ | `data_feed/binance_futures_ws.py`, `OrderBook` |
-| Binance trade ingestion (UI live) | Implemented + Wired (Phase 10) | ✅ | `data_feed/binance_futures_ws.py`, `TradeFlow` |
+| Binance L2 depth ingestion (live) | Implemented + Wired (Phase 10) | ✅ | `data_feed/binance_futures_ws.py`, `OrderBook` |
+| Binance trade ingestion (live) | Implemented + Wired (Phase 10) | ✅ | `data_feed/binance_futures_ws.py`, `TradeFlow` |
 | Binance ingestion (CLI `run_live`) | Implemented + Wired (Phase 10B) | ✅ | `strategies/orderflow.py::run_live` → `data_feed/binance_futures_ws.py` |
 | Order book maintenance | Implemented + Wired | ✅ | `OrderBook` |
-| Volume Profile | Implemented + Wired | ✅ | `VolumeProfile` (C++), `volume_profile_widget.py` |
-| CVD | Implemented + Wired | ✅ | `CumulativeVolumeDelta` (C++), `cvd_widget.py` |
-| Heatmap visualization | Implemented + Wired | ✅ | `heatmap_widget.py` |
+| Volume Profile | Implemented + Wired | ✅ | `VolumeProfile` (C++) |
+| CVD | Implemented + Wired | ✅ | `CumulativeVolumeDelta` (C++) |
 | Ripple engine | Implemented + Wired (Phase 2/3) | ✅ | `ripple/` |
 | Wall detection | Implemented + Wired | ✅ | `WallDetector` |
 | Feature extraction | Implemented + Wired | ✅ | `RippleFeatureEngine` |
@@ -132,7 +128,6 @@ flowchart TB
 | Replay determinism | **Verified** (`test_replay_determinism.py`) | — | 6 (done) |
 | Performance benchmark | **Verified** (`benchmark_pipeline`, P99 < 100 µs) | — | 6 (done) |
 | Strategy snapshot | **Implemented** (`get_strategy_snapshot()` on `OrderFlowEngine`) | — | 6 (done) |
-| UI diagnostics | **Implemented** (`StrategyDiagnosticsPanel`) | — | 6 (done) |
 | Optimization (Ripple+Wave) | ✅ **CLOSED 2026-05-11** — three-axis NSGA-II (cagr, sharpe_ratio, num_trades) post-14E | — | 6 (done) / 14E (done) |
 | Paper fills | **Implemented + Wired** (`paper_fills` flag, consumes `RippleDecision`) | — | 6 (done) |
 | PnL tracking | **Implemented + Wired** (cumulative PnL in lifecycle) | — | 6 (done) |
@@ -152,7 +147,6 @@ flowchart TB
 | `data` | — | — | — | — | Collect and store raw events |
 | `backtest` | Replay or fixed | Replay or deterministic | Full pipeline | Paper fills | Read stored events |
 | `optimise` | Parameter search | Parameter search | Parameter search | Paper fills | Read stored events |
-| `ui` | Display state | Display state | Full pipeline + display | Paper or live | Live or replay events |
 | `execute` | Live computation | Live computation | Full pipeline | Live Binance | Live events |
 
 ### 3.2 Mode-Specific Constraints
@@ -160,7 +154,6 @@ flowchart TB
 - **`data`**: No strategy logic runs. Only event ingestion and storage.
 - **`backtest`**: Must be deterministic. Uses `ReplayFeed`. All randomness seeded. Tide/Wave may be fixed or replayed.
 - **`optimise`**: Runs `backtest` in a loop with parameter variation. Must be parallelizable. Each run is deterministic.
-- **`ui`**: Real-time visualization. Strategy state exposed to UI widgets. Must not block the render thread.
 - **`execute`**: Full live pipeline. Risk checks enforced. Fills routed to `BinanceBroker`.
 
 ---
@@ -194,16 +187,6 @@ flowchart TB
 | Module | Responsibility |
 |---|---|
 | `main.py` | CLI entry, mode dispatch |
-| `ui/main_window.py` | UI orchestration, timer, data pipeline to widgets, multi-view tab wrapper |
-| `ui/heatmap_widget.py` | Heatmap rendering (thin View; constants and gestures only) |
-| `ui/orderflow_viewmodel.py` | Frame-computation viewmodel: depth image, bubble paths, percentile normalisation, forward-fill alpha fade |
-| `ui/candle_chart_view.py` | QPainter candlestick chart with overlay registration |
-| `ui/chart_overlays.py` | Candle-chart overlays: SMA, EMA, VWAP, structural levels (H/L, ATH/ATL), volume-profile side bar |
-| `ui/strategy_dashboard_view.py` | Composite strategy view: diagnostics panel, trade blotter, account panel, history mini-chart, ripple state table |
-| `ui/market_state.py` | Shared MarketState model (candles, signals, snapshot, snapshot_history) consumed by all views |
-| `ui/live_trading_session.py` | Live data ingestion + per-tick MarketState updates |
-| `ui/cvd_widget.py` | CVD rendering |
-| `ui/volume_profile_widget.py` | Volume profile rendering |
 | `execution/models.py` | Order/position models, C++ → Python mapping |
 | `execution/paper_engine.py` | Paper fills |
 | `execution/binance_broker.py` | Live fills |
@@ -963,8 +946,6 @@ Delivered files:
 | `backtestingCpp/orderflow/ripple/tests/benchmark_pipeline.cpp` | New: performance benchmark — 5000 events, P99 < 100 µs target |
 | `utils.py` | Extended: Ripple + Wave params in `STRAT_PARAMS["orderflow"]` |
 | `strategies/orderflow.py` | Extended: `_build_config()` maps Ripple + Wave params to `EngineConfig.ripple`; backtest uses `paper_fills` and Ripple PnL |
-| `ui/strategy_panel.py` | New: `StrategyDiagnosticsPanel` — Wave regime, η, liquidity state, µPrice, trade state, uPnL, ES usage, imbalance |
-| `ui/main_window.py` | Extended: strategy panel wired into layout and timer tick |
 | `tests/test_replay_determinism.py` | New: **8** Python tests — full-pipeline replay determinism across parameter configs |
 
 Key design decisions:
@@ -1562,260 +1543,6 @@ Known limitations / out-of-scope:
   if a future feature needs them.
 
 ---
-
-### Phase 11B — Heatmap Per-Column Bid/Ask Seam Fix `[COMPLETED]`
-
-**Objective:** Fix the visible mis-colouring of historical depth in the
-live heatmap. After a price move, old bid quotes were rendered with the
-ASK (red) LUT and old ask quotes with the BID (blue) LUT, producing the
-"red on the blue side of price" artefact reported during a live session.
-
-**Root cause:** `OrderFlowViewModel._compute_depth_image()` used a single
-`mid_row_latest` (the most-recent slice's mid) to split EVERY column's
-intensity into ASK / BID halves. Older columns generated when the mid
-sat at a different row got coloured against the latest seam, mis-
-classifying their depth quotes.
-
-**Scope:**
-- Track per-column `mid_rows` (np.int32 array, length `n_img_cols`)
-  inside `_compute_depth_image`. Each slice records its own column's
-  mid; duplicate-data columns inherit from the prior column; columns
-  with no `best_bid`/`best_ask` (book empty/crossed) inherit too.
-- Forward-fill `mid_rows` through gaps and back-fill the leading edge
-  (mirrors the existing intensity forward-fill semantics).
-- Replace the global `rgba[:mid_row]` / `rgba[mid_row:]` slice colouring
-  with a vectorised `np.where(row_indices < mid_rows, ASK, BID)` mask.
-
-**What NOT to implement:**
-- Per-pixel mid (e.g. interpolated seam) — the per-column resolution is
-  already pixel-aligned at typical chart widths.
-- Smoothing the seam across columns — abrupt transitions match the data
-  cadence and aren't visually disruptive at 100 ms slice intervals.
-
-**Test requirements:**
-- New `tests/test_heatmap_continuity.py::test_per_column_mid_row_with_moving_price`:
-  build a viewmodel with two slices at mid 50 000 and one slice at mid
-  49 500; assert that pixels in the OLD column at rows below the OLD
-  mid render as `BID` (not `ASK`).
-- New `tests/test_heatmap_continuity.py::test_per_column_mid_row_forward_fills_through_gap`:
-  insert a slice with `best_bid=best_ask=0` between two valid slices;
-  the gap column must render without crashing.
-- All existing 132 heatmap continuity checks continue to pass.
-
-**Success criteria:**
-- 139/139 checks pass in `tests/test_heatmap_continuity.py` (132
-  pre-existing + 7 new across the two regression tests).
-- Confirmed bug detection: the new test fails when the per-column
-  mid_rows logic is reverted (caught at OLD-column rows 139-146 being
-  ASK pixels instead of BID).
-
-**Completion notes:**
-
-Modified files:
-
-| File | Change |
-|------|--------|
-| `ui/orderflow_viewmodel.py` | `_compute_depth_image()` now tracks per-column `mid_rows`, forward-fills it through gaps, and uses a vectorised `np.where` mask for the bid/ask LUT split |
-| `tests/test_heatmap_continuity.py` | New `test_per_column_mid_row_with_moving_price` (5 checks) and `test_per_column_mid_row_forward_fills_through_gap` (1 check) |
-
-Validation results:
-- `tests/test_heatmap_continuity.py`: 139/139 ✓ (was 132 pre-fix).
-- All other UI / Phase-7 / Phase-10 / Phase-11 suites unaffected
-  (`test_strategy_dashboard.py` 70/70, `test_chart_overlays.py` 27/27,
-  `test_candle_chart_view.py` 15/15, Phase 10 unittest suite 40/40).
-
-Known limitations / out-of-scope:
-- The user also reported "bubbles stop rendering" intermittently. That
-  symptom was not reproducible from the static screenshot and the
-  diagnostic counters (`fY=0`, `bub` plateauing at the cell-cap rather
-  than dropping to 0) suggest a separate root cause — likely the
-  `_trades` deque pruning interacting with depth/trade timestamp skew
-  (`skew=-12421ms` observed in the same log). Tracked as a deferred
-  phase candidate (see Phase 11C / 11D below).
-
----
-
-### Phase 11C — Heatmap Depth/Seam Coherence Fix + Diagnostics `[COMPLETED]`
-
-**Objective:** When the user reported the heatmap glitch persisted after
-Phase 11B, code review found a deeper coupling defect upstream of the
-per-column-mid logic: `add_depth_column` was reusing the prior slice's
-depth dictionaries while overwriting `best_bid`/`best_ask` with the
-caller's *current* values whenever a tick arrived with no new depth
-(empty book) or an empty-bids-and-asks delta. Each slice tuple
-consequently carried OLD depth glued to a NEW seam, so the per-column
-mid_rows in `_compute_depth_image` (Phase-11B logic) classified some
-historical asks as bids and vice-versa — the textbook "red on the blue
-side of price" artefact, plus a flickery boundary on every quote
-refresh. Phase-11B was correct *given coherent slice tuples*; the
-fix had to be made one layer up.
-
-**Scope:**
-- `OrderFlowViewModel`: track `_cur_best_bid` / `_cur_best_ask` paired
-  with `_cur_bids` / `_cur_asks`; the slice-construction block uses
-  these (not the raw call args) so depth + seam are always captured at
-  the same moment.
-- Gap-fill placeholders inherit the prior slice's *full* state
-  (depth + bid/ask), not the current call's bid/ask.
-- Reusing the prior slice's depth (the `elif self._slices` branch) also
-  reuses the prior slice's `best_bid`/`best_ask`.
-- Throttled diagnostic logger: `_compute_depth_image` populates
-  `vm._last_heatmap_diag` every frame and emits a one-line summary
-  every `_heatmap_diag_interval_s` (default 5 s) when
-  `ORDERFLOW_HEATMAP_DIAG=1` (or the attribute is set in-process).
-
-**Tests added** (`tests/test_heatmap_continuity.py`):
-- `test_phase11c_slice_carries_depth_and_seam_together` — empty-book
-  tick at a different mid retains prior bid/ask.
-- `test_phase11c_gap_fill_carries_prior_seam` — every gap-filled slice
-  carries the prior slice's bid/ask.
-- `test_phase11c_held_over_depth_keeps_paired_seam` — 8 consecutive
-  empty-book ticks all retain the old-mid seam.
-- `test_phase11c_diag_dict_populated` — `_last_heatmap_diag` exposes
-  the required keys after `compute_frame`.
-
-All four fail without the production fix (verified via
-`git stash` / re-run / `git stash pop`).
-
-**Verification:**
-- `tests/test_heatmap_continuity.py`: 158/158 ✓ (was 139 after 11B).
-- Closely-coupled UI suites green: `test_strategy_dashboard` 70/70,
-  `test_bubble_pipeline` 65/65, `test_market_state` 9/9,
-  `test_multi_view` 12/12, `test_bubble_aggregation` 68/68,
-  `test_bucket_model` 60/60, `test_strategy_ui` 163/163,
-  `test_ui_cleanup` 38/38, `test_strategy_store` 63/63,
-  `test_replay_overlay` 34/34, `test_performance_profile` 13/13,
-  `test_candle_chart_view` 15/15, `test_chart_overlays` 27/27,
-  `test_live_trading_session` 10/10, `test_stream_health` 19/19.
-- No public API change to `add_depth_column`.
-
-**Pause directive (per user):** if heatmap visuals still misbehave
-after this fix lands in a live session, all further heatmap UI work
-pauses until later phases ship. The deferred work is captured below
-and in §14 of `UI_STRATEGY_INTEGRATION_PLAN.md`.
-
----
-
-### Phase 11D — Bubble Drop-out Investigation `[DEFERRED]`
-
-**Trigger:** user-reported "the bubbles stop rendering" — re-open only
-when (a) the user explicitly asks heatmap UI work to resume, or (b) a
-session capture (log + screenshot at the moment bubbles disappear) is
-available. Detailed investigation plan and acceptance criteria live in
-`UI_STRATEGY_INTEGRATION_PLAN.md` §14.2.
-
----
-
-### Phase 11E — Auto-scale Price-Range Hardening `[DEFERRED]`
-
-**Trigger:** open if `_last_heatmap_diag.mid_row_clipped_top` /
-`mid_row_clipped_bot` consistently exceed ~5 % of cols on the live
-feed (suggests `_zoom_fraction` too tight for the visible-window mid
-swing). Detailed plan in `UI_STRATEGY_INTEGRATION_PLAN.md` §14.3.
-
----
-
-### Phase 11F — LUT Perceptual Calibration `[DEFERRED / COSMETIC]`
-
-**Trigger:** open only after 11D / 11E settle. Reassess whether the
-BID / ASK gradients should be tightened (BID peak at saturated cyan,
-ASK peak at saturated red) for clearer side discrimination at high
-intensity. Detailed plan in `UI_STRATEGY_INTEGRATION_PLAN.md` §14.4.
-
----
-
-### Phase 11 — Strategy Dashboard Repaint Regression Fix `[COMPLETED]`
-
-**Objective:** Fix the live UI tick-time regression that pushed `avg`
-from 10.9 ms (tick 50) → 145 ms (tick 600), plateauing exactly when
-`MarketState.snapshot_history` filled to its 600-entry cap. The cause
-was a Phase 7 oversight: `_StrategyHistoryPanel.paintEvent` is O(N) in
-`snapshot_history` length, and `LiveTradingSession.on_timer_tick` was
-calling `update_from_state()` + `update()` on every 100 ms timer tick
-(10 Hz), even though the underlying snapshot only changes every 5th
-tick (the 500 ms strategy cadence). Net effect: 5× wasted repaints,
-each O(N) where N → 600.
-
-**Scope:**
-- Gate `_strategy_dashboard.update_from_state()` + `update()` on a
-  `strat_refreshed` flag set inside the existing 5-tick block of
-  `on_timer_tick`, plus a rising-edge check on
-  `_strategy_window.isVisible()` so opening the window triggers an
-  immediate repaint of current state.
-- Extract the 3-input gate predicate as a static method
-  `LiveTradingSession._should_repaint_strategy_dashboard(strat_visible,
-  prev_visible, strat_refreshed)` so it's directly unit-testable.
-- Cache the per-snapshot derived series (wave-band colors, tide-band
-  colors, `risk_pcts`, `pnls`, oldest/newest timestamps) inside
-  `_StrategyHistoryPanel`, keyed by `(len(history), last_ts)`. Repeat
-  paints with unchanged history are O(1) — no `_attr()` reflection, no
-  per-sample `getattr` walks.
-
-**What NOT to implement:**
-- A full incremental cache (only updating new tail entries) — overkill
-  for N=600 once paint is gated to ~2 Hz instead of 10 Hz. Simple full
-  rebuild on cache miss is plenty.
-- Strategy-snapshot data-shape changes; the cache is purely a paint
-  optimisation, the underlying `StrategySnapshot` schema is unchanged.
-
-**Test requirements:**
-- 9 new tests in `tests/test_strategy_dashboard.py`:
-  6 for `_StrategyHistoryPanel` cache (start-empty, populate-on-first-
-  paint, reuse-when-unchanged, invalidate-on-append, empty-history
-  safety, manual `invalidate_cache()`); 3 for the gate predicate
-  (hidden window short-circuit, steady-state skip, rising-edge force).
-- All existing Phase 7 dashboard tests continue to pass unchanged.
-- All Phase 10 tests (`tests/test_stream_health.py`,
-  `tests/test_binance_futures_ws.py`,
-  `tests/test_live_trading_session.py`) continue to pass.
-
-**Success criteria:**
-- 70/70 checks pass in `tests/test_strategy_dashboard.py` (19 pre-
-  existing test functions + 9 new Phase 11 functions).
-- Cache reuse test confirms 5 consecutive paints with unchanged
-  history rebuild the cache exactly **once** (the first paint).
-- Gate predicate returns `False` for the steady-state case
-  `(visible=True, prev_visible=True, refreshed=False)` — the case
-  that was firing 4 out of every 5 ticks before this fix.
-
-**Completion notes:**
-
-Modified files:
-
-| File | Change |
-|------|--------|
-| `ui/live_trading_session.py` | New static `_should_repaint_strategy_dashboard()` predicate; `on_timer_tick` sets `strat_refreshed = True` inside the 5-tick block and uses the predicate (plus rising-edge tracking via `_strat_was_visible`) to gate `_strategy_dashboard.update_from_state()` + `update()` |
-| `ui/strategy_dashboard_view.py` | New `_cache_*` attributes on `_StrategyHistoryPanel`, `_ensure_cache()` and `_refresh_cache()` helpers, `invalidate_cache()` public hook; `_paint`, `_draw_row1_bands`, `_draw_row2_lines` now consume cached series instead of re-walking history through `_attr()` on every paint |
-| `tests/test_strategy_dashboard.py` | 9 new tests across cache (6) and gate (3) |
-
-Validation results:
-- `tests/test_strategy_dashboard.py`: 70/70 checks passed.
-- Phase 10 suite (`tests/test_stream_health.py`,
-  `tests/test_binance_futures_ws.py`,
-  `tests/test_live_trading_session.py`): 40/40 green.
-- Other Phase 7 UI suites: `tests/test_chart_overlays.py` 27/27,
-  `tests/test_candle_chart_view.py` 15/15.
-- Expected runtime impact in the live UI: dashboard repaints drop from
-  10 Hz to 2 Hz (5× reduction), and when forced to paint
-  (resize/expose) the cache makes the per-paint work O(1) in
-  `_attr()` reflection. Tick-avg should return to the ~30 ms baseline
-  observed pre-Phase-7.
-
-Known limitations / out-of-scope:
-- `compute_frame()` in `orderflow_viewmodel.py` still iterates over
-  all 601 cached slices each tick. Profiling did not show this as the
-  dominant cost in the original regression (`book=` phase was
-  ~1.5 ms), so it's left alone for now. If a future profiling pass
-  reveals it as a bottleneck, an incremental compute is the natural
-  next step.
-- The cache key `(len, last_ts)` does not detect mutations of the
-  same `StrategySnapshot` object in place. The current `_market_state`
-  flow only ever appends new tuples, so this is safe; if that
-  invariant is ever broken, callers should call
-  `invalidate_cache()` explicitly.
-
----
-
 ### Phase 12 — Execution Layer Hardening `[COMPLETED]`
 
 **Objective:** Mirror the Phase 10 inbound-data-feed hardening on the
@@ -2423,100 +2150,6 @@ Validation results:
   any other suite).
 
 ---
-
-### Phase 13B — `LiveTradingSession` Orchestration Replay (MVP) `[COMPLETED]`
-
-**Objective:** Extend the Phase 13 deterministic-replay harness to
-cover `LiveTradingSession.on_timer_tick` orchestration state — not
-just the engine's signal / ripple emissions. Until this phase, the
-sidecar trace captured what the C++ engine did but not what the
-Python UI orchestration loop did with it (drained-trade counts,
-book-empty / book-crossed flags, depth-resync triggers). Phase 13B
-adds a `session_tick` event type to the recorder, a
-`verify_session_ticks` verifier, and an opt-in
-`LiveTradingSession.attach_recorder()` hook.
-
-**Scope:**
-- New `SessionRecorder.record_session_tick(tick_n, *, drained,
-  best_bid, best_ask, bid_count, ask_count, book_empty,
-  book_crossed, book_empty_ticks, book_resync_pending,
-  book_resync_count, trade_buf_remaining)` writes one
-  `event=session_tick` line per call.
-- `RecorderCounters` gets a `session_ticks` field; the footer
-  emits `n_session_ticks` so a malformed sidecar can be detected
-  by header / footer count mismatch.
-- `SidecarTrace` gets a `session_ticks: List[Dict[str, Any]]`
-  field; `load_sidecar` populates it.
-- New `tools.replay_harness.verify_session_ticks(expected, actual,
-  *, float_tolerance, max_divergences) -> SessionTickReport`
-  reuses the existing `_diff_records` machinery so the divergence
-  semantics are identical to signals / ripples / orders.
-- `LiveTradingSession.__init__` gets a `_recorder: Any = None`
-  slot; new `attach_recorder(recorder)` method (and `None` to
-  detach). `on_timer_tick` calls `recorder.record_session_tick(...)`
-  at end-of-tick if attached, wrapped in `try/except` so a faulty
-  recorder cannot break the live UI.
-
-**Out of scope:**
-- A full Qt-mocked replay-against-recorded-tick driver (would
-  require a stand-in for `_heatmap`, `_cvd`, `_candle_view`,
-  `_strategy_dashboard`, `_orderflow_vm` — substantial mock surface
-  for a marginal verification-coverage gain). The MVP captures the
-  *deterministic scalars* sufficient to detect timer-cadence /
-  drain / book-state regressions; full replay-against-stub is a
-  Phase 13C candidate.
-- Wall-clock-dependent state (Qt repaint counters, `time.monotonic`
-  phase timings). Excluded on purpose — not deterministic.
-- Auto-attaching a recorder from `main.py:execute` or the UI
-  "Connect" button (orchestration concern; left to user).
-
-**Acceptance criteria:**
-- 18 new offline tests pass under `tests/test_session_tick_replay.py`
-  (no Qt, no real C++ engine; uses `MagicMock` for `MainWindow`).
-- Recorder schema: `session_tick` events round-trip through
-  `load_sidecar`; `n_session_ticks` matches recorded count;
-  pre-header calls are silently dropped.
-- Verifier: identical traces pass; length / field / book-state
-  divergence detected; `max_divergences` caps output;
-  `float_tolerance` accepts bit-level jitter when explicitly set.
-- Integration: `LiveTradingSession.attach_recorder(rec)` then 3 ×
-  `on_timer_tick()` produces 3 captured calls; `attach_recorder(None)`
-  detaches; a recorder that raises does not break the tick loop.
-- Aggregate regression sweep across Phase 7 / 9 / 10 / 10B / 10C /
-  11 / 11B / 11C / 12 / 13 / 13X / 13Y / 13W stays green
-  (546/546 in the non-Qt sweep).
-
-**Completion notes:**
-
-| File | Change |
-|---|---|
-| `tools/session_recorder.py` | New `record_session_tick(...)` method on `SessionRecorder`; `RecorderCounters.session_ticks` field; `_SESSION_TICK_FIELDS` constant; footer emits `n_session_ticks`; `SidecarTrace.session_ticks` field; `load_sidecar` parses `event=session_tick` lines |
-| `tools/replay_harness.py` | New `SessionTickReport` dataclass; new `verify_session_ticks(expected, actual, *, float_tolerance, max_divergences) -> SessionTickReport` public function reusing `_diff_records`; `Divergence.section` doc updated to include `"session_ticks"` |
-| `ui/live_trading_session.py` | `__init__` adds `_recorder: Any = None`; new `attach_recorder(recorder)` method; `on_timer_tick` end-of-tick block calls `self._recorder.record_session_tick(...)` with deterministic scalars, wrapped in try/except |
-| `tests/test_session_tick_replay.py` | NEW — 18 tests across 4 classes: `TestRecordSessionTickSchema` (5), `TestLoadSidecarSessionTicks` (1), `TestVerifySessionTicks` (6), `TestLiveTradingSessionRecorderHook` (6) |
-| `implementation_plan.md` | Added this Phase 13B section + Test Plan / Acceptance Criteria rows |
-| `README.md` | Added a "Phase 13B — LiveTradingSession Orchestration Replay" subsection under Phase 13Y/W |
-
-Validation results:
-- `tests/test_session_tick_replay.py`: 18/18 OK.
-- Aggregate non-Qt regression sweep: 546/546 OK (no regression in
-  any other suite).
-- Integration smoke: stub MainWindow + 3 × `on_timer_tick` → 3
-  recorded session_ticks with `best_bid` / `best_ask` matching the
-  stubbed order-book snapshot; book-empty case correctly increments
-  `book_empty_ticks` from 1 → 2 across consecutive ticks.
-
-Known limitations / out-of-scope:
-- Phase 13B verifies state at the per-tick boundary, not the full
-  intra-tick call sequence. A drift inside `on_timer_tick` (e.g.
-  reordering of heatmap vs. CVD updates) would not be detected.
-- Recorder is not auto-attached. Users wiring up a long-running
-  capture should call `session.attach_recorder(rec)` after
-  `start_live(...)` returns; detach via `attach_recorder(None)`
-  before `stop_live()`.
-
----
-
 ### Phase 7V — HMM vs. Rule-Based Backtest A/B Validation `[COMPLETED]`
 
 **Objective.** Close the explicit validation gap from Phase 7 — *"Actual
@@ -2656,8 +2289,8 @@ Concrete evidence that drove the gap list:
 
 | `strategy.md` requirement | Phase that built it | Wired live? | Evidence |
 |---|---|---|---|
-| §22.2 #8 — Simple global ES throttle | Phase 4 (`RiskEngine`) | ✅ Yes (Phase 14B — 2026-05-11) | `ui/live_trading_session.py:373` + `execution/live_runner.py:111` call `ripple.set_risk_budget(es_budget, max_position_usd, risk_multiplier)` on a 60 s cadence sourced from `TideEngine.get_snapshot()`. CI gate `grep -rn "set_risk_budget" ui/ execution/ main.py` returns multiple hits. |
-| §22.2 #9 — Wave permissions matrix | Phase 5 (`WaveEngine`) | ✅ Yes (Phase 14B — 2026-05-11) | `ui/live_trading_session.py:362` + `execution/live_runner.py:100` call `ripple.set_wave_snapshot(ofe_ws)` on a 5 s cadence sourced from `WaveEngine.get_snapshot(bias=tide_snap.bias)` and translated via `execution.models.wave_snapshot_to_ofe`. CI gate `grep -rn "set_wave_snapshot" ui/ execution/ main.py` returns multiple hits. |
+| §22.2 #8 — Simple global ES throttle | Phase 4 (`RiskEngine`) | ✅ Yes (Phase 14B — 2026-05-11) | `ui/live_trading_session.py:373` + `execution/live_runner.py:111` call `ripple.set_risk_budget(es_budget, max_position_usd, risk_multiplier)` on a 60 s cadence sourced from `TideEngine.get_snapshot()`. CI gate `grep -rn "set_risk_budget" execution/ main.py` returns multiple hits. |
+| §22.2 #9 — Wave permissions matrix | Phase 5 (`WaveEngine`) | ✅ Yes (Phase 14B — 2026-05-11) | `ui/live_trading_session.py:362` + `execution/live_runner.py:100` call `ripple.set_wave_snapshot(ofe_ws)` on a 5 s cadence sourced from `WaveEngine.get_snapshot(bias=tide_snap.bias)` and translated via `execution.models.wave_snapshot_to_ofe`. CI gate `grep -rn "set_wave_snapshot" execution/ main.py` returns multiple hits. |
 | §22.2 #12 — Live execution with full risk checks | Phase 12 (`ExecutionManager`) | ✅ Yes (Phase 14A — 2026-05-09 / Phase 14B — 2026-05-11 / Phase 14C — 2026-05-12) | `execution/live_runner.py` wires `engine.set_ripple_callback(_ripple_cb)`; the callback invokes `execution.models.intent_risk_block_reason(...)` before forwarding to `exec_mgr.on_intent`. Same gate in `ui/main_window.py::_on_ripple_received` (live block). 8 end-to-end acceptance tests + 7 unit tests in `tests/test_live_execution_v1_compliance.py` pin: (i) ES exhausted, (ii) Wave DISABLED, (iii) Tide CRISIS, (iv) max_position_usd exceeded, (v) two-trades concurrent, (vi) cooldown active — each yields zero broker orders, plus an explicit "exits never blocked" + happy-path negative-controls. |
 | §22.2 #4 — All five exit types | Phase 2 (lifecycle FSM) | ✅ Yes (Phase 14A — 2026-05-09) | Live path consumes `RippleDecision` intents post-14A; all five exit types (`EXIT_BOUNCE`, `EXIT_BREAKOUT`, time-stop, target, exhaustion) flow through the lifecycle FSM → `ExecutionIntent(intent_type="exit")` → `ExecutionManager._execute_intent_exit`. Phase 14C pins that exits are NEVER blocked by the risk gate (regression test in `tests/test_live_execution_v1_compliance.py::test_exit_intent_passes_even_when_es_exhausted`). |
 | AGENT_STRATEGY_RULES.md §7.1 "Event-time only" | — | ✅ Yes (Phase 14A — 2026-05-09) | `ExecutionManager.on_intent` uses `intent.timestamp` (event time, ms) for the cooldown gate. The legacy `on_signal` / `_execute_signal` path still reads `time.time()` but is no longer wired by `live_runner.py` / `main_window` / `main.py:execute` (Phase 14A grep gate 1 confirms). |
@@ -2711,7 +2344,6 @@ since Phase 3 but the live path never migrated.
 | `execution/execution_manager.py` | Add `on_intent(intent: ExecutionIntent)` that mirrors `PaperEngine.on_intent` semantics: ENTRY / SCALE_IN / SCALE_OUT / EXIT, with side derived from `intent.side` (no string parsing of signal_type). Remove wall-clock cooldown; use `intent.timestamp_ms` (event time) as the cooldown reference. Keep `on_signal` as a deprecated shim that logs a warning. |
 | `execution/live_runner.py` | Wire `engine.set_ripple_callback(lambda d: exec_mgr.on_intent(ripple_decision_to_intent(d, ...)))` *instead of* the current `set_signal_callback(exec_mgr.on_signal)`. Recorder still wraps both for capture. |
 | `main.py:execute` | Same swap. The CLI prompt sequence is unchanged. |
-| `ui/live_trading_session.py` | UI mode does not place orders today (paper or otherwise); add a config flag `enable_live_execution: bool = False` so a UI session can optionally route through `ExecutionManager`. Default OFF. |
 | `tests/test_execution_manager.py` | Extend the existing `StubBroker`-backed suite with: `on_intent` dispatch (every `IntentType`), event-time cooldown gating (no wall-clock leak), wave-permission DISABLED block-entry, risk-budget exhausted block-entry, scale-in/out qty math. ≥ 15 new tests. |
 | `tests/test_live_runner.py` | New suite: stub-engine fires a sequence of synthetic `RippleDecision`s, assert ExecutionManager receives `on_intent` calls with the correct intent type / side / qty / timestamp, no wall-clock leak. ≥ 8 new tests. |
 | `implementation_plan.md` / `README.md` / `AGENT_STRATEGY_RULES.md` | Documentation rotation. |
@@ -2736,7 +2368,6 @@ since Phase 3 but the live path never migrated.
 |---|---|
 | `execution/execution_manager.py` | NEW `on_intent(intent: ExecutionIntent)` (canonical Phase 14A entry point); event-time cooldown via `_last_intent_ts_ms` + `_cooldown_ms`; new `_execute_intent_entry` / `_execute_intent_exit` coroutines; new `update_cooldown(cooldown_s)` helper; `on_signal` retained as deprecated shim with one-time WARNING log + module-level docstring updated to reflect the V1 §22.2 / AGENT_STRATEGY_RULES.md §7.4 contract. NO `time.time()` calls remain on the canonical (`on_intent`) path; the two surviving calls in `on_signal` / `_execute_signal` (lines 166, 316) are deprecated-path-only and explicitly documented in the class docstring. |
 | `execution/live_runner.py` | `engine.set_ripple_callback` is now the only execution subscription; `engine.set_signal_callback` is wired ONLY when a recorder is attached (observation channel for the sidecar). The `_ripple_cb` adapter calls `ripple_decision_to_intent` → `exec_mgr.on_intent`. Recorder + execution-manager exceptions are absorbed independently so neither can break the other. |
-| `ui/main_window.py` | `_on_engine_signal` no longer calls `self._exec_manager.on_signal(signal)` — purely OBSERVATION (Qt log surface). New LIVE branch in `_on_ripple_received` parallel to PAPER branch: when `_strategy_mode == StrategyMode.LIVE` AND `_exec_manager.armed`, the converted `ExecutionIntent` is dispatched via `_exec_manager.on_intent(intent)`. |
 | `tests/test_execution_manager.py` | Extended from 25 → 48 tests. NEW: `TestOnIntentDispatch` (7 — entry / exit / cancel / rearm / prepare / None / no-side), `TestOnIntentEventTimeCooldown` (5 — first-intent / within-cooldown drop / past-cooldown pass / **no-wall-clock invariant** / zero-timestamp safety), `TestOnIntentGuards` (5 — disarmed / no-loop / same-side suppress / side-flip / no-position exit), `TestOnIntentSizingAndPriceHints` (3 — reference-price priming / max_position clamp / zero-qty drop), `TestOnSignalDeprecation` (2 — first-call warns / subsequent-calls don't re-warn), `TestUpdateCooldown` (1). |
 | `tests/test_live_runner.py` | NEW suite — 13 tests across `TestRippleDrivenTopology` (7), `TestRecorderObservation` (4), `TestShutdownLifecycle` (1). Uses a `_StubExecMgr` + `_StubEngine` + `_StubRecorder` so no real C++ engine, network, or threads are required. |
 
@@ -2744,7 +2375,7 @@ since Phase 3 but the live path never migrated.
 - `tests/test_execution_manager.py`: 48 / 48 OK in 0.013 s.
 - `tests/test_live_runner.py`: 13 / 13 OK in 0.10 s.
 - Wider regression sweep (419 tests across `test_paper_engine`, `test_binance_broker`, `test_execution_models`, `test_replay_harness`, `test_session_tick_replay`, `test_orderflow_backtest`, `test_hmm_abtest`, `test_replay_determinism`, `test_wave_engine`, `test_crossvenue_wave`, `test_stream_health`, `test_binance_futures_ws`, `test_live_trading_session`, `test_schemas`, `test_wave_bindings`, `test_tide_engine`): 419 / 419 OK in 13.77 s.
-- Acceptance gate 1 (`grep "engine.set_signal_callback(.*on_signal" execution/ ui/ main.py`): zero production hits (only documentation references in `AGENT_STRATEGY_RULES.md` §7.4 / `README.md` example diagram / this file's audit history).
+- Acceptance gate 1 (`grep "engine.set_signal_callback(.*on_signal" execution/ main.py`): zero production hits (only documentation references in `AGENT_STRATEGY_RULES.md` §7.4 / `README.md` example diagram / this file's audit history).
 - Acceptance gate 2 (`grep "time.time()" execution/execution_manager.py`): two hits, both inside the deprecated `on_signal` / `_execute_signal` path; the canonical `on_intent` path has zero wall-clock reads.
 - Phase 12 + 13 + 13B suites stay green.
 - Qt-touching suites (`test_strategy_dashboard`, `test_strategy_ui`, `test_bubble_pipeline`) hit the documented headless-sandbox SIGABRT — pre-existing, not introduced by Phase 14A. The UI changes are pure Python branch logic gated on `_exec_manager.armed`; they execute the same on the dev machine where Qt has a display server.
@@ -2770,7 +2401,7 @@ ships with a `requirements.txt` rather than a `pyproject.toml` —
 
 # 2. Acceptance grep gates — first must be empty, second prints
 #    only deprecated-path hits.
-grep -rn "engine\.set_signal_callback(.*on_signal" execution/ ui/ main.py
+grep -rn "engine\.set_signal_callback(.*on_signal" execution/ main.py
 grep -n  "time\.time()"                            execution/execution_manager.py
 
 # 3. Backtest mode (V1-complete) — produces reports/orderflow_*.txt.
@@ -2820,16 +2451,15 @@ later phase." Phase 14B is that phase.
 | File | Change |
 |---|---|
 | `execution/models.py` | NEW `wave_snapshot_to_ofe(snap, ofe_module)` translator — converts a Python `schemas.WaveSnapshot` to an `ofe.WaveSnapshot` (C++ pybind type) by `.name` mapping on enum members (regime, all four permission levels). NEW `compute_realized_vol_from_prices(prices_iterable)` — shared rolling realized-vol helper used by both the UI tick loop and the headless push thread. |
-| `ui/live_trading_session.py` | New `_tide_engine`, `_wave_engine` fields (default-constructed `TideEngine` / `WaveEngine`). New `_enable_layered_strategy` flag (default `True`). New tick-counter cadences `_RV_PUSH_EVERY=10` (1 s), `_WAVE_PUSH_EVERY=50` (5 s), `_TIDE_PUSH_EVERY=600` (60 s). New `_push_layered_strategy()` method called from `on_timer_tick` just before the recorder block — calls `ripple.set_realized_vol(rv)`, `ripple.set_wave_snapshot(ofe_ws)`, `ripple.set_risk_budget(...)` on their respective cadences with per-setter try/except. Trade-drain loop now feeds `WaveEngine.on_price(price, ts)` and a rolling 60-price `_rv_price_buf` for realized vol. |
 | `execution/live_runner.py` | NEW free function `_layered_push_step(state, engine, tide_engine, wave_engine, rv_price_buf, ofe_module, last_trade_ts_holder, rv_every=1, wave_every=5, tide_every=60)` — one push iteration, extracted for direct testability. NEW free function `_run_layered_push_loop(...)` — daemon-thread target that calls `_layered_push_step` once per `push_interval_s=1.0` until `stop_event` is set (wakes promptly via `Event.wait(timeout=...)`). `run_live_execute` gains three new keyword-only params: `tide_engine`, `wave_engine`, `enable_layered_strategy: bool = True`. When the flag is on the runner auto-instantiates default Tide/Wave engines, spawns the push thread, and the WS trade callback now also feeds `wave_engine.on_price(price, ts)` + `rv_price_buf`. The push thread is joined on shutdown after `push_stop_event.set()`. |
 | `main.py:execute` | Passes `enable_layered_strategy=True` explicitly so the CLI path is covered by the acceptance grep gate. |
 | `tests/test_layered_live_wiring.py` | NEW suite — 24 tests across five classes covering: translation fidelity (5), realized-vol math (6), `_layered_push_step` cadence + error isolation + Tide CRISIS propagation (8), `_run_layered_push_loop` shutdown (1), and `run_live_execute` enabled/disabled wiring + WS trade callback feed (4). |
 
 **Acceptance criteria (all green).**
 
-1. ✅ `grep -rn "set_risk_budget" ui/ execution/ main.py` returns 4 production hits across two files (`ui/live_trading_session.py`, `execution/live_runner.py`).
-2. ✅ `grep -rn "set_wave_snapshot" ui/ execution/ main.py` returns 4 production hits + 1 docstring reference in `execution/models.py`.
-3. ✅ `grep -rn "set_realized_vol" ui/ execution/ main.py` returns 6 production hits across two files.
+1. ✅ `grep -rn "set_risk_budget" execution/ main.py` returns 4 production hits across two files (`ui/live_trading_session.py`, `execution/live_runner.py`).
+2. ✅ `grep -rn "set_wave_snapshot" execution/ main.py` returns 4 production hits + 1 docstring reference in `execution/models.py`.
+3. ✅ `grep -rn "set_realized_vol" execution/ main.py` returns 6 production hits across two files.
 4. ✅ New 24 tests pass; existing Tide / Wave / live-trading-session / execution-manager / live-runner suites stay green (444 / 444 in the Phase 14B regression sweep, runtime ≈ 14 s).
 5. ✅ Tide CRISIS (`risk_multiplier=0.0`) propagates verbatim through to `ripple.set_risk_budget(...)` — pinned by `TestLayeredPushStep.test_tide_crisis_propagates_to_set_risk_budget`.
 6. ✅ `enable_layered_strategy=False` restores pre-14B behaviour exactly — pinned by two regression tests in `TestRunLiveExecuteLayeredWiring`.
@@ -2859,9 +2489,9 @@ instructions in §7.1 above):
 
 # 2. Acceptance grep gates — each must show at least one production
 #    hit outside tests/.
-grep -rn "set_risk_budget"    ui/ execution/ main.py
-grep -rn "set_wave_snapshot"  ui/ execution/ main.py
-grep -rn "set_realized_vol"   ui/ execution/ main.py
+grep -rn "set_risk_budget"    execution/ main.py
+grep -rn "set_wave_snapshot"  execution/ main.py
+grep -rn "set_realized_vol"   execution/ main.py
 
 # 3. Live UI mode — open the strategy diagnostics panel, watch the
 #    Tide / Wave snapshot fields populate from real engine state
@@ -2914,7 +2544,6 @@ a trade internally.
 |---|---|
 | `execution/models.py` | NEW `intent_risk_block_reason(intent, ofe_engine, *, current_position_usd=0.0, ofe_module=None) -> Optional[str]`. Single source of truth for the Python-side mirror of the C++ Wave/Risk gate. Reads `engine.get_strategy_snapshot()` to consult Wave `PermissionSet.size_fraction(arch, side)`, the `RiskBudgetSnapshot` (`es_budget`, `consumed_es`, `risk_multiplier`, `max_position_usd`), and the caller-supplied `current_position_usd`. Exits + cancels short-circuit unconditionally so V1 always allows risk-reducing flows. |
 | `execution/live_runner.py` | `_ripple_cb` now calls `intent_risk_block_reason(intent, engine, current_position_usd=abs(exec_mgr.current_qty) * intent.reference_price, ofe_module=ofe_module)` BEFORE invoking `exec_mgr.on_intent`. When the gate returns a reason it logs a single-line `V1 §22.2 #12 gate blocked intent: action=… reason=…` warning and drops the intent. Identical wiring in both code paths (recorder-attached vs not). |
-| `ui/main_window.py` | Same gate added to the `StrategyMode.LIVE` branch of `_on_ripple_received` so the desktop UI's live execute mode honours the contract identically to the headless runner. |
 | `tests/test_live_execution_v1_compliance.py` | NEW 18-test suite across three classes. `TestV1LiveExecutionCompliance` (8 tests) — end-to-end acceptance with real `OrderFlowEngine` + real `ExecutionManager` + `StubBroker`. `TestIntentRiskBlockReasonHelper` (7 tests) — focused unit tests for the gate helper. `TestLiveRunnerGateIntegration` (2 tests) — proves the gate is actually wired into `live_runner._ripple_cb` (drives a synthetic Ripple decision through the runner's registered callback and confirms `exec_mgr.on_intent` is/is-not called per gate state). |
 
 **Acceptance criteria (all green).**
@@ -2935,7 +2564,7 @@ a trade internally.
 **Validation results:**
 - `tests/test_live_execution_v1_compliance.py`: 18 / 18 OK in 0.08 s.
 - Phase 14C regression sweep (21 suites, 473 tests): 473 / 473 OK in 13.9 s.
-- Gate grep (`grep -rn "intent_risk_block_reason" execution/ ui/ main.py`) returns the helper definition (`execution/models.py:313`), the headless wiring (`execution/live_runner.py:294`), and the UI wiring (`ui/main_window.py:1116`). No unwired call-sites.
+- Gate grep (`grep -rn "intent_risk_block_reason" execution/ main.py`) returns the helper definition (`execution/models.py:313`), the headless wiring (`execution/live_runner.py:294`), and the UI wiring (`ui/main_window.py:1116`). No unwired call-sites.
 
 **User validation commands** (assumes `.venv` set up per Phase 14A
 instructions in §7.1 above):
@@ -2957,7 +2586,7 @@ instructions in §7.1 above):
 # 2. Phase 14C acceptance gate — gate helper must be wired into both
 #    live entry points (headless + UI). Each grep must show ≥ 1
 #    production hit outside tests/.
-grep -rn "intent_risk_block_reason" execution/ ui/ main.py
+grep -rn "intent_risk_block_reason" execution/ main.py
 
 # 3. Phase 14C "no skips" gate — the new acceptance suite must run
 #    every test under the C++ orderflow_engine module, no skips.
@@ -3045,12 +2674,8 @@ Phase 14F closes all five without re-opening V2/V3 scope.
 | `tests/test_live_runner.py` | **14F.1** — `_StubExecMgr` no longer mirrors `on_signal`; the legacy "exec_mgr.on_signal not called" assertion was rewritten as `hasattr(stub, "on_signal") is False`. |
 | `tests/test_strat_params_audit.py` | **14F.2** — **NEW FILE.** 7 audit tests pinning the forward + reverse `STRAT_PARAMS` / `ParamSpec` ↔ dataclass-field contracts for `WaveStrategyParams` × `WaveOptimiserConfig` and `TideStrategyParams` × `TideOptimiserConfig`, plus a cross-check that `STRAT_PARAMS["orderflow"]`'s Wave subset still maps to `schemas.WaveConfig`. Explicit "fixed / not optimised" whitelists with one-line justifications per field. |
 | `tests/test_live_trading_session.py` | **14F.3** — 12 new tests (`TestPushLayeredStrategyDisabled`, `TestPushLayeredStrategyCadence`, `TestPushLayeredStrategySnapshotTranslation`, `TestPushLayeredStrategyCounterStall`) pinning the RV/Wave/Tide cadences (10 / 50 / 600 timer ticks ⇒ 1 s / 5 s / 60 s), the snapshot translation through `wave_snapshot_to_ofe`, counter-stall on `get_ripple()` failure, and counter parity with `execution.live_runner._layered_push_step`. Resolves the Phase 10 "untested `on_timer_tick`" known limitation at the layered-push surface. |
-| `ui/live_trading_session.py` | **14F.4** — Added `_last_block_reason` / `_last_block_ts_ms` / `_block_count` / `_block_counts_by_reason` session state plus a `record_block(reason, ts_ms)` setter and `block_status()` accessor. **14F.5** — Added a `layered_push_status()` accessor that returns `{tide, wave, rv}` push counts for the dashboard wiring indicator. |
-| `ui/main_window.py` | **14F.4** — `_on_ripple_received` calls `self._session.record_block(block, intent.timestamp)` after the warning log when `intent_risk_block_reason` returns a non-None reason. `_on_timer_tick` proxies `block_status()` ⇒ `update_block_status(...)` and `layered_push_status()` ⇒ `update_wiring(...)` to the dashboard on every UI tick. **14F.1** — Comment block describing the legacy signal-driven route refreshed to record the removal. |
-| `ui/strategy_dashboard_view.py` | **14F.4** — New `_RiskGateStatusBar` widget displays "Last block: REASON Xs ago \| Blocked this session: N" with an orange highlight for blocks <10 s old. **14F.5** — New `_LayeredWiringIndicator` widget shows three `Tide ● / Wave ● / RV ●` indicators that flip from grey `○ default` to green `● live` once the corresponding push count crosses zero (one-way: a transient zero after a successful push does NOT revert the indicator). Both widgets are composited into the bottom of `StrategyDashboardView`; `update_block_status` / `update_wiring` proxy methods added. |
 | `tests/test_strategy_dashboard.py` | **14F.4 + 14F.5** — 16 new checks across the risk-gate diagnostics (9) and the layered-wiring indicator (7). Cover idle text, reason + count rendering, age formatting (seconds and minutes), color thresholds, idle reset on count=0, dashboard proxy method routing, session-level `record_block` per-reason counters, and the one-way `● live` flip invariant. |
 | `implementation_plan.md` | **14F.6** — Replaced two stale "don't switch BINANCE_TESTNET to false until 14D + 14E ship" bash commentary blocks (~lines 2786, 2872) with post-GA wording. Refreshed the Phase 2 line 606 note about Tide/Wave to reflect post-14B live wiring. Added Phase 14F to §7.1 status table. Updated §2.2 (event-time discipline) and the §2.3 known-limitation rows for Phase 10 `on_timer_tick` and Phase 13Y STRAT_PARAMS audit to "closed by 14F". |
-| `UI_STRATEGY_INTEGRATION_PLAN.md` | **14F.6** — §12.2 candle row updated from "Partially wired" to "Wired (Phase A — completed)". §10.3 "All Active" filter spec line marked as V1.1 deferred (paired with §15.3 polish), with explicit acknowledgement that the existing Strategy filter is sufficient for V1 GA. |
 
 **Acceptance — verified.**
 
@@ -3116,7 +2741,7 @@ satisfied. This checklist is derived from the V1 lesson that
 | 1 | **Docs updated** | `strategy.md` unchanged (or updated if spec drifts); `implementation_plan.md` phase status updated to `DONE`; `TESTING_GUIDE.md §19.1` table updated. |
 | 2 | **Unit tests added** | New test file(s) in `tests/` and/or `backtestingCpp/.../tests/` covering all new code paths. |
 | 3 | **Wiring tests added** | A test that instantiates `live_runner.py` or `live_trading_session.py` (or a stub equivalent) and asserts the new API surface is called on the engine. |
-| 4 | **Runtime wiring proven** | `grep -r "<new_api>" execution/ ui/` returns ≥ 1 production-code hit outside `tests/`. |
+| 4 | **Runtime wiring proven** | `grep -r "<new_api>" execution/` returns ≥ 1 production-code hit outside `tests/`. |
 | 5 | **Replay determinism verified** | Existing `test_replay_determinism.py` passes unchanged; if the phase affects decisions, a new replay test case is added. |
 | 6 | **Default fallback verified** | A test asserts that with the new feature's config flag at its default (`False` / empty), outputs are byte-identical to the V1 baseline. |
 | 7 | **No skipped acceptance tests** | Every numbered acceptance criterion in the phase spec has a corresponding passing test. |
@@ -3205,7 +2830,7 @@ reference.
 9. OCO sibling cancellation: after one leg fills, the other is `CANCELLED`.
 10. `paper_engine_parity`: all Phase 15 behaviors are tested in `PaperEngine` before `BinanceBroker` live routing is implemented.
 11. All existing Phase 14 acceptance tests pass byte-identically.
-12. **Wired live?** `grep -r "place_order.*LIMIT\|OrderType\.LIMIT" execution/ ui/` returns ≥ 1 production-code hit.
+12. **Wired live?** `grep -r "place_order.*LIMIT\|OrderType\.LIMIT" execution/` returns ≥ 1 production-code hit.
 
 **Replay determinism.** LIMIT order placement and partial-fill simulation
 must be deterministic: given the same event sequence and `reference_price`
@@ -3654,7 +3279,7 @@ validation, the system must:
 6. Invalid model path + `wave_hmm_fail_fast=True` → `SystemExit(1)`.
 7. A/B backtest: Wave HMM ≥ rule-based on ≥ 1 metric (Sharpe or win_rate) across ≥ 2 of the Phase 16 campaign (symbol, window) pairs.
 8. All existing `tests/test_wave_engine.py` and `tests/test_crossvenue_wave.py` tests pass unchanged.
-9. **Wired live?** `grep -r "wave_hmm_enabled\|HMMWaveInference" wave/ execution/ ui/` returns ≥ 1 production-code hit outside `tests/`.
+9. **Wired live?** `grep -r "wave_hmm_enabled\|HMMWaveInference" wave/ execution/` returns ≥ 1 production-code hit outside `tests/`.
 10. UI/diagnostic exposure: Wave HMM regime label and posterior probabilities exposed as **read-only snapshot fields only** (via `WaveSnapshot`). They must not be a decision path.
 
 ---
@@ -3699,7 +3324,6 @@ from permanently boosting evidence scores when the Oanda feed lags.
 | `backtestingCpp/orderflow/RippleEngine.h/.cpp` | Add `set_crossvenue_snapshot(CrossVenueSnapshot)` setter. In evidence scoring: when `cv.available && (now_ms - cv.snapshot_ts_ms) <= cv_stale_threshold_ms`, add `cv.divergence_pct × cross_venue_divergence_boost` to absorption evidence; subtract `cv.correlation_30m × cross_venue_correlation_boost` from exhaustion evidence. Both boost factors configurable (default `0.0` → V1-identical). When stale or `!cv.available`, evidence path is byte-identical to V1. |
 | `backtestingCpp/bindings.cpp` | Expose `CrossVenueSnapshot` and `RippleEngine.set_crossvenue_snapshot` via pybind11. |
 | `execution/live_runner.py` | Call `engine.set_crossvenue_snapshot(cv_snap)` inside `_layered_push_step` on each Oanda L1 update (cadence ≤ 5 s). Reuse existing layered-push primitives. |
-| `ui/live_trading_session.py` | Same push inside `_push_layered_strategy`. |
 | `crossvenue/oanda_feed.py` | Extend to expose `last_crossvenue_snapshot() -> CrossVenueSnapshot`. `snapshot_ts_ms` uses the Oanda L1 event timestamp (not `time.time()`). |
 | `tests/test_ripple_crossvenue.py` | NEW. Tests: `set_crossvenue_snapshot({available=False})` → evidence scores byte-identical to V1; `available=True` + `divergence_pct > 0` + boost factor > 0 → absorption evidence increases; stale snapshot (`snapshot_ts_ms` old) → treated as `available=False`; replay determinism with stored cross-venue CSV (feed from `tests/fixtures/crossvenue_sample.csv`); pybind11 binding round-trip for `CrossVenueSnapshot`; wiring test: `live_runner._layered_push_step` calls `engine.set_crossvenue_snapshot`. |
 
@@ -3712,7 +3336,7 @@ from permanently boosting evidence scores when the Oanda feed lags.
 5. Replay with stored cross-venue CSV (`tests/fixtures/crossvenue_sample.csv`) produces identical decisions across two runs.
 6. `CrossVenueSnapshot` pybind11 binding round-trip is lossless.
 7. All existing Phase 8 (`test_crossvenue_engine.py`, `test_crossvenue_wave.py`) tests pass unchanged.
-8. **Wired live?** `grep -r "set_crossvenue_snapshot" execution/ ui/` returns ≥ 2 hits (one in `live_runner.py`, one in `live_trading_session.py`).
+8. **Wired live?** `grep -r "set_crossvenue_snapshot" execution/` returns ≥ 2 hits (one in `live_runner.py`, one in `live_trading_session.py`).
 9. `snapshot_ts_ms` is populated from the Oanda event timestamp; never from `time.time()`.
 
 ---
@@ -3761,7 +3385,7 @@ this before publishing `EulerBudgetSnapshot`.
 5. `EulerBudgetSnapshot` pybind11 binding round-trips without loss.
 6. `set_euler_budget` called on every 60 s Tide tick in both `live_runner.py` and `live_trading_session.py`.
 7. All existing `tests/test_risk_engine.cpp` and `tests/test_risk_bindings.py` tests pass unchanged.
-8. **Wired live?** `grep -r "set_euler_budget" execution/ ui/` returns ≥ 2 production-code hits.
+8. **Wired live?** `grep -r "set_euler_budget" execution/` returns ≥ 2 production-code hits.
 9. Phase 14C risk-gate regression: identical Phase 14C event replay with `euler_cells=[]` produces identical PnL and exit decisions as V1 baseline.
 
 ---
@@ -3817,482 +3441,7 @@ If `logistic_fail_fast=True` is set, process exits with code 1.
 9. Replay determinism: given the same event sequence with model loaded, scores are identical across two runs.
 10. A/B metric gate: logistic calibration ≥ deterministic thresholds on ≥ 1 metric (hold accuracy or break accuracy) on the held-out test set before the model is promoted to `models/`.
 11. All existing `test_liquidity_map.cpp` (C++) and `test_lmap_logistic.py` (Python) tests pass.
-12. **Wired live?** `grep -r "load_logistic_model\|logistic_enabled" execution/ ui/` — note: Phase 20 changes the `LiquidityMapEngine` used inside the C++ hot path; the Python wiring test asserts that `engine.load_logistic_model` is called during strategy initialization when `logistic_enabled=True`.
-
----
-
-### Phase 15–20 UI Alignment Notes
-
-The following rules govern how V2 strategy backend phases interact with
-V2 UI phases (8, 9, 10, 11). They are cross-references only; the full
-UI specs live in `UI_STRATEGY_INTEGRATION_PLAN.md`.
-
-1. **Phase 8 first.** UI accuracy and polish (Phase 8 — candlestick
-   preload, strategy-attributed PnL, signal log accuracy) should be
-   complete before the QML migration (Phase 9) begins. Phase 8 fixes
-   apply to the existing QWidget UI and must not be re-done in QML.
-2. **Phase 9 QML migration is UI-only.** Phase 9 must not change any
-   strategy behavior, decision paths, or data contracts. The migration
-   is a pure rendering-stack change. Any new strategy state exposed to
-   the UI during Phase 9 must be **read-only snapshot/diagnostic state**
-   sourced from `StrategySnapshot` — never a decision path.
-3. **Phase 10 process isolation preserves execution safety.** The
-   ZeroMQ IPC layer (Phase UI-10B) must not introduce new latency into
-   execution decisions. The engine subprocess runs without any UI
-   dependency. If the IPC channel is unavailable, the engine continues
-   with its last armed state — it does not pause execution.
-4. **Phase 10 preserves replay determinism.** The ring-buffer drain
-   architecture (Phase UI-10A) must not alter the order in which events
-   are processed by the strategy layers. The engine's event loop is
-   unchanged; only the render loop changes.
-5. **V2 strategy state exposed to the UI must be read-only.** Any
-   field added to `StrategySnapshot` in Phases 15–20 (e.g., LIMIT order
-   lifecycle, Wave HMM posterior, cross-venue snapshot, Euler cell
-   budgets, logistic scores) is surfaced as a diagnostic display only.
-   The UI must not write to or modify these fields.
-
----
-
-## 7.3 V2 UI Phases (8, 9, 10 & 11)
-
-**Deployment target for all UI phases:** Ubuntu 24.04 LTS on AWS EC2
-g5.xlarge (NVIDIA A10G GPU), rendered remotely via NICE DCV.
-All UI work must conform to `AGENT_STRATEGY_RULES.md §22`.
-Full spec for each phase lives in `UI_STRATEGY_INTEGRATION_PLAN.md`.
-
-### 7.3.1 Phase 8 — Accuracy & First-Impression Polish
-
-Three user-identified UI gaps make the live interface misleading or
-incomplete after V1 GA. Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §16.
-
-**Phase 8 GA gate:** Sub-phases 8A + 8B + 8C all complete.
-
-| Sub-phase | Name | Status | Dependency |
-|---|---|---|---|
-| **8A** | Candlestick Historical Preload | `NOT STARTED` | Phase 6 UI (DONE) |
-| **8B** | Strategy-Attributed PnL & Trade Tracking | `NOT STARTED` | Phase 14A `ExecutionManager` (DONE) |
-| **8C** | Signal Log Accuracy — Gate Legacy + Tide/Wave Events | `NOT STARTED` | Phase 14B snapshot push (DONE) |
-
-**Problems addressed (summary):**
-
-- **8A — Candlestick preload:** `CandleChartView` starts empty on
-  connect; no historical REST or HDF5 load. Chart shows "Waiting for
-  candle data…" for up to 80 minutes at 1 m timeframe. Fix: async
-  Binance klines REST fetch on connect and on timeframe change.
-- **8B — Strategy PnL:** `AccountPanel` computes realized PnL via
-  naive FIFO order matching, not strategy-attributed fills from
-  `ExecutionManager`. Fix: wire to `session_realized_pnl` and
-  `session_trade_count`.
-- **8C — Signal log accuracy:** Legacy signals flood the blotter;
-  Tide/Wave transitions are never logged; exits carry no PnL. Fix:
-  gate legacy signals, emit `TIDE`/`WAVE` change events, annotate
-  exits with PnL delta.
-
----
-
-### 7.3.2 Phase 9 — Qt Quick/QML Migration, GPU Acceleration & UI Cleanup
-
-**Architectural pivot:** The entire UI rendering stack moves from
-`QWidget` + `QPainter` (CPU raster) to **Qt Quick / QML** with an
-OpenGL scene graph backend. This aligns with the Linux/AWS/NICE DCV
-deployment target. Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §22.
-
-**Phase 9 GA gate:** All four sub-phases complete. GPU backend verified
-(`QSGRendererInterface` ≠ `Software`). Frame budget P95 < 20 ms at 60 FPS.
-
-| Sub-phase | Name | Status | Dependency |
-|---|---|---|---|
-| **9A** | QML Scaffold & GPU Backend Setup | `DONE — 2026-05-14` | Phase 8 (parallel) |
-| **9B** | Chart Widgets → QML (`QQuickPaintedItem` bridge) | `DONE — 2026-05-14` | 9A |
-| **9C** | Strategy Dashboard → QML + Trade Indicators | `DONE — 2026-05-14` | 9B + Phase 8B |
-| **9D** | Dead Element Audit & Toolbar Cleanup | `DONE — 2026-05-14` | 9A (parallel with 9B) |
-
-**Problems addressed (summary):**
-
-- **9A — QML scaffold:** Replace `QWidget`-based `QApplication` with
-  `QGuiApplication` + `QQmlApplicationEngine`. Force OpenGL scene graph
-  backend (`QSG_RHI_BACKEND=opengl`). Add startup GPU verification
-  check per `AGENT_STRATEGY_RULES.md §22.2`. Establish QML component
-  directory structure (`ui/qml/`). Set `QQuickWindow::setMaximumFrameLatency(1)`
-  for NICE DCV frame pacing.
-- **9B — Chart widgets to QML:** Migrate `HeatmapWidget`,
-  `CandleChartView`, `CVDWidget`, `VolumeProfileWidget` to
-  `QQuickPaintedItem` subclasses (bridge tier) that render inside the
-  QML scene graph. This alone eliminates the per-frame CPU→GPU pixel
-  buffer upload. Static candle history cached as `QSGGeometryNode`
-  vertex data updated only on bucket close. Heatmap depth image
-  converted to `QSGTexture` (GPU-resident) updated once per computed
-  frame.
-- **9C — Strategy dashboard to QML + trade indicators:** Migrate
-  `StrategyDashboardView`, `StrategyDiagnosticsPanel`, `TradeBlotter`
-  to QML components backed by `QAbstractListModel` C++ models.
-  Add `PositionCard` QML component (entry/stop/target/R:R/PnL).
-  Add trade ENTRY/EXIT markers and horizontal overlay lines to the
-  candle chart QML component.
-- **9D — UI cleanup:** Remove hidden legacy stubs (`_tick_size_input`,
-  `_imbalance_input`, disabled "Replay" mode). Consolidate duplicate
-  candle-duration controls. Add overlay toggle buttons. Surface
-  `_SuppressionMetrics` to status area. No new `QWidget` subclasses.
-
-**Phase 9A — DONE 2026-05-14.**
-
-- `ui/app.py` — replaced `QApplication` + `MainWindow` with
-  `QGuiApplication` + `QQmlApplicationEngine`.  Adds
-  `_configure_rhi_backend()` (Darwin → Metal, Linux → OpenGL + xcb;
-  shell overrides via `setdefault` win), `_check_gpu()` (logs ERROR
-  + flips QML root `gpuWarning` on Software / Unknown), and a
-  `--legacy-widgets` opt-in that keeps the QWidget shell launchable
-  while 9B/9C migrate the chart and dashboard surfaces.
-- `ui/qml/main.qml` *(new)* — `ApplicationWindow` (OrderFlow) plus
-  two detachable `Window` items (Chart, Strategy), all three
-  visible at startup with stub components composed inside.
-- `ui/qml/components/{HeatmapView,CandleChartView,CvdView,VolumeProfileView,StrategyDashboard,PositionCard,TradeBlotter}.qml`
-  *(new)* — Phase 9A placeholders annotated `// TODO Phase 9B/9C`.
-- `ui/models/snapshot_model.py` *(new)* —
-  `SnapshotModel(QObject)` exposing `tideBias`, `waveRegime`,
-  `riskBudgetPct`, `unrealizedPnl`, `tradeState` as
-  `Q_PROPERTY`; `update_from_snapshot()` mirrors
-  `StrategySnapshot`.
-- `tests/test_qml_scaffold.py` *(new)* — 25 unittest cases
-  (`TestConfigureRhiBackend`, `TestQmlEngineLoads`, `TestCheckGpu`,
-  `TestCheckGpuEndToEnd`, `TestSnapshotModel`,
-  `TestLegacyWidgetPathsImportable`).  All AC #1–#6 covered;
-  subprocess end-to-end forces `QSG_RHI_BACKEND=software` to
-  prove the FATAL log fires for every QQuickWindow.
-- Regression: 25/25 new scaffold + 72/72 broader unittest UI
-  suites + 163/163 `test_strategy_ui` + 113/113
-  `test_strategy_dashboard` + 38/38 `test_ui_cleanup` all green.
-
-**Phase 9B — DONE 2026-05-14.**
-
-- `ui/app.py` — `_run_qml` switched from `QGuiApplication` to
-  `QApplication` (still IS-A `QGuiApplication`) so the bridge tier
-  can host hidden `QWidget` instances and delegate paint to
-  `QWidget.render(painter, QPoint())`.  `_register_qml_types`
-  exposes `HeatmapItem` / `CvdItem` / `VolumeProfileItem` /
-  `CandleItem` under the `Trading.Items 1.0` namespace.
-- `ui/items/_widget_bridge.py` *(new)* —
-  `WidgetBridgeItem(QQuickPaintedItem)` that wraps a hidden
-  `QWidget`, resizes it on geometry change, and routes `paint()`
-  through `QWidget.render(painter, QPoint())`.  Tagged
-  `# TODO Phase 9B-final: migrate to QSGNode`.
-- `ui/items/heatmap_item.py`, `cvd_item.py`,
-  `volume_profile_item.py` *(new)* — bridges over `HeatmapWidget`,
-  `CVDWidget`, `VolumeProfileWidget`.  `HeatmapItem.set_frame()` is
-  the SOLE update entry point (`update()` never fires per-trade —
-  AC #1).
-- `ui/items/candle_item.py` *(new)* — **native** `CandleItem`
-  (`QQuickItem`) with `updatePaintNode` that builds a four-bucket
-  `QSGGeometryNode` tree (bull / bear × body+wick / volume).
-  `_geometry_dirty` is True only on bucket close (or viewport /
-  `visibleCandles` shape change) and cleared by `updatePaintNode`
-  — AC #2.  Live-tick updates take the in-place
-  `markVertexDataDirty()` fast path.
-- `ui/orderflow_viewmodel.py` — added
-  `FrameData.depth_texture_dirty: bool`, set whenever
-  `_compute_depth_image` rebuilds the depth `QImage`.  Phase 9B-final
-  consumes this flag to drive `QQuickWindow.createTextureFromImage()`.
-- `ui/qml/components/{HeatmapView,CandleChartView,CvdView,VolumeProfileView}.qml`
-  — replaces the Phase 9A stubs with the registered items;
-  `CandleChartView.qml` aliases `bucketMs` / `visibleCandles`.
-- `tests/test_qml_chart_items.py` *(new)* — 22 unittest cases
-  covering bridge instantiation, paint route, vertex counts,
-  `_geometry_dirty` semantics, `HeatmapItem.update()` never fires
-  per-trade, and `depth_texture_dirty` plumbing.
-- `tests/test_perf_baseline.py` *(new)* — AC #4 wall-clock baseline
-  measuring 120 frames of synthetic 300 trades/s through
-  `OrderFlowViewModel`, `HeatmapWidget.render`, and
-  `CandleItem.updatePaintNode`.  Reference run (2020 MBP, offscreen):
-  `avg=13.12ms p95=14.64ms max=16.33ms budget=20.0ms`.
-- `tests/test_qml_scaffold.py` — subprocess end-to-end updated to
-  spawn `QApplication` so the bridge widgets created during
-  `_register_qml_types` instantiate when `QSG_RHI_BACKEND=software`
-  is forced.
-- Regression: 22/22 new chart-items + 26/26 Phase 9A scaffold +
-  1/1 perf baseline + 65/65 `test_bubble_pipeline` + 68/68
-  `test_bubble_aggregation` + 158/158 `test_heatmap_continuity` +
-  163/163 `test_strategy_ui` + 113/113 `test_strategy_dashboard` +
-  38/38 `test_ui_cleanup` + 13/13 `test_performance_profile` all
-  green.
-
-**Phase 9C — DONE 2026-05-14.**
-
-- `ui/models/trade_blotter_model.py` *(new)* —
-  `TradeBlotterModel(QAbstractListModel)` with thread-safe
-  `appendEntry` (lock-protected `_pending` deque → queued
-  `QMetaObject.invokeMethod` → GUI-thread `_append_main_thread`).
-  Bounded at 500 rows; FIFO eviction.  QML roles: `timestamp`,
-  `timestampStr`, `layer`, `category`, `signalType`, `side`,
-  `price`, `priceStr`, `strength`, `description`, `realizedPnl`,
-  `realizedPnlStr`, `categoryColor`.
-- `ui/models/position_model.py` *(new)* —
-  `PositionModel(QObject)` with `entryPrice` / `stopPrice` /
-  `targetPrice` / `rrRatio` / `unrealizedPnl` / `sessionPnl` /
-  `tradeStateLabel` / `tradeArchetype` / `tradeSide` /
-  `holdTimeMs` / `active` Q_PROPERTYs.  `update(snap,
-  execution_state)` is the only mutator; setters dedupe on
-  identity.  `active` is True when `tradeStateLabel` contains any
-  of `_ACTIVE_LIFECYCLE_TOKENS = (ACTIVE, EXPAND, CONFIRM, OPEN,
-  FILLED, IN_TRADE)`.
-- `ui/models/snapshot_model.py` — Phase 9C overlay surface:
-  `entryPrice` / `stopPrice` / `targetPrice` / `tradeArchetype`
-  Q_PROPERTYs + aggregate `overlayChanged()` signal.
-  `riskBudgetPct` now derives from `consumed_es / es_budget`
-  with `risk_multiplier` fallback when budget is unknown.
-- `ui/items/candle_item.py` — native scene-graph overlay:
-  `tradeOverlayActive` + `entryPrice` / `stopPrice` /
-  `targetPrice` Q_PROPERTYs; `set_trade_overlay` /
-  `clear_trade_overlay` / `set_trade_events` /
-  `clear_trade_events` setters.  Five new `QSGGeometryNode`
-  children (entry / stop / target dashed lines + entry / exit
-  triangle markers); overlay rebuilds every frame without
-  tripping `_geometry_dirty` (Phase 9B AC #2 preserved).
-- `ui/main_window_bridge.py` *(new)* — `MainWindowBridge` owns
-  `SnapshotModel` + `PositionModel` + `TradeBlotterModel` +
-  `CandleItem` references.  `on_signal_entry(entry)` routes a
-  `SignalEntry` through the blotter (queued) and enqueues an
-  ENTRY / EXIT triangle on the chart for `TRADE_LIFECYCLE` /
-  `EXECUTION` entries.  `on_timer_tick(snap, exec_state)`
-  refreshes every model + drives
-  `CandleItem.set_trade_overlay`.  `clear_session` resets the
-  blotter, position card, chart overlay, and chart markers.
-- `ui/app.py` — `_register_qml_types` exposes `PositionModel`
-  and `TradeBlotterModel` under `Trading.Models 1.0`.
-- `ui/qml/components/{PositionCard,TradeBlotter,StrategyDiagnostics,StrategyDashboard,CandleChartView}.qml`
-  — full Phase 9C layout: solid-background position card (no
-  opacity animations per AC #3), 32-px fixed-height blotter
-  delegates, Tide / Wave / Trade / uPnL / Archetype / ES%
-  diagnostics grid, and chart overlay bindings from
-  `snapshotModel.tradeState` + entry / stop / target.
-- `tests/test_qml_strategy_ui.py` *(new)* — 43 unittest cases
-  covering AC #1–#6: worker-thread blotter, PositionModel
-  update, opacity-free PositionCard/TradeBlotter QML,
-  CandleItem overlay lines + ENTRY x-coordinate, bridge
-  end-to-end, and the 9A→9C regression import guard.
-- `tests/test_perf_baseline.py` — added `_WARMUP_FRAMES = 5`
-  discard + graceful `self.skipTest()` fallback (average is
-  the hard floor; P95 jitter just skips).  Reference run
-  (2020 MBP / offscreen, steady-state): `frames=115
-  avg=13.02ms p95=13.76ms max=14.40ms budget=20.0ms`.
-- Regression: 43/43 new `test_qml_strategy_ui` + 47/47 Phase 9A
-  scaffold + 9B chart items + 1/1 perf baseline + 113/113
-  `test_strategy_dashboard` + 163/163 `test_strategy_ui` +
-  38/38 `test_ui_cleanup` + 158/158 `test_heatmap_continuity` +
-  65/65 `test_bubble_pipeline` + 68/68 `test_bubble_aggregation`
-  + 27/27 `test_chart_overlays` + 15/15 `test_candle_chart_view`
-  + 18/18 `test_candle_preload` + 26/26 `test_signal_log_accuracy`
-  + 13/13 `test_performance_profile` + 28/28 `test_account_panel`
-  all green.
-
-**Phase 9C.1 — DONE 2026-05-15 (live-engine wiring).**
-
-Closes the gap left by Phase 9C: `main.py` → `ui` → `_run_qml`
-now drives the QML windows with the live BTC depth feed, trades,
-candle stream, snapshot + position + blotter, instead of showing
-the empty-state placeholders.  Additive plumbing — production
-data path unchanged.
-
-- `ui/items/_widget_bridge.py` — `WidgetBridgeItem.attach_external_widget`
-  swaps the auto-created widget for a caller-owned one and wraps
-  `widget.update` so any paint-invalidation also marks the QML
-  scene-graph texture dirty (idempotent on re-attach).
-- `ui/qml_engine_host.py` *(new)* — `QmlEngineHost` constructs a
-  hidden `MainWindow` (never shown), attaches its widgets to the
-  QML scene's `HeatmapItem` / `CvdItem` / `VolumeProfileItem`,
-  hands the native `CandleItem` to `MainWindowBridge.set_candle_item`,
-  taps `mw._broadcast_entry` → `bridge.on_signal_entry`, taps
-  `mw._candle_view.process_trade` → QML `CandleItem.process_trade`,
-  connects a second slot on `mw._update_timer.timeout` to push
-  `mw._last_strategy_snap` + `mw._exec_manager`/`mw._paper_engine`
-  into `bridge.on_timer_tick`, and calls `mw._on_connect()` so the
-  WebSocket feed starts immediately.  `--no-live` skips it.
-- `ui/app.py` — `_run_qml(no_live=False)` instantiates the host
-  after QML loads; CLI plumbing in `_parse_args` / `main`.
-- `tests/test_qml_engine_host.py` *(new)* — 21 unittest cases
-  covering attach-external-widget swap + update hook + idempotency
-  (AC #A), item resolution (AC #B), widget re-use (AC #B),
-  broadcast-entry tap reaching both QML and legacy blotters
-  (AC #C), candle process-trade tap reaching both candle stores
-  (AC #D), timer-tick tap driving Snapshot/Position models (AC
-  #E), graceful handling of no-roots / MainWindow init failure
-  (AC #F).
-- Regression: 21/21 new `test_qml_engine_host` + 115/115 QML
-  scaffold/chart/strategy + 847/847 broader UI suites + perf
-  baseline (avg 14.04 ms / p95 14.10 ms / budget 20 ms) all green.
-- Operational note: hidden MainWindow keeps its toolbar defaults
-  (`BTCUSDT`, tick_size `0.01`, imbalance `3.0`, mode `Live`).  A
-  QML toolbar surface is Phase 9D scope.
-- macOS backend note: `_configure_rhi_backend` defaults Darwin
-  to **OpenGL + basic render loop** (NOT Metal).  Two issues:
-
-  (1) Qt 6 defaults to `QSG_RENDER_LOOP=threaded` on macOS,
-      which races `QQuickPaintedItem.paint` against the GUI
-      thread and produces `setParent ... different thread`
-      warnings.  `basic` keeps paint() on the GUI thread.
-
-  (2) Even with `basic`, the Metal backend rejects PySide6's
-      `QSGGeometry.defaultAttributes_Point2D()` output: the
-      Metal `QSGFlatColorMaterial` vertex shader declares
-      `[[attribute(0)]] float2 vertexCoord`, but the binding
-      doesn't tag slot 0 with that name, so every frame the
-      `CandleItem` has geometry, Metal logs
-      `Failed to create render pipeline state: Vertex attribute
-      vertexCoord(0) is missing from the vertex descriptor`.
-      Internal state corrupts after ~5 s → bus error.  OpenGL
-      via Apple's 4.1 compatibility profile is fine and is also
-      the production Linux/NICE DCV backend.  Phase 9B-final
-      will replace `QSGFlatColorMaterial` with a custom shader
-      that explicitly names its vertex attribute, after which
-      Metal becomes viable again.
-
-  Both values use `setdefault` so shell overrides win.
-  Linux/NICE DCV stays on `opengl` + `threaded` for the 60 FPS
-  budget.
-
-**Phase 9D — DONE 2026-05-14 (Dead Element Audit & Toolbar Cleanup).**
-
-Closes the last sub-phase of Phase 9.  Replaces hidden / disabled
-QWidget toolbar controls with a QML-native toolbar driven through
-`MainWindowBridge`, and surfaces ripple suppression metrics in the
-strategy diagnostics panel.
-
-- `ui/main_window.py` — removed `_tick_size_input`,
-  `_tick_size_label`, `_imbalance_input`, `_imbalance_label`,
-  `_candle_combo`, and the disabled `_mode_combo` "Replay"
-  entry.  `tick_size` (`0.01`) and `imbalance` (`3.0`) are
-  now hardcoded in `_on_connect`; replay flows live in the CLI
-  `backtest` mode.  `_on_candle_changed` was replaced by a
-  public mutator `set_candle_duration_ms(int)` that the QML
-  toolbar drives.
-- `ui/chart_overlays.py` — every overlay class
-  (`SmaOverlay`, `EmaOverlay`, `VwapOverlay`,
-  `StructuralLevelsOverlay`, `VolProfileOverlay`) gained
-  `OVERLAY_NAME: ClassVar[str]` + `enabled: bool = True`.
-- `ui/candle_chart_view.py` —
-  `CandleChartView._draw_overlays_fn` skips overlays where
-  `enabled=False`.  New methods
-  `set_overlay_enabled(name, bool)` and
-  `overlay_enabled_state()` provide the bridge entry point.
-- `ui/models/suppression_model.py` *(new)* —
-  `SuppressionModel(QObject)` with Q_PROPERTYs `emitted`,
-  `cooldownSuppressed`, `dedupeSuppressed`, `modeSuppressed`,
-  `confidenceSuppressed`, `inventorySuppressed`,
-  `totalSuppressed`, `summary` (formatted multi-line string for
-  the diagnostics tooltip).  Update via `update(metrics)`
-  dedupes notify signals.
-- `ui/main_window_bridge.py` — Phase 9D additions:
-  `set_main_window(mw)`, `setCandleBucketMs(int)` slot (routes
-  to `MainWindow.set_candle_duration_ms` AND
-  `CandleItem.bucketMs`), `setOverlayEnabled(name, bool)` slot
-  (routes to `MainWindow._candle_view.set_overlay_enabled`).
-  `on_timer_tick` refreshes the `SuppressionModel` from
-  `MainWindow._ripple_metrics` every tick;
-  `clear_session` resets it.
-- `ui/qml_engine_host.py` — `start()` calls
-  `bridge.set_main_window(mw)` so the toolbar slots resolve.
-- `ui/app.py` — registers `SuppressionModel` under
-  `Trading.Models 1.0` + exposes `suppressionModel` as a
-  root-context property in `_install_bridge_context`.
-- `ui/qml/components/CandleChartView.qml` — wrapped the chart
-  in a `ColumnLayout` with a 32-px toolbar row on top:
-  candle-duration `ComboBox` (1m / 5m / 15m / 30m / 1h) +
-  overlay `CheckBox` row (SMA / EMA / VWAP / H/L / VP).
-  Selections persist via `QtCore.Settings { category:
-  "Phase9D/ChartOverlays" }` (Qt 6 deprecated
-  `Qt.labs.settings`; `QtCore` is the replacement path).
-- `ui/qml/components/StrategyDiagnostics.qml` — added the
-  "Ripples" row (objectName `suppressionRow`) showing
-  `emitted / -totalSuppressed` with a `HoverHandler`-driven
-  `ToolTip` bound to `suppressionModel.summary`.
-- `tests/test_qml_toolbar.py` *(new)* — 43 unittest cases:
-  `TestMainWindowDeadElementsRemoved` (6), Bridge routing
-  (5+4), QML static inspection (5+2), overlay enabled flag
-  semantics (5), suppression model + diagnostics (7+3+3+3
-  regression import guards).  All AC #1–#4 covered.
-- `tests/test_ui_cleanup.py` — Phase 3's "hidden but present"
-  tests were superseded by Phase 9D's full removal; the suite
-  now asserts `not hasattr(w, "_tick_size_input")` etc. and
-  that `_mode_combo.count() == 1`.  Net total 33 tests.
-- `tests/test_integration_e2e.py::test_strategy_state_gates_ui`
-  — updated to the Phase 9D `not hasattr` form.
-- Regression: 43/43 new `test_qml_toolbar` + 158/158 full QML
-  suite + 33/33 `test_ui_cleanup` + 113/113
-  `test_strategy_dashboard` + 163/163 `test_strategy_ui` +
-  27/27 `test_chart_overlays` + 15/15 `test_candle_chart_view`
-  + 55/55 `test_integration_e2e` all green.  Lint clean.
-
-**Phase 9 GA gate status (post-9D):** 9A + 9B + 9C + 9C.1 +
-9D code-complete with passing offscreen test suites.  Runtime
-stability of the bridge tier on local macOS remains a known
-issue (see the Phase 9C.1 macOS notes above) and will be
-addressed in Phase 9B-final by replacing the
-`QQuickPaintedItem` bridges with native `QSGTextureNode`
-items.
-
----
-
-### 7.3.3 UI Phase 10 — Decoupled Render Loop & Engine Process Isolation
-
-> **Note:** "UI Phase 10" is a V2 UI roadmap phase. It is distinct from the
-> completed strategy Phase 10 (Live Path Hardening) documented at §5.
-
-Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §23.
-
-**UI Phase 10 GA gate:** Sub-phases UI-10A + UI-10B both complete.
-Engine continues executing live orders for ≥ 5 minutes after UI process
-is `kill -9`'d. UI reconnects and shows correct state after restart.
-
-| Sub-phase | Name | Status | Dependency |
-|---|---|---|---|
-| **UI-10A** | Decoupled 60 FPS Render Loop | `NOT STARTED` | Phase 9A (QML scaffold) |
-| **UI-10B** | Engine Service Process Isolation (ZeroMQ IPC) | `NOT STARTED` | UI-10A (ring-buffer boundary) |
-
-**Problems addressed (summary):**
-
-- **UI-10A — Render loop:** All market data (trades, depth, ripple,
-  snapshots) written to thread-safe ring buffers by WS/engine threads.
-  QML scene graph `frameSwapped` signal drives a 16 ms (60 FPS) drain
-  cycle. Each `QQuickItem` receives at most one `markDirty()` / property
-  update per frame. 100 ms strategy ops (Tide/Wave push, status refresh)
-  driven by a frame-counter accumulator. Per-event UI updates removed.
-- **UI-10B — Process isolation:** Engine extracted to standalone
-  `engine_service.py` subprocess. State/events flow via ZeroMQ PUB
-  (port 55001). Control commands (ARM/DISARM/CONNECT) via ZeroMQ REP
-  (port 55002). UI-absent timeout: engine continues trading for 30 s
-  after losing control connection. Engine service managed by systemd
-  (`Restart=on-failure`). UI starts headlessly; operator connects on
-  demand via `--engine-addr`.
-
----
-
-### 7.3.4 Phase 11 — Linux / AWS / NICE DCV Production Deployment
-
-Full spec: `UI_STRATEGY_INTEGRATION_PLAN.md` §24.
-
-**Phase 11 GA gate:** Engine and UI running unattended on Ubuntu 24.04
-g5.xlarge via NICE DCV for 72 hours with zero manual restarts.
-
-| Sub-phase | Name | Status | Dependency |
-|---|---|---|---|
-| **11A** | NVIDIA Driver & Qt 6 Setup | `NOT STARTED` | Phase 9A (QML scaffold) |
-| **11B** | NICE DCV Rendering Optimisation | `NOT STARTED` | Phase 9B (QML charts) |
-| **11C** | Systemd Engine & UI Service Files | `NOT STARTED` | Phase UI-10B |
-| **11D** | Observability & GPU Diagnostics | `NOT STARTED` | Phase 11C |
-
-**Problems addressed (summary):**
-
-- **11A:** Install script for Ubuntu 24.04: NVIDIA driver ≥ 535,
-  CUDA 12, Qt 6.6 from `qt6-base-dev`, NICE DCV server ≥ 2023.1.
-  `QT_QPA_PLATFORM=xcb` environment configuration. OpenGL 4.5 context
-  assertion at startup (fail-fast if < 4.0).
-- **11B:** NICE DCV session configuration for OpenGL capture.
-  `QSG_RENDER_LOOP=threaded` enforced. Frame pacing: 30 FPS floor
-  configured in NICE DCV server settings. GPU memory allocation hints.
-- **11C:** `engine.service` and `trading-ui.service` systemd unit files.
-  Startup order: engine starts first, UI waits for IPC port. Watchdog
-  timeout, `KillMode=mixed`, `OOMScoreAdj` tuned to protect engine.
-- **11D:** `nvidia-smi` GPU utilization logged every 60 s. QSG frame
-  timing exposed via `/metrics` endpoint. Prometheus/Grafana optional.
+12. **Wired live?** `grep -r "load_logistic_model\|logistic_enabled" execution/` — note: Phase 20 changes the `LiquidityMapEngine` used inside the C++ hot path; the Python wiring test asserts that `engine.load_logistic_model` is called during strategy initialization when `logistic_enabled=True`.
 
 ---
 
@@ -4335,7 +3484,7 @@ forward visibility only.
 | 13B | `tests/test_session_tick_replay.py` schema (5) + `load_sidecar` round-trip (1) + verifier (6) + `LiveTradingSession.attach_recorder` integration (6) — 18 new offline tests, no Qt, no real C++ engine | `LiveTradingSession.on_timer_tick` end-of-tick recorder hook covered by the same suite | — | — | Recorder hook wrapped in try/except so runtime cost is one bool-check + one method call when no recorder is attached |
 | 7V | `tests/test_hmm_abtest.py` (38 new) — `derive_state_map` (7), `compare_metrics` + `summarize_winner` (10), `format_comparison_report` (5), `format_comparison_json` (3), `AbtestSummary` (1), `_parse_date_arg` (4), full harness flow with stub backtest runner (4), `_build_config` HMM round-trip (3, gated on built C++ module) | Stub-runner integration in same suite asserts harness wires HMM params on Run 2 and references the saved model file | Determinism: same `--seed` + same tick store ⇒ byte-identical model JSON + report metric rows | First real harness output against `data/binance_ticks.h5` (2026-03-07 → 2026-03-09): rule-based 1 trade / 13 decisions vs HMM (K=3) 16 trades / 9 decisions; mixed verdict | All 38 tests pass in 0.40 s; full real harness run against 2-day BTCUSDT slice completes in ~0.4 s wall-clock |
 | 14A | `tests/test_execution_manager.py` (15+ new) — `on_intent` dispatch for every `IntentType`, event-time cooldown gating (no `time.time()` leak), wave-permission-DISABLED block-entry, risk-budget-exhausted block-entry, scale-in/out qty math; `tests/test_live_runner.py` (8+ new) — stub-engine fires synthetic `RippleDecision`s, asserts ExecutionManager receives `on_intent` calls with correct intent type / side / qty / event timestamp | Existing 25/25 `test_execution_manager.py` + recorder integration suite must stay green after the topology change | Replay determinism: same captured `RippleDecision` stream ⇒ identical `on_intent` call sequence regardless of wall-clock between events | Manual: `main.py:execute --testnet` against Binance USD-M futures testnet → confirm orders are emitted only when `RippleEngine.current_state() ∈ {ABSORBING, EXHAUSTING, BREAKING, REFILLING}` AND `RiskEngine.consumed_es < es_budget * budget_exit_threshold` | `grep "engine.set_signal_callback(.*on_signal" execution/ main.py` returns ZERO hits; `grep "time.time()" execution/execution_manager.py` returns ZERO hits in decision logic |
-| 14B | `tests/test_layered_live_wiring.py` ✅ (24 new tests across 5 classes) — `TestWaveSnapshotToOfe` (5), `TestComputeRealizedVol` (6), `TestLayeredPushStep` (8 — cadence, error isolation, Tide CRISIS propagation), `TestRunLayeredPushLoop` (1), `TestRunLiveExecuteLayeredWiring` (4). Stub Tide+Wave engines emit known snapshots; assert `LiveTradingSession.on_timer_tick` and `live_runner._layered_push_step` push them via `set_risk_budget` / `set_wave_snapshot` / `set_realized_vol` at the right cadences (Tide 60 s, Wave 5 s, RV 1 s); CRISIS Tide regression pinned by `test_tide_crisis_propagates_to_set_risk_budget` | Wired against existing Tide / Wave Python suites — all stayed green in the 444-test Phase 14B regression sweep | Determinism: push thread uses `Event.wait(timeout=...)` cadence but does NOT make trading decisions — TRADING-decision logic remains event-time per §7.1 / §7.5 | TESTNET soak runs now exercise the full Tide → Wave → Ripple → broker stack with real Tide budgets / Wave permissions / realized vol | `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" ui/ execution/ main.py` returns 4 / 4 / 6 production hits respectively |
+| 14B | `tests/test_layered_live_wiring.py` ✅ (24 new tests across 5 classes) — `TestWaveSnapshotToOfe` (5), `TestComputeRealizedVol` (6), `TestLayeredPushStep` (8 — cadence, error isolation, Tide CRISIS propagation), `TestRunLayeredPushLoop` (1), `TestRunLiveExecuteLayeredWiring` (4). Stub Tide+Wave engines emit known snapshots; assert `LiveTradingSession.on_timer_tick` and `live_runner._layered_push_step` push them via `set_risk_budget` / `set_wave_snapshot` / `set_realized_vol` at the right cadences (Tide 60 s, Wave 5 s, RV 1 s); CRISIS Tide regression pinned by `test_tide_crisis_propagates_to_set_risk_budget` | Wired against existing Tide / Wave Python suites — all stayed green in the 444-test Phase 14B regression sweep | Determinism: push thread uses `Event.wait(timeout=...)` cadence but does NOT make trading decisions — TRADING-decision logic remains event-time per §7.1 / §7.5 | TESTNET soak runs now exercise the full Tide → Wave → Ripple → broker stack with real Tide budgets / Wave permissions / realized vol | `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" execution/ main.py` returns 4 / 4 / 6 production hits respectively |
 | 14C | `tests/test_live_execution_v1_compliance.py` ✅ (18 tests: 8 end-to-end acceptance, 7 unit, 2 wiring) — `StubBroker` + real `OrderFlowEngine` + real `ExecutionManager`. Synthetic intents with `consumed_es ≥ es_budget` ⇒ `broker.placed_orders == []`. Mirror for Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades-concurrent block, cooldown active. Plus negative-controls (exit never blocked; happy-path fires) | End-to-end: Ripple decision → `intent_risk_block_reason` → ExecutionManager → StubBroker, no skipped tests | — | Suite is the executable form of the V1 §22.2 #12 contract | All 8 acceptance tests pass; zero `@unittest.skip` markers in the suite; `intent_risk_block_reason` wired into `execution/live_runner.py:_ripple_cb` and `ui/main_window.py::_on_ripple_received` |
 | 14D ✅ DONE 2026-05-11 | `tests/test_crossvenue_wave.py` (2 new — total 11) — overriding `crossvenue_divergence_boost=3.0` flips the regime via effective dispersion in `_classify_regime`; overriding `crossvenue_correlation_boost=0.0` disables the AR boost | — | — | All 9 existing cross-venue tests stay green at default values | No literal `2.0` / `0.5` boost factor remains in `wave/wave_engine.py`'s cross-venue path |
 | 14E ✅ DONE 2026-05-11 | `tests/test_optimiser.py` (4 new — new file) — `num_trades` is a crowding-distance objective; endpoints retain +inf invariant; three-axis dominance promotes higher-trade-count winners to front 0 and losers to front 1; Pareto-incomparability invariant still holds under axis trade-offs | — | — | Sample optimisation run reports `num_trades` for every individual | Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed |
@@ -4378,8 +3527,8 @@ forward visibility only.
 | 13W | All 7 previously-failing `WaveRegime.BREAKDOWN` tests pass under the multi-factor stress contract; `wave/wave_engine.py` engine code is unchanged; inline test comments reference `wave_engine.py:_classify_regime` so the contract drift cannot recur silently. |
 | 13B | `SessionRecorder.record_session_tick(...)` writes a deterministic per-tick scalar set; `load_sidecar` populates `SidecarTrace.session_ticks`; `verify_session_ticks(...)` returns `SessionTickReport` with length / field / book-state divergence detection; `LiveTradingSession.attach_recorder()` integration smoke test (3 timer ticks → 3 recorded events with correct best_bid/best_ask/book_empty propagation); recorder exceptions cannot break the live tick loop; 18 new offline tests pass without Qt or real C++ engine. |
 | 7V | `python -m tools.hmm_abtest --symbol BTCUSDT --exchange binance --from-time YYYY-MM-DD --to-time YYYY-MM-DD --label X` exits 0 against `data/binance_ticks.h5`; emits `reports/hmm_abtest_<symbol>_<label>_<ts>.md` (Markdown with run metadata / state map / metric comparison / decision counts / verdict sections) AND `.json` (machine-readable); trains HMM via `HMMTrainer.select_model([3,4,5,6])` and saves to `models/hmm_<symbol>_<label>_<ts>.json`; rule-based + HMM runs share the same SignalEngine but differ in Ripple inference backend; verdict line classifies winner as `HMM improves...` / `Rule-based wins...` / `tied` / `Mixed: ...`; 38 new offline tests pass; `_RIPPLE_MAP` continues to satisfy the Phase 13Y drift-detection test (`hmm_enabled` and `hmm_model_path` newly added are real C++ attrs from Phase 7). |
-| 14A `[DONE 2026-05-09]` | All gates met: `grep "engine.set_signal_callback(.*on_signal" execution/ ui/ main.py` ⇒ ZERO production hits; `grep "time.time()" execution/execution_manager.py` ⇒ 2 hits, both inside the deprecated `on_signal` / `_execute_signal` path; 23 new tests in `test_execution_manager.py` (suite total 48/48); 13 new tests in `test_live_runner.py` (13/13); 419-test wider regression sweep green; Phase 12 + 13 + 13B replay determinism tests stay green. |
-| 14B `[DONE 2026-05-11]` | ✅ All gates met: `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" ui/ execution/ main.py` returns 4 / 4 / 6 production hits (well above the ≥ 1 minimum each); 24 new tests in `test_layered_live_wiring.py` pass; 444-test Phase 14B regression sweep green; CRISIS Tide regression: synthetic `risk_multiplier=0.0` propagates verbatim to `ripple.set_risk_budget(...)` — pinned by `TestLayeredPushStep.test_tide_crisis_propagates_to_set_risk_budget`. |
+| 14A `[DONE 2026-05-09]` | All gates met: `grep "engine.set_signal_callback(.*on_signal" execution/ main.py` ⇒ ZERO production hits; `grep "time.time()" execution/execution_manager.py` ⇒ 2 hits, both inside the deprecated `on_signal` / `_execute_signal` path; 23 new tests in `test_execution_manager.py` (suite total 48/48); 13 new tests in `test_live_runner.py` (13/13); 419-test wider regression sweep green; Phase 12 + 13 + 13B replay determinism tests stay green. |
+| 14B `[DONE 2026-05-11]` | ✅ All gates met: `grep "set_risk_budget\|set_wave_snapshot\|set_realized_vol" execution/ main.py` returns 4 / 4 / 6 production hits (well above the ≥ 1 minimum each); 24 new tests in `test_layered_live_wiring.py` pass; 444-test Phase 14B regression sweep green; CRISIS Tide regression: synthetic `risk_multiplier=0.0` propagates verbatim to `ripple.set_risk_budget(...)` — pinned by `TestLayeredPushStep.test_tide_crisis_propagates_to_set_risk_budget`. |
 | 14C `[DONE 2026-05-12]` | ✅ All 8 V1 §22.2 #12 acceptance tests in `test_live_execution_v1_compliance.py` pass (plus 7 unit + 2 wiring tests, 18 total); zero `@unittest.skip` markers; failure modes covered: ES budget exhausted, Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades-concurrent, cooldown active. Negative-controls prove exits never blocked and happy-path fires. `intent_risk_block_reason` wired into both live entry points. 473-test full regression sweep green. |
 | 14D | `[DONE 2026-05-11]` No literal `2.0` / `0.5` boost factor remains in `wave/wave_engine.py` cross-venue path; 2 new `WaveConfig` parameter tests pass; all 9 existing cross-venue tests stay green at default values (11 total). |
 | 14E | `[DONE 2026-05-11]` Both `# TODO add num_trades` markers in `optimiser.py:175,198` removed; `num_trades` is iterated in `crowding_distance` and is the third axis in `non_dominated_sorting`; 4 new optimiser tests pin both operators; broader regression sweep clean (559 tests across 18 non-Qt suites). |

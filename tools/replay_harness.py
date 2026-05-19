@@ -231,8 +231,8 @@ def verify_session_ticks(
     float_tolerance: float = _FLOAT_TOL_DEFAULT,
     max_divergences: int = 25,
 ) -> SessionTickReport:
-    """Phase 13B — verify replayed ``LiveTradingSession.on_timer_tick``
-    state matches the recorded sidecar.
+    """Phase 13B — verify replayed session-tick state matches the
+    recorded sidecar.
 
     Each entry must be a dict shaped like the events written by
     :meth:`SessionRecorder.record_session_tick`. Extra keys are

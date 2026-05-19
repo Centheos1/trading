@@ -25,11 +25,6 @@ data/ohlcv/
 data/optimised_parameters.h5
 data/BTCUSDT_strategy.h5
 
-# UI build artefacts (each ui Dockerfile rebuilds from source)
-ui/node_modules/
-ui/dist/
-ui/.vite/
-
 # Docs and tooling that have no business inside an image
 *.md
 docs/
@@ -37,7 +32,6 @@ tools/
 tests/
 TESTING_GUIDE.md
 implementation_plan.md
-UI_STRATEGY_INTEGRATION_PLAN.md
 
 # Local env
 .env

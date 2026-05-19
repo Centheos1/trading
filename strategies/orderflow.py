@@ -261,10 +261,9 @@ def run_live(
 ) -> LiveSession:
     """Start a live Binance USD-M futures session driving the C++ engine.
 
-    Replaces the legacy C++ ``BinanceWsFeed`` path with the same
-    Python WS adapter used by ``LiveTradingSession`` (Phase 10):
-    ``data_feed.run_binance_usdm_futures_ws_feed``. The engine itself
-    is unchanged — trades and depth updates land via
+    Replaces the legacy C++ ``BinanceWsFeed`` path with the Python WS
+    adapter ``data_feed.run_binance_usdm_futures_ws_feed``. The engine
+    itself is unchanged — trades and depth updates land via
     ``engine.process_trade`` / ``engine.process_depth`` from a worker
     thread, with `FeedStreamHealth` tracking reconnects and stale
     streams.

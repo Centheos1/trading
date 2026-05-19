@@ -1,1 +1,1 @@
-"""FastAPI HTTP / WebSocket surface for the strategy service."""
+"""FastAPI HTTP surface for the strategy service."""

@@ -18,19 +18,11 @@
   // the COPY in Dockerfile.dev bakes a snapshot; this ensures the
   // mounted source is always compiled.
   "postCreateCommand": "bash backtestingCpp/orderflow/build.sh",
-  // Qt headless for tests; override QT_QPA_PLATFORM=xcb in terminal
-  // when you want X11 GUI passthrough via XQuartz on macOS.
   "remoteEnv": {
-    "QT_QPA_PLATFORM": "offscreen",
-    "QSG_RHI_BACKEND": "software",
     "PYTHONUNBUFFERED": "1",
     "VIRTUAL_ENV": "/app/.venv",
     "PATH": "/app/.venv/bin:${containerEnv:PATH}"
   },
-  // Forward the local X11 socket for GUI passthrough when XQuartz is running.
-  "mounts": [
-    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,readonly"
-  ],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -45,7 +37,7 @@
       }
     }
   },
-  // Expose nothing by default; add ports if the UI or data service
-  // needs to be reached from the host (e.g. a metrics endpoint).
+  // Expose nothing by default; add ports here if a service needs to be
+  // reached from the host (e.g. a metrics endpoint).
   "forwardPorts": []
 }

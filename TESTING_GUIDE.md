@@ -12,7 +12,7 @@ The system is a mixed **C++ / Python** application that implements a layered tra
 | **Wave** | Market structure / regime classification | Python (research); C++ proxy (live) |
 | **Ripple** | Execution: order flow analysis, liquidity transitions, trade lifecycle | C++ (hot path) |
 
-The application operates in four modes: **data collection**, **backtest**, **optimise**, and **ui**. Backtest and optimise modes require strict determinism — identical inputs must produce identical outputs on every run.
+The application operates in three modes: **data collection**, **backtest**, and **optimise**. Backtest and optimise modes require strict determinism — identical inputs must produce identical outputs on every run.
 
 Testing is critical because:
 
@@ -71,7 +71,7 @@ Each implementation phase has specific test requirements. A phase is not complet
 | 3 — Liquidity Map | Map components, scores, map→targets, 1-week backtest, map update latency |
 | 4 — Risk Budget | ES estimation, position sizing, risk check, rejection on exhaustion |
 | 5 — Wave Baseline | Feature computation, regime rules, permissions→Ripple, replay determinism |
-| 6 — Optimization & UI | Full pipeline, full parameter space, optimization convergence, UI integration |
+| 6 — Optimization | Full pipeline, full parameter space, optimization convergence |
 | 7 — HMM Extensions | HMM math, model load, HMM vs rule-based, HMM determinism |
 | 8 — Cross-Venue | Cross-venue features, multi-venue→Wave, multi-venue replay |
 
@@ -195,7 +195,6 @@ Each implementation phase has specific test requirements. A phase is not complet
 | Risk check (C++) | < 1 µs |
 | Wave update (Python, 5s cadence) | < 1 ms |
 | Tide update (Python, 60s cadence) | < 10 ms |
-| UI render cycle | < 50 ms |
 
 **Rule:** Any regression > 20% on key latency metrics must be investigated and resolved.
 
@@ -712,7 +711,6 @@ Feed a sequence of synthetic events and verify:
 
 - **Backtest mode:** Uses `ReplayFeed`, produces deterministic results.
 - **Optimise mode:** Runs backtest in a loop with parameter variation, each run is deterministic.
-- **UI mode:** Strategy state exposed to widgets without blocking the render thread.
 
 ---
 
@@ -1045,17 +1043,7 @@ Tests that depend on configuration should either:
 | `test_hmm_bindings.py` (Python) | 8 tests | Passing | 7 |
 | `test_crossvenue_engine.py` (Python) | 21 tests | Passing | 8 |
 | `test_crossvenue_wave.py` (Python) | 9 tests | Passing | 8 |
-| `test_bubble_pipeline.py` (Python) | 63 checks | Passing | UI-Phase 1 |
-| `test_bucket_model.py` (Python) | 64 checks | Passing | UI-Phase 1 |
-| `test_strategy_ui.py` (Python) | 163 checks | Passing | UI-Phase 2 + Signal Log |
-| `test_signal_log_accuracy.py` (Python) | 26 tests | Passing | UI-8C |
-| `test_ui_cleanup.py` (Python) | 38 checks | Passing | UI-Phase 3 |
-| `test_strategy_store.py` (Python) | 63 checks | Passing | UI-Phase 4 |
-| `test_integration_e2e.py` (Python) | 57 checks | Passing | UI-Phase 5 |
-| `test_performance_profile.py` (Python) | 13 checks | Passing | UI-Phase 5 |
-| `test_replay_overlay.py` (Python) | 34 checks | Passing | UI-Phase 5 |
-| `test_bubble_aggregation.py` (Python) | 67 checks | Passing | UI-Opt, PG, TS |
-| `test_account_panel.py` (Python) | 28 tests | Passing | UI-8B |
+| `test_strategy_store.py` (Python) | 63 checks | Passing | Storage |
 
 ### 19.2 Planned Test Suites by Phase
 
@@ -1077,17 +1065,7 @@ Tests that depend on configuration should either:
 | 7 | `test_hmm_bindings.py` | HMM pybind11 bindings: class, model load, config fields, RippleEngine backend swap (HMM ↔ ScoreBased) | **Done** (8 tests) |
 | 8 | `test_crossvenue_engine.py` | CrossVenueEngine features (Pearson, lead/lag, divergence), cadence gating, window trimming, determinism, CSV store round-trip, replay determinism | **Done** (21 tests) |
 | 8 | `test_crossvenue_wave.py` | Cross-venue → Wave integration: correlation/divergence → BREAKDOWN boost, baseline preservation, reset, accessors, determinism | **Done** (9 tests) |
-| UI-1 | `test_bucket_model.py` | TimeBucket OHLC, bucket assignment/alignment, visible window computation, dynamic slice_ms, bucket axis rendering, backward compat, determinism | **Done** (64 checks) |
-| UI-1 | `test_bubble_pipeline.py` (updated) | Bubble pipeline regression: pruning uses wider visible window (300s default), all existing checks preserved | **Done** (63 checks) |
-| UI-2 | `test_strategy_ui.py` | StrategyMode/StrategyUIState enums, SignalCategory extensions (TIDE, WAVE, TRADE_LIFECYCLE), layer display map, SignalEntry metadata, state machine, ARM/DISARM, signal emission, layer-based blotter filters (Strategy/Trade/Ripple/Raw), diagnostics panel, heatmap overlay, settings migration, backward compat | **Done** (163 checks) |
-| UI-3 | `test_ui_cleanup.py` | Hidden elements (Tick Size, Imbalance), sizing gating on strategy state, Replay disabled, account panel placeholder lifecycle, backward compat | **Done** (38 checks) |
-| UI-4 | `test_strategy_store.py` | HDF5 schema versioning, signal write/read roundtrip, snapshot buffered write/flush, session event persistence, time-range filtering, legacy file detection, readonly open, reopen persistence, default fields | **Done** (63 checks) |
-| UI-5 | `test_integration_e2e.py` | Cross-workstream integration: session lifecycle (bucketing + strategy + HDF5), state gating, blotter filtering, bucket + overlay coexistence, time-range filtering, diagnostics panel, deterministic replay, account panel lifecycle | **Done** (57 checks) |
-| UI-5 | `test_performance_profile.py` | Heatmap paint timing, bucket update throughput, signal log throughput, HDF5 write throughput, overlay marginal cost, large trade set render | **Done** (13 checks) |
-| UI-5 | `test_replay_overlay.py` | Replay overlay reconstruction, signal playback into blotter, event timeline, deterministic read-back, time-windowed partial replay, diagnostics panel from replay, heatmap with replay overlay | **Done** (34 checks) |
-| UI-Opt, PG, TS | `test_bubble_aggregation.py` | Price-axis bucketing, time-axis merging (100 ms slices), volume aggregation, VWAP positioning, buy/sell imbalance coloring, deterministic aggregation, reduction ratio, viewport filtering, diagnostics, performance throughput, auto-scroll regression, time-ordering, hard caps, dynamic coarsening, volume culling, deque bounds, trade-slice incremental insert, slice pruning, slice rebuild, steady-state perf, boundary stability | **Done** (67 checks) |
-| UI-8C | `test_signal_log_accuracy.py` | Signal log: legacy gating (LEGACY_RAW suppressed when armed, visible when disarmed), Tide BIAS_CHANGE events, Wave REGIME_CHANGE events, no-spurious-event stability, exit PnL annotation (realized_pnl delta via session_realized_pnl), Trades-Only filter, Debug filter, PnL column rendering (+x.xx / -x.xx / blank), wiring test §3.5 | **Done** (26 tests) |
-| UI-8B | `test_account_panel.py` | FIFO accumulator absent; `update_strategy_stats` renders Paper/Live/Observe modes, session PnL, trade count; Reason column populated from `ripple_reason`; wiring test: `_on_timer_tick` calls `update_strategy_stats` | **Done** (28 tests) |
+| Storage | `test_strategy_store.py` | HDF5 schema versioning, signal write/read roundtrip, snapshot buffered write/flush, session event persistence, time-range filtering, legacy file detection, readonly open, reopen persistence, default fields | **Done** (63 checks) |
 
 ### 19.3 Test Architecture
 
@@ -1145,308 +1123,6 @@ flowchart TD
     style RIPPLE fill:#40916c,color:#fff
     style ReplayTests fill:#95d5b2,color:#000
 ```
-
----
-
-## 20. UI / Order Flow View Tests
-
-### 20.1 Overview
-
-UI tests validate the heatmap rendering pipeline, time-bucketed axis, and visual components. They run headless using `QApplication` without requiring a visible display.
-
-### 20.1a Data feed layer (Binance REST depth)
-
-Initial / resync depth snapshots use `data_feed/binance_depth_rest.py` (HTTP + parsing only; `ui/live_trading_session.py` → `LiveTradingSession` applies `process_depth` on the C++ engine). Binance USD-M trade + `depth@100ms` WebSockets live in `data_feed/binance_futures_ws.py` with `data_feed/stream_health.py` (`FeedState`, `FeedStreamHealth`). `MainWindow` wires the UI and delegates live ingestion to `LiveTradingSession`. Mocked REST tests:
-
-```bash
-python -m pytest tests/test_binance_depth_rest.py -q
-```
-
-### 20.2 Running UI Tests
-
-```bash
-# Bucket model tests (64 checks)
-python tests/test_bucket_model.py
-
-# Bubble pipeline regression (63 checks)
-python tests/test_bubble_pipeline.py
-
-# Strategy UI tests (163 checks)
-python tests/test_strategy_ui.py
-
-# UI cleanup tests (38 checks)
-python tests/test_ui_cleanup.py
-
-# Strategy store / HDF5 tests (63 checks)
-python tests/test_strategy_store.py
-
-# Integration E2E tests (57 checks)
-python tests/test_integration_e2e.py
-
-# Performance profiling tests (13 checks)
-python tests/test_performance_profile.py
-
-# Replay overlay smoke tests (34 checks)
-python tests/test_replay_overlay.py
-
-# Bubble aggregation + trade slices (67 checks)
-python tests/test_bubble_aggregation.py
-
-# All UI tests together
-python tests/test_bucket_model.py && python tests/test_bubble_pipeline.py && python tests/test_bubble_aggregation.py && python tests/test_strategy_ui.py && python tests/test_ui_cleanup.py && python tests/test_strategy_store.py && python tests/test_integration_e2e.py && python tests/test_performance_profile.py && python tests/test_replay_overlay.py
-```
-
-### 20.3 test_bucket_model.py
-
-| Test | What It Validates |
-|---|---|
-| `test_time_bucket_defaults` | TimeBucket dataclass default field values |
-| `test_time_bucket_fields` | TimeBucket explicit field assignment |
-| `test_bucket_assignment_single_bucket` | Trades within one minute create a single bucket |
-| `test_bucket_assignment_two_buckets` | Trades crossing a minute boundary create two buckets |
-| `test_bucket_boundary_alignment` | Bucket boundaries align to wall-clock minute boundaries |
-| `test_bucket_ohlc_incremental` | OHLC is updated incrementally (open/high/low/close/volume/buy/sell) |
-| `test_stale_trade_ignored` | Trades older than the latest bucket are ignored |
-| `test_default_visible_window` | Default: NUM_VISIBLE_BUCKETS × bucket_duration = visible window |
-| `test_set_bucket_duration_updates_window` | Changing bucket size recomputes visible window |
-| `test_set_bucket_duration_clears_buckets` | Bucket deque is cleared on duration change |
-| `test_set_bucket_duration_minimum` | Minimum bucket duration is 5 seconds |
-| `test_set_bucket_duration_no_op_same_value` | Same-value set does not clear buckets |
-| `test_dynamic_slice_ms_default` | Default: max(100, 300000/1200) = 250ms |
-| `test_dynamic_slice_ms_small_window` | Small window: slice_ms floors at 100ms |
-| `test_dynamic_slice_ms_large_window` | Large window: slice_ms adapts proportionally |
-| `test_intensity_cols_bounded` | Intensity image columns stay ≤ 1300 across all bucket sizes |
-| `test_bucket_axis_boundary_positions` | Bucket separators are evenly spaced at correct x-positions |
-| `test_bucket_axis_label_format_minutes` | Buckets ≥ 1 min use HH:MM labels |
-| `test_bucket_axis_label_format_seconds` | Buckets < 1 min use HH:MM:SS labels |
-| `test_visible_window_ms_constant_preserved` | Module-level VISIBLE_WINDOW_MS = 60000 preserved for test imports |
-| `test_existing_trade_mechanics_unchanged` | Trade deque behavior identical to pre-bucket implementation |
-| `test_chart_now_unchanged` | chart_now depth-trade skew cap unaffected by bucket model |
-| `test_pruning_uses_wider_window` | Pruning respects the wider visible window (300s → 600s buffer) |
-| `test_deterministic_bucket_replay` | Identical trade sequences produce identical bucket state |
-| `test_render_column_count_reasonable` | Intensity columns in [200, 1300] across all bucket sizes |
-
-### 20.4 test_strategy_ui.py
-
-| Test | What It Validates |
-|---|---|
-| `test_strategy_mode_enum` | StrategyMode enum values: OBSERVE, PAPER, LIVE |
-| `test_strategy_ui_state_enum` | StrategyUIState enum: all 7 states present |
-| `test_signal_category_extensions` | STRATEGY_ARM, STRATEGY_DISARM, STRATEGY_STATE_CHANGE, TIDE, WAVE, TRADE_LIFECYCLE added; originals preserved |
-| `test_signal_entry_strategy_fields` | New fields (wave_regime, tide_bias, risk_budget_pct, lifecycle_state, archetype) default correctly |
-| `test_strategy_to_ripple_mapping` | StrategyMode → RippleMode mapping (OBSERVE→LOG_ONLY, PAPER→PAPER, LIVE→LOG_ONLY) |
-| `test_blotter_strategy_categories` | _FILTER_STRATEGY includes strategy + ripple + TIDE/WAVE/TRADE_LIFECYCLE, excludes LEGACY_RAW/DIAGNOSTIC |
-| `test_trade_filter` | _FILTER_TRADE contains TRADE_LIFECYCLE + EXECUTION only |
-| `test_layer_display_map` | _CATEGORY_LAYER_MAP maps every SignalCategory to a display layer |
-| `test_blotter_add_strategy_entries` | TradeBlotter accepts strategy SignalEntry rows |
-| `test_diagnostics_panel_state_badge` | Badge defined for all 7 states; set_strategy_state updates; clear resets to DISARMED |
-| `test_diagnostics_panel_snapshot` | Panel shows Tide bias, Archetype, Stop/Target, Hold time, ES Used from snapshot |
-| `test_heatmap_overlay_set_clear` | set_strategy_overlay sets entry/stop/target; clear_strategy_overlay zeroes them |
-| `test_heatmap_overlay_partial` | Setting only entry_price leaves stop/target at 0 |
-| `test_state_transitions_validity` | armed_* states start with "armed", DISARMED does not |
-| `test_lifecycle_to_ui_state_mapping` | Lifecycle states map to correct UI states (IDLE→WAITING, SETUP/ENTRY/...→ACTIVE, EXIT→EXITING, COOLDOWN) |
-| `test_settings_migration` | _RIPPLE_TO_STRATEGY maps log_only→OBSERVE, paper→PAPER, disabled→OBSERVE |
-| `test_signal_entry_with_full_context` | SignalEntry with all strategy fields round-trips correctly |
-| `test_existing_signal_entry_compat` | Old-style SignalEntry has new fields defaulted (backward compat) |
-| `test_existing_ripple_mode_preserved` | RippleMode enum values unchanged |
-| `test_context_signal_reclassification` | EXHAUSTION/ABSORPTION reclassified as CONTEXT; STACKED_IMBALANCE stays LEGACY_RAW |
-| `test_context_prefixes_defined` | _CONTEXT_SIGNAL_PREFIXES covers expected signal types |
-| `test_blotter_default_strategy_filter` | Strategy checkbox checked by default; LEGACY_RAW hidden, strategy+context visible |
-| `test_blotter_uncheck_strategy_shows_all` | Unchecking Strategy shows all signals |
-| `test_left_col_widget_count_matches_chart_stack` | Left column widget count matches chart stack for splitter sync |
-
-### 20.5 test_ui_cleanup.py
-
-| Test | What It Validates |
-|---|---|
-| `test_tick_size_hidden` | Tick Size label and input both hidden, default value preserved |
-| `test_imbalance_hidden` | Imbalance label and input both hidden, default value preserved |
-| `test_sizing_disabled_when_disarmed` | Sizing mode combo and value input disabled when DISARMED |
-| `test_sizing_enabled_when_armed` | Sizing controls enabled when armed, disabled again on disarm |
-| `test_replay_greyed_out` | Replay combo item disabled, Live item enabled, default is Live |
-| `test_account_panel_placeholder_on_init` | Placeholder visible, content hidden on construction |
-| `test_account_panel_shows_content_on_update` | `update_account()` auto-connects, shows content |
-| `test_account_panel_set_connected` | `set_connected(True/False)` toggles placeholder/content |
-| `test_account_panel_clear_disconnects` | `clear()` reverts to placeholder |
-| `test_hidden_elements_still_exist` | All hidden widgets still exist as attributes (no deletion) |
-| `test_tick_size_still_readable_for_connect` | Hidden inputs still readable as floats for legacy engine |
-
-### 20.6 test_strategy_store.py
-
-| Test | What It Validates |
-|---|---|
-| `test_schema_version_written` | New files have `schema_version = 2`, all datasets created |
-| `test_signal_write_read_roundtrip` | SignalEntry fields survive write/read cycle |
-| `test_multiple_signals` | 10 signals written and read back in order |
-| `test_snapshot_buffered_write` | Snapshots buffered, flushed explicitly, all fields correct |
-| `test_snapshot_auto_flush` | Buffer auto-flushes at batch size threshold |
-| `test_session_event_persistence` | CONNECT/ARM/DISARM/DISCONNECT events stored with details JSON |
-| `test_read_signals_time_filter` | `from_ms`/`to_ms` filtering on read |
-| `test_read_snapshots_time_filter` | Snapshot time-range filtering |
-| `test_read_events_time_filter` | Event time-range filtering |
-| `test_legacy_file_detection` | Files without schema_version or v1 detected as legacy |
-| `test_legacy_file_readable` | Legacy file opens readonly, returns empty lists |
-| `test_nonexistent_file` | `open_readonly` returns None for missing file |
-| `test_missing_symbol_readonly` | `open_readonly` returns None for missing symbol group |
-| `test_close_flushes_buffers` | `close()` flushes buffered snapshots to disk |
-| `test_reopen_preserves_data` | Data persists across close/reopen cycle |
-| `test_signal_with_defaults` | SignalEntry with default fields stores correctly (empty strings, zero floats) |
-
-### 20.7 test_integration_e2e.py
-
-| Test | What It Validates |
-|---|---|
-| `test_session_lifecycle` | Full connect→arm→trades→signals→snapshots→disarm→disconnect with HDF5 read-back |
-| `test_strategy_state_gates_ui` | Strategy state changes correctly gate sizing controls, hidden elements, and panel state |
-| `test_blotter_strategy_filter_with_mixed_signals` | Blotter category filter correctly separates strategy vs legacy vs execution signals |
-| `test_bucket_and_overlay_coexist` | Bucketed OHLC and strategy overlay lines maintain independent state |
-| `test_hdf5_time_range_filtering_cross_dataset` | Time-range queries produce consistent results across signals, snapshots, and events |
-| `test_diagnostics_panel_from_snapshot` | StrategyDiagnosticsPanel renders all expected rows with correct values from snapshot |
-| `test_deterministic_bucket_replay` | Two identical trade sequences produce identical bucket state |
-| `test_account_panel_lifecycle` | AccountPanel transitions connect→disconnect correctly |
-
-### 20.8 test_performance_profile.py
-
-| Test | What It Validates |
-|---|---|
-| `test_heatmap_paint_time` | Full paintEvent (depth + bubbles + bucket axis + overlay) < 100ms avg |
-| `test_bucket_update_throughput` | 10,000 trade insertions into bucket model < 500ms |
-| `test_signal_log_throughput` | 2,000 signal appends to blotter model < 500ms |
-| `test_hdf5_write_throughput` | 100 signals + 100 snapshots + 20 events < 2s |
-| `test_overlay_marginal_cost` | Strategy overlay adds < 10ms marginal cost to paintEvent |
-| `test_large_trade_set_render` | 5,000 trades + 500 depth columns renders in < 150ms |
-
-### 20.9 test_replay_overlay.py
-
-| Test | What It Validates |
-|---|---|
-| `test_replay_overlay_reconstruction` | Overlay reconstructed from persisted snapshot data |
-| `test_replay_signal_playback` | Persisted signals played back into blotter with field roundtrip |
-| `test_replay_event_timeline` | Session event sequence and JSON details survive roundtrip |
-| `test_replay_deterministic_readback` | Two consecutive reads produce identical results |
-| `test_replay_time_window` | Partial replay via time-range queries |
-| `test_replay_diagnostics_panel` | Diagnostics panel populated from replay snapshot dict |
-| `test_replay_heatmap_with_overlay` | Heatmap populated with replay trades and overlay from persisted data |
-
-### 20.10 test_bubble_aggregation.py
-
-| Test | What It Validates |
-|---|---|
-| `test_nearby_prices_aggregate` | Trades at close prices within one time bucket merge into fewer bubbles |
-| `test_distant_prices_stay_separate` | Trades at far-apart prices produce separate aggregated bubbles |
-| `test_price_bucket_size_derives_from_viewport` | Price bucket size scales correctly with viewport dimensions |
-| `test_different_time_buckets_separate` | Trades in different candle buckets produce separate bubbles |
-| `test_same_time_bucket_merges` | Trades in same time+price bucket merge into one bubble |
-| `test_volume_aggregation_correctness` | Aggregated bubble radius reflects total volume |
-| `test_buy_sell_separate_bubbles` | Buy and sell trades at same price/time → separate bubbles |
-| `test_vwap_positions_bubble_correctly` | Close prices merge; far prices stay separate |
-| `test_deterministic_aggregation` | Identical inputs → identical aggregated output |
-| `test_high_volume_reduction` | 10k trades reduce to <50% rendered bubbles |
-| `test_offscreen_trades_excluded` | Trades outside viewport filtered before aggregation |
-| `test_old_trades_filtered_by_time` | Trades before t_start filtered, not aggregated |
-| `test_diagnostics_agg_fields` | agg_cells and agg_raw_visible populated after draw |
-| `test_aggregation_render_performance` | 10k trade draw completes in <50ms |
-| `test_extreme_volume_stays_bounded` | 50k trades: deque capped, visible ≤ MAX_RENDERED_BUBBLES |
-| `test_time_bucket_finer_than_candle` | REGRESSION: 5s-apart trades produce separate bubbles (not merged into candle) |
-| `test_bubble_scrolls_with_time` | REGRESSION: bubble x-position moves left as time advances (auto-scroll) |
-| `test_bubble_x_preserves_time_order` | Older bubbles left of newer bubbles (time ordering) |
-| `test_rendered_never_exceeds_cap` | Rendered count ≤ MAX_RENDERED_BUBBLES under max load |
-| `test_coarsening_activates_under_pressure` | Dynamic coarsening fires when grid exceeds cap |
-| `test_volume_culling_removes_noise` | Negligible-volume cells removed by MIN_BUBBLE_QTY_FRAC |
-| `test_deque_maxlen_bounded` | Trades deque never exceeds MAX_TRADES_RETAINED |
-| `test_cap_preserves_largest_bubbles` | Largest-volume cells survive the hard cap |
-| `test_empty_trades` | No trades → zero aggregated bubbles |
-| `test_single_trade` | One trade → exactly one rendered bubble |
-| `test_buy_sell_combined_bubble` | Buy + sell at same time/price → 1 bubble with buy/sell quantities tracked in `TradeBucketAggregate` |
-| `test_trade_slice_incremental_insert` | Trades via `add_trade()` populate `_trade_slices` incrementally after first draw |
-| `test_trade_slice_prune_expired` | Trade slices older than `trade_cutoff` are pruned in `add_depth_column` |
-| `test_trade_slice_rebuild_on_param_change` | Slices rebuilt from deque when price bucket size changes significantly (>10%) |
-| `test_trade_slice_steady_state_no_rebuild` | Repeated draws with same viewport skip rebuild; avg draw < 20ms |
-| `test_trade_slice_renders_all_visible` | Trade slice store renders all visible trades correctly |
-| `test_trade_slice_boundary_round_stability` | Prices on exact bucket boundaries map consistently via `round()` |
-
-### 20.11 test_heatmap_continuity.py
-
-| Test | What It Validates |
-|---|---|
-| `test_forward_fill_simple_gap` | Gap columns between two filled regions are forward-filled |
-| `test_forward_fill_left_edge` | Left edge backward-filled from first known column |
-| `test_forward_fill_continuous` | No-op when all columns already populated |
-| `test_forward_fill_empty` | No-op when no data exists at all |
-| `test_forward_fill_single_column` | Single filled column propagates everywhere |
-| `test_forward_fill_preserves_different_data` | Different source patterns propagate correctly |
-| `test_forward_fill_deterministic` | Identical inputs → identical outputs |
-| `test_forward_fill_depth_update_replaces` | Newer depth replaces old forward-filled values |
-| `test_forward_fill_removal_persists_correctly` | Explicit sparse data columns not overwritten |
-| `test_widget_sparse_depth_produces_continuous_heatmap` | Integration: sparse depth → continuous intensity |
-| `test_depth_removed_at_zero_stays_removed` | Empty book snapshot handled without crash |
-| `test_forward_fill_does_not_affect_explicit_data` | Explicitly populated columns unchanged |
-
-### 20.12 Key Regression Patterns
-
-- **Bucket boundary alignment:** `bucket_ts = floor(ts / bucket_duration) * bucket_duration`. Must be wall-clock aligned.
-- **Dynamic slice_ms:** `max(HEATMAP_SLICE_MS, visible_window_ms // 1200)`. Keeps intensity image bounded.
-- **Pruning with wider window:** Trade cutoff = `trade_now - visible_window_ms * 2`. Wider window → more trades retained.
-- **chart_now invariant:** `max(t, min(d, t + MAX_DEPTH_LEAD_MS))` — unchanged by bucket model.
-
----
-
-## 20.13 Multi-View MVVM Architecture Tests
-
-**Run commands:**
-
-```bash
-QT_QPA_PLATFORM=offscreen python tests/test_market_state.py
-QT_QPA_PLATFORM=offscreen python tests/test_candle_chart_view.py
-QT_QPA_PLATFORM=offscreen python tests/test_multi_view.py
-```
-
-### test_market_state.py (9 tests, 30 checks)
-
-| Test | What It Validates |
-|---|---|
-| `test_defaults` | MarketState initializes with correct defaults (chart_now=0, disarmed, empty deques) |
-| `test_mid_price` | mid_price property computes correctly for all bid/ask combinations |
-| `test_has_candles` | has_candles reflects deque population |
-| `test_has_strategy` | has_strategy reflects snapshot assignment |
-| `test_shared_candle_deque` | HeatmapWidget and MarketState share the same candle deque object |
-| `test_shared_candle_multiple_trades` | Multiple trades aggregate into shared candle bucket correctly |
-| `test_signal_deque_bounded` | Signal deque respects maxlen of 2000 |
-| `test_custom_params` | Custom bucket_duration_ms and visible_window_ms are respected |
-| `test_external_candle_deque` | Externally-provided candle deque is used directly |
-
-### test_candle_chart_view.py (11 tests, 23 checks)
-
-| Test | What It Validates |
-|---|---|
-| `test_construction` | CandleChartView stores market state reference, auto-scale default, empty overlays |
-| `test_paint_empty` | Painting with no candles does not crash |
-| `test_paint_with_candles` | Painting with candle data records paint time |
-| `test_auto_scale` | Auto-scale sets price_min/max from visible candles |
-| `test_auto_scale_disabled` | Auto-scale off preserves manually set price range |
-| `test_overlay_registration` | Overlays can be registered and are called by _draw_overlays |
-| `test_ts_to_x_helper` | _ts_to_x maps timestamps to pixel coordinates correctly |
-| `test_price_to_y_helper` | _price_to_y maps prices to pixel coordinates correctly |
-| `test_shared_data_no_copy` | View sees new candles appended to MarketState.candles |
-| `test_double_click_resets_auto_scale` | Double-click re-enables auto-scale |
-| `test_nice_tick` | _nice_tick produces reasonable axis tick spacing |
-
-### test_multi_view.py (12 tests, 34 checks)
-
-| Test | What It Validates |
-|---|---|
-| `test_candle_deque_shared` | HeatmapWidget writes candles to MarketState.candles |
-| `test_candle_deque_not_duplicated` | Two views reading same deque see same data |
-| `test_strategy_dashboard_construction` | StrategyDashboardView creates strategy panel, blotter, account panel |
-| `test_strategy_dashboard_update_from_state` | update_from_state pushes strategy_ui_state to panel |
-| `test_signal_broadcast_to_both_blotters` | Signals are received by both OF and SD blotters |
-| `test_blotter_instances_are_independent` | OF and SD blotters maintain independent data |
-| `test_tab_widget_created` | QTabWidget has 3 tabs with correct labels |
-| `test_tab_switching` | Tab switching changes currentIndex correctly |
-| `test_market_state_sync_fields` | MarketState fields can be updated and read back |
-| `test_candle_view_reads_latest` | CandleChartView reads from MarketState without needing push |
-| `test_repaint_gating_logic` | Only the active tab index receives repaint calls |
-| `test_deterministic_candle_sharing` | Same trades produce identical candle data regardless of view count |
 
 ---
 

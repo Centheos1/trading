@@ -478,21 +478,6 @@ docker compose --profile test run --rm test
 1. Open project in Cursor → click **"Reopen in Container"** when prompted
 2. First open builds the image (~5–10 min); subsequent opens reuse cache
 
-### Run trading UI (native macOS — fastest for UI iteration)
-
-```bash
-source .venv/bin/activate
-python main.py   # choose 'ui' mode — uses Metal GPU directly
-```
-
----
-
-## Part 9 — EC2 GPU instance (Phase 9 — future)
-
-> Not yet implemented. Target: `g5.xlarge` (NVIDIA A10G), Ubuntu 24.04,
-> NICE DCV remote display. A `Dockerfile.gpu` will extend `Dockerfile.dev`
-> with the NVIDIA Container Toolkit and `QSG_RHI_BACKEND=opengl`.
-
 ---
 
 ## Troubleshooting

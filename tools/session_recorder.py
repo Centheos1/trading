@@ -33,12 +33,12 @@ Schema (``schema=1``)::
      "n_ripples":..., "n_orders":..., "n_session_ticks":...}
 
 ``session_tick`` events are Phase 13B's contribution — they capture
-the per-tick orchestration state of ``LiveTradingSession.on_timer_tick``
-so the replay harness can verify timer-tick determinism end-to-end (not
-just the engine's signal/ripple emissions). ``NO_ACTION`` ripple
-decisions are filtered out by default — they are chatty, do not produce
-execution intents, and the underlying engine state is already covered
-by ``tests/test_replay_determinism.py``.
+per-tick orchestration state so the replay harness can verify
+timer-tick determinism end-to-end (not just the engine's
+signal/ripple emissions). ``NO_ACTION`` ripple decisions are filtered
+out by default — they are chatty, do not produce execution intents,
+and the underlying engine state is already covered by
+``tests/test_replay_determinism.py``.
 
 """
 from __future__ import annotations
@@ -373,13 +373,12 @@ class SessionRecorder:
         book_resync_count: int = 0,
         trade_buf_remaining: int = 0,
     ) -> None:
-        """Record a single ``LiveTradingSession.on_timer_tick`` invocation.
+        """Record a single session-tick invocation.
 
         Captures the orchestration-level state that determines whether
-        the next tick will trigger a depth resync, a heatmap drain, or
-        a status-panel paint. Only includes deterministic, replayable
-        scalars — wall-clock times and Qt repaint counts are excluded
-        on purpose.
+        the next tick will trigger a depth resync or a buffer drain.
+        Only includes deterministic, replayable scalars — wall-clock
+        times are excluded on purpose.
         """
         with self._lock:
             if not self._header_written:

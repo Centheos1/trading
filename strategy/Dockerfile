@@ -1,4 +1,4 @@
-# Strategy service — headless OrderFlowEngine + FastAPI WebSocket/REST.
+# Strategy service — headless OrderFlowEngine + FastAPI REST.
 #
 # Build context MUST be the repo root:
 #
@@ -10,8 +10,8 @@
 #     the backtester / optimiser
 #   * runs ``uvicorn strategy.main:app --host 0.0.0.0 --port 8000``
 #
-# It is pure compute — no Qt, no GUI libs.  HDF5 storage is mounted
-# read-only at /app/data so backtests can replay historical ticks.
+# It is pure compute.  HDF5 storage is mounted read-only at /app/data so
+# backtests can replay historical ticks.
 
 FROM python:3.12-slim-bookworm AS base
 

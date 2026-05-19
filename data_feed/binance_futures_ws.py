@@ -1,8 +1,8 @@
 """Binance USD-M futures WebSocket trade + depth@100ms feeds (asyncio).
 
 Runs inside a dedicated thread with its own event loop. Parses messages and
-invokes hooks that apply data to the C++ engine and UI buffers (owned by the
-caller — typically MainWindow).
+invokes hooks that apply data to the C++ engine and per-stream buffers
+owned by the caller.
 """
 from __future__ import annotations
 
