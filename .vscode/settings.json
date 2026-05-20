@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/Users/clintsellen/Documents/Trading/app/backtest/backtestingCpp"
+    "cmake.sourceDirectory": "/Users/clintsellen/Documents/Trading/app/backtest/backtestingCpp",
+    "java.configuration.updateBuildConfiguration": "interactive"
 }

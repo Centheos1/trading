@@ -180,6 +180,7 @@ def run_live_execute(
     tide_engine: Any = None,
     wave_engine: Any = None,
     enable_layered_strategy: bool = True,
+    bookmap_publisher: Any = None,
 ) -> int:
     """Run the live-execute loop. Returns the process exit code.
 
@@ -247,6 +248,14 @@ def run_live_execute(
         pre-14B behaviour exactly — the C++ engine then runs against
         ``DefaultTideSnapshot`` / ``DefaultWaveSnapshot`` for the whole
         session (V1-incomplete; only kept for regression compatibility).
+    bookmap_publisher :
+        Optional :class:`bookmap_publisher.BookmapPublisher` instance
+        used to mirror live execution events (ENTRY / EXIT / METRIC /
+        POSITION / HEALTH) over a local WebSocket to the Bookmap
+        Java add-on. The publisher is **purely an observation
+        channel** — failures are swallowed, it never blocks the
+        execution path, and ``None`` (the default) disables Bookmap
+        wiring entirely with zero behavioural impact.
 
     Returns
     -------
@@ -317,6 +326,14 @@ def run_live_execute(
             exec_mgr.on_intent(intent)
         except Exception:
             logger.exception("exec_mgr.on_intent failed")
+        if bookmap_publisher is not None:
+            try:
+                bookmap_publisher.on_intent(intent, exec_mgr, symbol)
+            except Exception:
+                logger.debug(
+                    "bookmap_publisher.on_intent failed (non-fatal)",
+                    exc_info=True,
+                )
 
     if recorder is not None:
         if not getattr(recorder, "_header_written", False):
@@ -455,6 +472,14 @@ def run_live_execute(
     )
     engine.start(symbol)
     ws_thread.start()
+    if bookmap_publisher is not None:
+        try:
+            bookmap_publisher.on_health(symbol, connected=True)
+        except Exception:
+            logger.debug(
+                "bookmap_publisher startup HEALTH failed (non-fatal)",
+                exc_info=True,
+            )
 
     if (enable_layered_strategy
             and _tide_engine_inst is not None
@@ -496,6 +521,14 @@ def run_live_execute(
                 )
             except BaseException as exc:
                 logger.warning("status_printer raised: %s", exc)
+            if bookmap_publisher is not None:
+                try:
+                    bookmap_publisher.on_metrics(exec_mgr, symbol)
+                except Exception:
+                    logger.debug(
+                        "bookmap_publisher.on_metrics failed (non-fatal)",
+                        exc_info=True,
+                    )
     except KeyboardInterrupt:
         interrupted = True
         print("\nShutting down...")
@@ -520,6 +553,14 @@ def run_live_execute(
         engine.stop()
     except BaseException as exc:
         logger.debug("engine.stop raised: %s", exc)
+    if bookmap_publisher is not None:
+        try:
+            bookmap_publisher.on_health(symbol, connected=False)
+        except Exception:
+            logger.debug(
+                "bookmap_publisher shutdown HEALTH failed (non-fatal)",
+                exc_info=True,
+            )
 
     if interrupted:
         print("Execution stopped.")

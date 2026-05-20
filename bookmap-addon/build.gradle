@@ -1,0 +1,61 @@
+// Bookmap visualization add-on.
+//
+// Lightweight Java module that runs inside the Bookmap process and
+// renders strategy events streamed from the local Python publisher
+// over ws://localhost:8765. The module is visualization-only — it
+// never sends execution commands and has no direct dependency on
+// the Python / C++ trading stack.
+
+plugins {
+    id 'java'
+}
+
+group = 'com.trading.bookmap'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(11)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.java-websocket:Java-WebSocket:1.5.6'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    implementation 'org.slf4j:slf4j-api:2.0.13'
+    implementation 'org.slf4j:slf4j-simple:2.0.13'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// Fat-jar so the add-on can be dropped into Bookmap's add-on folder
+// without the user having to manage transitive dependencies.
+tasks.register('fatJar', Jar) {
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes(
+            'Implementation-Title': 'Bookmap Strategy Add-on',
+            'Implementation-Version': project.version,
+            'Main-Class': 'com.trading.bookmap.BookmapStrategyAddon'
+        )
+    }
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath
+            .filter { it.name.endsWith('.jar') }
+            .collect { zipTree(it) }
+    }
+}
+
+build.dependsOn fatJar

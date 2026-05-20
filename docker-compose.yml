@@ -128,6 +128,44 @@ services:
     profiles: ["ohlcv"]
 
   # ------------------------------------------------------------------
+  # Bookmap mock event publisher (opt-in profile)
+  #
+  # Stand-alone WebSocket publisher used to drive the Bookmap Java
+  # add-on without the full trading stack. Brings up a single
+  # container that emits ENTRY, EXIT, METRIC, POSITION, and HEALTH
+  # events to ws://localhost:8765 so the add-on can be exercised end-
+  # to-end during development.
+  #
+  # Activation:
+  #
+  #   docker compose --profile bookmap up bookmap-publisher
+  #
+  # The Bookmap add-on is a Java module that runs inside the Bookmap
+  # process on the host — it is NOT containerised here. See
+  # docs/BOOKMAP_INTEGRATION.md for the full event flow.
+  # ------------------------------------------------------------------
+  bookmap-publisher:
+    build:
+      context: .
+      dockerfile: strategy/Dockerfile
+    container_name: trading-bookmap-publisher
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    command: >
+      python -m bookmap_publisher.mock_emitter
+        --symbol ${SYMBOLS:-BTCUSDT}
+        --host 0.0.0.0
+        --port 8765
+        --log-level ${LOG_LEVEL:-INFO}
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./bookmap_publisher:/app/bookmap_publisher:ro
+    profiles: ["bookmap"]
+
+  # ------------------------------------------------------------------
   # Test runner (kept for parity with the legacy compose file)
   # ------------------------------------------------------------------
   test:
