@@ -1,23 +1,24 @@
 package com.trading.bookmap.model;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.Map;
 
 /**
  * Immutable wire-format event from the Python publisher.
  *
- * <p>Mirrors the schema documented in
- * {@code docs/BOOKMAP_INTEGRATION.md} and emitted by
- * {@code bookmap_publisher/event_builder.py}. Unknown JSON fields are
- * tolerated so the publisher can add fields without breaking older
- * add-on builds.
+ * <p>Mirrors the schema documented in {@code docs/BOOKMAP_INTEGRATION.md}
+ * and emitted by {@code bookmap_publisher/event_builder.py}. Unknown
+ * JSON fields are tolerated so the publisher can add fields without
+ * breaking older add-on builds.
  *
- * <p>This class is intentionally simple — Jackson populates fields via
- * the all-args constructor when {@link JsonProperty} bindings match.
- * No mutation API is provided; downstream state handlers should treat
- * instances as value objects.
+ * <h3>Dependency-free deserialisation</h3>
+ * The class is parsed by {@link FlatJsonParser} rather than Jackson.
+ * Bookmap pre-loads its own (older) copy of {@code jackson-core} on
+ * the parent classloader, and that copy's {@code JsonParser} is
+ * missing methods that newer {@code jackson-databind} releases call
+ * during deserialisation context construction
+ * (e.g. {@code getReadCapabilities()} added in Jackson 2.12). Using
+ * a hand-rolled parser eliminates that classloader conflict entirely.
  */
-@JsonIgnoreProperties(ignoreUnknown = true)
 public final class StrategyEvent {
 
     private final EventType type;
@@ -32,15 +33,15 @@ public final class StrategyEvent {
     private final String value;
 
     public StrategyEvent(
-        @JsonProperty("type") String type,
-        @JsonProperty("symbol") String symbol,
-        @JsonProperty("timestamp") Long timestamp,
-        @JsonProperty("price") Double price,
-        @JsonProperty("side") String side,
-        @JsonProperty("qty") Double qty,
-        @JsonProperty("label") String label,
-        @JsonProperty("name") String name,
-        @JsonProperty("value") String value
+        String type,
+        String symbol,
+        Long timestamp,
+        Double price,
+        String side,
+        Double qty,
+        String label,
+        String name,
+        String value
     ) {
         this.rawType = type == null ? "" : type;
         this.type = EventType.fromString(type);
@@ -52,6 +53,36 @@ public final class StrategyEvent {
         this.label = label == null ? "" : label;
         this.name = name == null ? "" : name;
         this.value = value == null ? "" : value;
+    }
+
+    /**
+     * Parse a JSON line emitted by the Python publisher into an event.
+     * Returns {@code null} for empty / malformed input rather than
+     * throwing — the caller decides whether to drop the message
+     * silently or surface a diagnostic.
+     */
+    public static StrategyEvent fromJson(String json) {
+        if (json == null || json.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> m;
+        try {
+            m = FlatJsonParser.parseObject(json);
+        } catch (RuntimeException ex) {
+            throw new IllegalArgumentException(
+                "Malformed event JSON: " + ex.getMessage(), ex);
+        }
+        return new StrategyEvent(
+            FlatJsonParser.getString(m, "type", ""),
+            FlatJsonParser.getString(m, "symbol", ""),
+            FlatJsonParser.getLong(m, "timestamp", 0L),
+            FlatJsonParser.getDouble(m, "price", 0.0),
+            FlatJsonParser.getString(m, "side", ""),
+            FlatJsonParser.getDouble(m, "qty", 0.0),
+            FlatJsonParser.getString(m, "label", ""),
+            FlatJsonParser.getString(m, "name", ""),
+            FlatJsonParser.getString(m, "value", "")
+        );
     }
 
     public EventType getType() {

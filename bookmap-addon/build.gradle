@@ -11,21 +11,55 @@ plugins {
 }
 
 group = 'com.trading.bookmap'
-version = '0.1.0'
+
+// ---------------------------------------------------------------- versioning
+// The base semantic version is bumped manually; the build number is
+// auto-incremented every time `fatJar` runs and persisted to
+// `version.properties`. Both end up in the JAR manifest and are logged
+// at add-on startup so you can verify which build Bookmap actually loaded.
+def baseVersion = '0.1.0'
+def versionFile = file('version.properties')
+def buildProps = new Properties()
+if (versionFile.exists()) {
+    versionFile.withInputStream { buildProps.load(it) }
+}
+def buildNumber = (buildProps.getProperty('build') ?: '0').toInteger()
+def buildTime = new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX")
+version = "${baseVersion}+build.${buildNumber}"
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(11)
+        // Bookmap 7.7 ships class files compiled with Java 17 (class version 61.0);
+        // we must compile at the same level to read those classes.
+        languageVersion = JavaLanguageVersion.of(17)
     }
 }
+
+// Path to the Bookmap app's lib directory.  Override via Gradle property:
+//   ./gradlew fatJar -PbookmapLib=/path/to/Bookmap.app/Contents/app/lib
+def bookmapLib = findProperty('bookmapLib') ?: '/Applications/Bookmap.app/Contents/app/lib'
 
 repositories {
     mavenCentral()
 }
 
 dependencies {
-    implementation 'org.java-websocket:Java-WebSocket:1.5.6'
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    // Bookmap SDK — provided at runtime by the Bookmap process; compile-only so
+    // it is NOT bundled in the fat-jar (Bookmap loads it from its own classpath).
+    compileOnly files("${bookmapLib}/bm-l1api.jar")
+
+    // java.net.http.WebSocket (JDK 11+) is used instead of java-websocket to
+    // avoid a classloader conflict: Bookmap ships its own older java-websocket
+    // jar that sends Sec-WebSocket-Version: 8 (a pre-RFC draft). The JDK
+    // client is loaded by the bootstrap classloader and always negotiates
+    // RFC 6455 (version 13), which the Python websockets server requires.
+    //
+    // Jackson is intentionally NOT a dependency. Bookmap pre-loads its own
+    // (older, 2.12-ish) jackson-core on the parent classloader, and a newer
+    // jackson-databind in our fat-jar then crashes with NoSuchMethodError
+    // on JsonParser.getReadCapabilities() etc. The events on the wire are
+    // a flat schema, so com.trading.bookmap.model.FlatJsonParser handles
+    // deserialisation with zero external dependencies.
     implementation 'org.slf4j:slf4j-api:2.0.13'
     implementation 'org.slf4j:slf4j-simple:2.0.13'
 
@@ -37,15 +71,75 @@ test {
     useJUnitPlatform()
 }
 
+// Generate a build-info properties file consumed by the running add-on
+// at startup. Lives alongside `bookmap-addon.properties` on the classpath.
+// Always re-runs so the generated file reflects the latest bump.
+tasks.register('writeBuildInfo') {
+    def outDir = layout.buildDirectory.dir('generated/resources/buildinfo')
+    outputs.upToDateWhen { false }
+    outputs.dir(outDir)
+    doLast {
+        def props = new Properties()
+        if (versionFile.exists()) {
+            versionFile.withInputStream { props.load(it) }
+        }
+        def bn = props.getProperty('build', '0')
+        def bt = props.getProperty('time', new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX"))
+        def f = outDir.get().file('build-info.properties').asFile
+        f.parentFile.mkdirs()
+        f.text = "buildNumber=${bn}\nbuildTime=${bt}\nversion=${baseVersion}+build.${bn}\n"
+    }
+}
+sourceSets.main.resources.srcDir(tasks.writeBuildInfo)
+processResources.dependsOn(tasks.writeBuildInfo)
+
 // Fat-jar so the add-on can be dropped into Bookmap's add-on folder
-// without the user having to manage transitive dependencies.
+// without the user having to manage transitive dependencies. The build
+// number is bumped *before* assembly so consecutive `gradle fatJar`
+// invocations always produce distinct manifests.
+tasks.register('bumpBuildNumber') {
+    doLast {
+        buildNumber = buildNumber + 1
+        buildTime = new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX")
+        version = "${baseVersion}+build.${buildNumber}"
+        buildProps.setProperty('build', buildNumber.toString())
+        buildProps.setProperty('time', buildTime)
+        versionFile.withOutputStream { os ->
+            buildProps.store(os, 'Auto-incremented by Gradle on each fatJar')
+        }
+        logger.lifecycle("Bookmap add-on build number bumped to ${buildNumber} (${buildTime})")
+    }
+}
+tasks.writeBuildInfo.mustRunAfter(tasks.bumpBuildNumber)
+tasks.processResources.mustRunAfter(tasks.bumpBuildNumber)
+tasks.compileJava.mustRunAfter(tasks.bumpBuildNumber)
+
 tasks.register('fatJar', Jar) {
+    dependsOn 'bumpBuildNumber'
     archiveClassifier = 'all'
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    // Populate manifest from the freshly-bumped values right before the
+    // archive is assembled — by this point bumpBuildNumber.doLast has
+    // already updated `buildNumber` and `buildTime` in the build script
+    // scope, and `version.properties` has been written to disk.
+    doFirst {
+        def props = new Properties()
+        if (versionFile.exists()) {
+            versionFile.withInputStream { props.load(it) }
+        }
+        def bn = props.getProperty('build', '0')
+        def bt = props.getProperty('time', 'unknown')
+        manifest.attributes(
+            'Implementation-Title': 'Bookmap Strategy Add-on',
+            'Implementation-Version': "${baseVersion}+build.${bn}",
+            'Build-Number': bn,
+            'Build-Time': bt,
+            'Main-Class': 'com.trading.bookmap.BookmapStrategyAddon'
+        )
+    }
     manifest {
         attributes(
             'Implementation-Title': 'Bookmap Strategy Add-on',
-            'Implementation-Version': project.version,
             'Main-Class': 'com.trading.bookmap.BookmapStrategyAddon'
         )
     }
