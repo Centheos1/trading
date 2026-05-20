@@ -5,9 +5,69 @@ from the live Python / C++ execution engine to a Java add-on running
 inside Bookmap. The add-on is **visualization-only** — it never sends
 execution commands and has no direct dependency on the trading stack.
 
-The MVP delivers the proof-of-concept end-to-end connection. Real
-trade markers are rendered behind a placeholder coordinate mapper; the
-metrics panel and IPC transport are production-quality.
+---
+
+## Quick-start (mock data)
+
+```bash
+# Terminal 1 — start the mock event publisher
+cd /path/to/backtest
+python -m bookmap_publisher.mock_emitter --symbol BTCUSDT --interval 1.0
+
+# In Bookmap — load the fat jar
+#   Add-ons → Load from file →
+#   bookmap-addon/build/libs/bookmap-addon-0.1.0+build.N-all.jar
+#   Then subscribe to any instrument (e.g. BTCUSDT).
+```
+
+Within a few seconds the **Strategy Events** side panel will update live
+with connection state, regime, PnL, position, and the last entry/exit.
+Trade markers (▲▼ entries, ◆ exits) will appear on the heatmap chart at
+the timestamp and price of each event.
+
+The header of the side-panel shows `v0.1.0+build.N (build #N)` so you can
+verify the exact build Bookmap actually loaded.
+
+> **Reloading a new build:** Bookmap caches loaded Java classes for the
+> rest of the session. Simply "removing" the add-on from the menu and
+> re-loading the new jar leaves the previous classloader's daemon
+> threads alive, which would normally cause two WebSocket connections.
+>
+> The add-on guards against this with a **JVM-wide generation token**
+> (`com.trading.bookmap.ws.generation` in `System.getProperties()`).
+> Each `StrategyWebSocketClient.start()` publishes a strictly-increasing
+> token; older clients poll the token every 250 ms and gracefully close
+> their socket + exit when they observe a newer one. The publisher will
+> still see one transient "old + new" overlap (~250 ms) the first time
+> you hot-reload, after which only the newest client stays connected.
+>
+> For a fully clean state — and to verify the build number printed in
+> the startup log — **quit and restart Bookmap between version swaps**.
+
+---
+
+## Build numbering
+
+`gradle fatJar` auto-increments a build counter each time it runs. The
+number ends up in five places so you can always tell which build is
+loaded:
+
+| Where | Example |
+|-------|---------|
+| Jar filename | `bookmap-addon-0.1.0+build.42-all.jar` |
+| `META-INF/MANIFEST.MF` | `Build-Number: 42`, `Build-Time: 2026-05-20T22:51:13+10:00` |
+| `build-info.properties` (root of jar) | `buildNumber=42` |
+| Add-on startup log | `Bookmap Strategy Add-on  version=0.1.0+build.42  build#42  built=…` |
+| Side-panel header | `v0.1.0+build.42 (build #42)` |
+
+The counter persists in `bookmap-addon/version.properties` (committed to
+git so numbers are monotonic across machines).
+
+```bash
+cd bookmap-addon
+gradle fatJar                       # builds; auto-bumps counter
+ls build/libs/                      # confirm filename matches what you load
+```
 
 ---
 
@@ -16,14 +76,14 @@ metrics panel and IPC transport are production-quality.
 | Layer | Purpose | Lives in |
 |-------|---------|----------|
 | `bookmap_publisher/` | Thread-safe WebSocket publisher driven by the Python execution engine. Owns a background asyncio loop on port 8765. | `bookmap_publisher/` |
-| `execution/live_runner.py` | Hosts the live execution loop. Now accepts an optional `bookmap_publisher` instance; passing `None` (default) preserves prior behaviour exactly. | `execution/` |
-| `bookmap-addon/` | Gradle Java 11 module that runs inside Bookmap. Connects to `ws://localhost:8765`, parses events, updates the Swing metrics panel, and draws trade overlays. | `bookmap-addon/` |
+| `execution/live_runner.py` | Hosts the live execution loop. Accepts an optional `bookmap_publisher` instance; `None` (default) preserves prior behaviour exactly. | `execution/` |
+| `bookmap-addon/` | Gradle Java 17 module that runs inside Bookmap. Connects to `ws://localhost:8765`, parses events, updates the side-panel and draws trade overlays on the heatmap chart. | `bookmap-addon/` |
 
 ### Why decoupled
 
 * The Java add-on has zero dependencies on Python, the C++ engine, or
-  the broker. Closing or restarting Bookmap has no effect on the
-  trading engine.
+  the broker. Closing or restarting Bookmap has no effect on the trading
+  engine.
 * If the publisher fails to start, the engine continues without it —
   every Bookmap hook in `live_runner.py` is wrapped in a `try/except`
   that logs at `DEBUG` and never raises.
@@ -48,7 +108,9 @@ metrics panel and IPC transport are production-quality.
 |                    |        +--------------------+        | MetricsState        |
 | status_printer     |                                      | StrategyMetrics     |
 |                    |                                      | Panel (Swing EDT)   |
-+--------------------+                                      +---------------------+
++--------------------+                                      | TradeOverlayPainter |
+                                                            | (heatmap chart)     |
+                                                            +---------------------+
 ```
 
 Three hook points inside `run_live_execute`:
@@ -56,9 +118,7 @@ Three hook points inside `run_live_execute`:
 1. **Intent dispatch — `_gate_and_dispatch`**. After
    `exec_mgr.on_intent(intent)` returns, the publisher receives
    `on_intent(intent, exec_mgr, symbol)`. `event_builder` maps the
-   intent to an `ENTRY` or `EXIT` event. Cancel / rearm / prepare
-   intents are intentionally ignored — they do not represent a
-   chart-visible action.
+   intent to an `ENTRY` or `EXIT` event.
 2. **Periodic metrics — `status_printer`**. The existing 30-second
    status loop additionally calls `bookmap_publisher.on_metrics(...)`,
    which emits a `METRIC` (PnL) and a `POSITION` event drawn from
@@ -95,7 +155,7 @@ Per-type usage:
 
 | Type | Required fields |
 |------|-----------------|
-| `ENTRY` | `timestamp`, `price`, `side`, `label`. `qty` is `0.0` in the MVP — see TODO in `event_builder.entry_from_intent`. |
+| `ENTRY` | `timestamp`, `price`, `side`, `label`. `qty` is `0.0` in the MVP — see §6.1. |
 | `EXIT`  | `timestamp`, `price`, `side`, `qty`, `label`. |
 | `METRIC`| `name`, `value`, `label` (optional). |
 | `POSITION` | `side`, `qty`, `label` (or `label = "Flat"` when flat). |
@@ -114,7 +174,7 @@ docker compose --profile bookmap up bookmap-publisher
 ```
 
 The publisher logs every event it emits at `DEBUG` level; default
-`INFO` is quieter. To verify with a one-liner:
+`INFO` is quieter. To verify the WebSocket stream independently:
 
 ```bash
 pip install websockets
@@ -134,31 +194,56 @@ asyncio.run(main())
 
 ```bash
 cd bookmap-addon
-gradle build
+gradle fatJar
 # Produces:
 #   build/libs/bookmap-addon-0.1.0.jar      (thin)
-#   build/libs/bookmap-addon-0.1.0-all.jar  (fat jar with java-websocket + jackson)
+#   build/libs/bookmap-addon-0.1.0-all.jar  (fat jar with all dependencies)
+```
+
+Requirements: Bookmap 7.7+ installed at `/Applications/Bookmap.app`
+(default on macOS). The build reads `bm-l1api.jar` from the Bookmap
+app bundle as a `compileOnly` dependency. Override the path via:
+
+```bash
+gradle fatJar -PbookmapLib=/path/to/Bookmap.app/Contents/app/lib
 ```
 
 Toolchain auto-provisioning is enabled via the foojay resolver —
-Gradle downloads a JDK 11 the first time the build runs if one is not
-already installed.
+Gradle downloads a JDK 17 automatically if one is not already installed.
 
-To smoke-test the add-on stand-alone (opens a Swing window connected
-to the publisher):
+To smoke-test stand-alone (opens a Swing window connected to the
+publisher without launching Bookmap):
 
 ```bash
 java -jar build/libs/bookmap-addon-0.1.0-all.jar
 ```
 
-To load into Bookmap proper, drop `bookmap-addon-0.1.0-all.jar` into
-Bookmap's add-on directory (typically `~/BookmapAddons/` on macOS) and
-restart Bookmap. The Bookmap-specific `Layer` registration step is
-still TODO — see §8.
+---
+
+## 6. Full-implementation guide (remaining before V1 cut)
+
+The MVP populates every field in the wire schema but a few use
+placeholder values. Each item below is a self-contained unit of work
+in `bookmap_publisher/event_builder.py`:
+
+### 6.1 `entry_from_intent` qty
+The `ExecutionManager` sizes orders **after** the intent is published.
+Publish an `ENTRY` follow-up keyed to the broker fill (or wait for the
+order callback) so the `qty` field reflects what was actually filled.
+
+### 6.2 `exit_from_intent` PnL
+Hook into `ExecutionManager._session_realized_pnl` deltas (recorded on
+each `_execute_intent_exit` confirmed fill) so the EXIT event carries
+realised PnL in its `label`.
+
+### 6.3 `metric_from_exec_mgr` extended metrics
+Extend the periodic hook to emit additional METRIC events sourced from
+`ofe_engine.get_strategy_snapshot()` — Wave regime, Tide bias,
+risk-budget percentage, consumed ES.
 
 ---
 
-## 6. Activating live publishing from execution mode
+## 7. Activating live publishing from execution mode
 
 The trading engine remains 100% backwards-compatible: the
 `bookmap_publisher` parameter on `run_live_execute` defaults to
@@ -187,58 +272,3 @@ finally:
 `port=` / `symbol_default=` to override. A return value of `None`
 means the WebSocket server could not bind — the engine should still
 run, just without Bookmap.
-
----
-
-## 7. Full-implementation guide (resolve before V1 cut)
-
-The MVP populates every field in the wire schema, but some fields use
-placeholder values clearly marked `# TODO: full mapping` in
-`bookmap_publisher/event_builder.py`. Each TODO is the next unit of
-work:
-
-1. **`entry_from_intent` qty**. The `ExecutionManager` sizes orders
-   after the intent is published. Publish an `ENTRY` follow-up keyed
-   to the broker fill (or wait for the order callback) so the qty
-   reflects what was actually filled.
-2. **`exit_from_intent` PnL**. Hook into
-   `ExecutionManager._session_realized_pnl` deltas (recorded on each
-   `_execute_intent_exit` confirmed fill) so the EXIT event carries
-   realised PnL in its `label`.
-3. **`metric_from_exec_mgr` regime / risk budget**. Extend the
-   periodic hook to also emit METRIC events sourced from
-   `ofe_engine.get_strategy_snapshot()` — Wave regime, Tide bias,
-   risk-budget percentage, consumed ES.
-4. **`TradeOverlayRenderer.CoordinateMapper`**. Wire the placeholder
-   `mapTimestampToX` / `mapPriceToY` into the real Bookmap chart
-   viewport once the SDK adapter is available.
-
-These four TODOs are deliberately additive: none of them require
-re-architecting the event schema or the IPC transport.
-
----
-
-## 8. Remaining Bookmap API integration points
-
-The MVP intentionally stops short of integrating Bookmap's proprietary
-SDK because that jar is not part of the public Gradle dependency tree.
-The following hooks are stubbed in code with `// TODO: Bookmap canvas
-API` comments:
-
-1. **`BookmapStrategyAddon` registration**. Implement the Bookmap
-   `BookmapAddon` / `Layer` interface and annotate the class with the
-   SDK's `@LayerSettings`. The lifecycle methods `onLoad` /
-   `onUnload` / `onTimestamp` / `onPaint` already exist on the class
-   and need only to be wired through the SDK base class.
-2. **`TradeOverlayRenderer.CoordinateMapper`**. Replace the default
-   `(-1, -1)` mapper with one bound to the Bookmap viewport's
-   `timeToScreenCoordinate(long ts)` and `priceToScreenCoordinate
-   (double price)` callbacks.
-3. **Side panel embedding**. Bookmap surfaces side panels via its
-   `Layer` API; add a method that returns
-   `BookmapStrategyAddon.getMetricsPanel()` (already public) so the
-   chart picks it up automatically.
-
-Once these three points are wired the add-on becomes a fully-fledged
-Bookmap layer with zero further changes to the IPC, state, or
-rendering code in the add-on tree.

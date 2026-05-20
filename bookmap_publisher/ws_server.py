@@ -186,21 +186,36 @@ class WsBroadcastServer:
         self._clients.add(ws)
         peer = getattr(ws, "remote_address", None)
         logger.info("Bookmap client connected from %s", peer)
+        # Track why the send loop ended so we can diagnose client-side
+        # disconnects from the server logs alone. Without this, all
+        # disconnects (clean close, RST, write timeout) look identical.
+        end_reason: str = "queue drained"
+        end_exc: Optional[BaseException] = None
         try:
             while True:
                 payload = await queue.get()
                 if payload is None:
+                    end_reason = "stop sentinel"
                     break
                 await ws.send(payload)
-        except Exception:
-            logger.debug(
-                "Bookmap client send loop ended for %s",
-                peer,
-                exc_info=True,
-            )
+        except BaseException as exc:  # noqa: BLE001 -- want to log everything
+            end_reason = f"{type(exc).__name__}: {exc}"
+            end_exc = exc
         finally:
             self._clients.discard(ws)
-            logger.info("Bookmap client disconnected from %s", peer)
+            if end_exc is not None:
+                logger.info(
+                    "Bookmap client disconnected from %s (%s)",
+                    peer,
+                    end_reason,
+                    exc_info=end_exc,
+                )
+            else:
+                logger.info(
+                    "Bookmap client disconnected from %s (%s)",
+                    peer,
+                    end_reason,
+                )
 
     def _fanout(self, payload: str) -> None:
         for ws in list(self._clients):
