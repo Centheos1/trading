@@ -1,5 +1,6 @@
 package com.trading.bookmap.render;
 
+import com.trading.bookmap.DiagnosticLog;
 import com.trading.bookmap.model.EventType;
 import com.trading.bookmap.model.StrategyEvent;
 
@@ -34,26 +35,23 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Bookmap {@link ScreenSpacePainterFactory} that draws ENTRY / EXIT markers
  * directly on the heatmap chart at the event's timestamp and price.
  *
- * <h3>Lifecycle</h3>
- * <ol>
- *   <li>Create one instance per add-on.</li>
- *   <li>Register it once via
- *       {@code api.sendUserMessage(Layer1ApiUserMessageModifyScreenSpacePainter...)}
- *       when an instrument is first added.</li>
- *   <li>Push incoming WS events via {@link #addEvent(StrategyEvent, double)}
- *       from any thread — the painter applies them to all active canvases
- *       thread-safely.</li>
- * </ol>
+ * <h3>Per-instrument scaling</h3>
+ * Bookmap's {@code RelativeDataVerticalCoordinate} expects price as
+ * <em>tick units</em> (price ÷ pips). Each instrument has its own pip
+ * size (BTC = 0.01, ES = 0.25, …), so a single shared pips value cannot
+ * correctly position markers on multiple charts simultaneously.
  *
- * <h3>Coordinate mapping</h3>
- * <ul>
- *   <li>Time: {@code HORIZONTAL_DATA_ZERO + eventTimestampNanos} — places the
- *       icon at the exact point on the time axis where the event occurred.</li>
- *   <li>Price: {@code VERTICAL_DATA_ZERO + (price / pips)} — places the icon
- *       at the event price level on the vertical axis.</li>
- *   <li>Both coordinates have a ±{@value #ICON_HALF}px pixel offset to centre
- *       the icon over the point.</li>
- * </ul>
+ * <p>Instead, the painter resolves pips lazily per-canvas via an
+ * {@link InstrumentInfoLookup} supplied at construction time. The
+ * caller registers each chart's pips via
+ * {@link com.trading.bookmap.BookmapStrategyAddon#onInstrumentAdded}.
+ *
+ * <h3>Symbol filtering</h3>
+ * Each canvas is associated with one alias (e.g. {@code BTCUSDT@BN}).
+ * Events from the WebSocket carry their own {@code symbol} (e.g.
+ * {@code BTCUSDT}). We only draw a marker on a canvas whose alias
+ * resolves to the same symbol — this prevents BTC entries from being
+ * placed at nonsense prices on an ES chart and vice-versa.
  *
  * <h3>Marker shapes</h3>
  * <ul>
@@ -66,20 +64,31 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
 
     private static final Logger LOG = LoggerFactory.getLogger(TradeOverlayPainter.class);
 
-    static final int ICON_HALF = 7;
+    static final int ICON_HALF = 14;
 
+    /** Caller-supplied lookup so the painter can resolve per-alias metadata. */
+    public interface InstrumentInfoLookup {
+        /** Returns the pip size for the given Bookmap alias, or {@code 0.0} if unknown. */
+        double pipsForAlias(String alias);
+
+        /** Returns the symbol associated with the given alias, or {@code ""} if unknown. */
+        String symbolForAlias(String alias);
+    }
+
+    private final InstrumentInfoLookup lookup;
     private final CopyOnWriteArrayList<MarkerSpec> markers = new CopyOnWriteArrayList<>();
     private final Map<String, InnerPainter> activePainters = new ConcurrentHashMap<>();
 
+    public TradeOverlayPainter(InstrumentInfoLookup lookup) {
+        this.lookup = lookup;
+    }
+
     /**
-     * Add an ENTRY or EXIT event so it appears on all active instrument charts.
-     * May be called from any thread. Non-ENTRY/EXIT events are silently ignored.
-     *
-     * @param event     the strategy event
-     * @param pricePips the instrument's minimum price increment (from
-     *                  {@code InstrumentInfo.pips}); used to convert price to ticks
+     * Add an ENTRY or EXIT event so it appears on every active chart whose
+     * symbol matches. May be called from any thread. Non-ENTRY/EXIT events
+     * are silently ignored.
      */
-    public void addEvent(StrategyEvent event, double pricePips) {
+    public void addEvent(StrategyEvent event) {
         if (event == null) {
             return;
         }
@@ -87,8 +96,13 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
         if (type != EventType.ENTRY && type != EventType.EXIT) {
             return;
         }
-        MarkerSpec spec = new MarkerSpec(event, pricePips);
+        MarkerSpec spec = new MarkerSpec(event);
         markers.add(spec);
+        DiagnosticLog.log("TradeOverlay: queued " + type
+            + " symbol=" + spec.symbol
+            + " price=" + spec.price
+            + " ts=" + spec.timestampMs
+            + " activeCanvases=" + activePainters.size());
         for (InnerPainter p : activePainters.values()) {
             p.applySpec(spec);
         }
@@ -108,8 +122,18 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
             String alias,
             String indicatorName,
             ScreenSpaceCanvasFactory canvasFactory) {
-        InnerPainter painter = new InnerPainter(alias, canvasFactory, markers);
+        // In Bookmap's screen-space painter API the parameters are:
+        //   alias        = a synthetic key like "com.trading.bookmap.BookmapStrategyAddon#Trade Overlays"
+        //   indicatorName = the ACTUAL instrument alias, e.g. "BTCUSDT@BN"
+        // We must use indicatorName for pips/symbol lookups; alias is only
+        // used as the map key to find and dispose this painter later.
+        String instrumentAlias = (indicatorName != null && !indicatorName.isEmpty())
+            ? indicatorName : alias;
+        InnerPainter painter = new InnerPainter(alias, instrumentAlias, canvasFactory, markers);
         activePainters.put(alias, painter);
+        DiagnosticLog.log("TradeOverlay: createScreenSpacePainter painterKey=" + alias
+            + " instrumentAlias=" + instrumentAlias
+            + " backlog=" + markers.size());
         return painter;
     }
 
@@ -117,13 +141,16 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
 
     private final class InnerPainter implements ScreenSpacePainterAdapter {
 
-        private final String alias;
+        private final String painterKey;
+        /** The actual instrument alias (e.g. "BTCUSDT@BN"), used for pips/symbol lookup. */
+        private final String instrumentAlias;
         final ScreenSpaceCanvas canvas;
         private final Set<Long> applied = ConcurrentHashMap.newKeySet();
 
-        InnerPainter(String alias, ScreenSpaceCanvasFactory factory,
-                     List<MarkerSpec> existing) {
-            this.alias = alias;
+        InnerPainter(String painterKey, String instrumentAlias,
+                     ScreenSpaceCanvasFactory factory, List<MarkerSpec> existing) {
+            this.painterKey = painterKey;
+            this.instrumentAlias = instrumentAlias;
             this.canvas = factory.createCanvas(ScreenSpaceCanvasType.HEATMAP);
             for (MarkerSpec spec : existing) {
                 applySpec(spec);
@@ -134,14 +161,24 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
             if (!applied.add(spec.id)) {
                 return;
             }
+            // Use instrumentAlias (e.g. "BTCUSDT@BN") for pips/symbol lookup —
+            // NOT painterKey ("com.trading.bookmap.BookmapStrategyAddon#Trade Overlays").
+            String chartSymbol = lookup.symbolForAlias(instrumentAlias);
+            String eventSymbol = spec.symbol == null ? "" : spec.symbol;
+            if (!chartSymbol.isEmpty() && !eventSymbol.isEmpty()
+                    && !symbolsMatch(chartSymbol, eventSymbol)) {
+                return;
+            }
+
+            double pips = lookup.pipsForAlias(instrumentAlias);
+            if (pips <= 0.0) {
+                pips = 1.0;
+            }
             try {
                 long tsNanos = spec.timestampMs * 1_000_000L;
-                double ticks = (spec.pricePips > 0) ? (spec.price / spec.pricePips) : spec.price;
+                double ticks = spec.price / pips;
 
                 HorizontalCoordinate xBase = RelativeHorizontalCoordinate.HORIZONTAL_DATA_ZERO;
-                // Compose vertical: data coordinate at the price, then pixel offsets above/below.
-                // RelativeVerticalCoordinate(base, data, pixel) is protected; nesting two
-                // public subclasses achieves the same result.
                 VerticalCoordinate priceCoord = new RelativeDataVerticalCoordinate(
                     RelativeVerticalCoordinate.VERTICAL_DATA_ZERO, ticks);
 
@@ -153,20 +190,43 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
                     new RelativePixelVerticalCoordinate(priceCoord,  ICON_HALF)
                 );
                 canvas.addShape(icon);
+                DiagnosticLog.log("TradeOverlay: drew "
+                    + (spec.isEntry ? "ENTRY" : "EXIT")
+                    + " instrument=" + instrumentAlias
+                    + " symbol=" + eventSymbol
+                    + " price=" + spec.price
+                    + " pips=" + pips
+                    + " ticks=" + ticks);
             } catch (Exception ex) {
-                LOG.debug("TradeOverlayPainter: failed to place marker for alias={}", alias, ex);
+                LOG.debug("TradeOverlayPainter: failed to place marker for instrument={}",
+                    instrumentAlias, ex);
+                DiagnosticLog.log("TradeOverlay: place failed instrument=" + instrumentAlias
+                    + " price=" + spec.price, ex);
             }
         }
 
         @Override
         public void dispose() {
-            activePainters.remove(alias);
+            activePainters.remove(painterKey);
             try {
                 canvas.dispose();
             } catch (Exception ex) {
-                LOG.debug("TradeOverlayPainter: canvas dispose failed for alias={}", alias, ex);
+                LOG.debug("TradeOverlayPainter: canvas dispose failed for instrument={}",
+                    instrumentAlias, ex);
             }
         }
+    }
+
+    /**
+     * Loose symbol match — accepts exact matches and the common case where
+     * an alias prefix encodes the symbol (e.g. {@code BTCUSDT@BN} carries
+     * symbol {@code BTCUSDT}). Comparison is case-insensitive.
+     */
+    static boolean symbolsMatch(String chartSymbol, String eventSymbol) {
+        if (chartSymbol.equalsIgnoreCase(eventSymbol)) {
+            return true;
+        }
+        return chartSymbol.toUpperCase().contains(eventSymbol.toUpperCase());
     }
 
     // ------------------------------------------------------------------ spec
@@ -176,13 +236,15 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
         final long id;
         final long timestampMs;
         final double price;
-        final double pricePips;
+        final String symbol;
+        final boolean isEntry;
         final PreparedImage image;
 
-        MarkerSpec(StrategyEvent ev, double pricePips) {
+        MarkerSpec(StrategyEvent ev) {
             this.timestampMs = ev.getTimestamp();
             this.price = ev.getPrice();
-            this.pricePips = pricePips;
+            this.symbol = ev.getSymbol();
+            this.isEntry = ev.getType() == EventType.ENTRY;
             this.id = timestampMs
                 ^ Double.doubleToLongBits(price)
                 ^ (long) ev.getType().ordinal() * 31L;
@@ -209,17 +271,14 @@ public final class TradeOverlayPainter implements ScreenSpacePainterFactory {
 
                 int m = 1;
                 if (isEntry && isBuy) {
-                    // upward-pointing triangle ▲
                     int[] xs = {size / 2, m, size - m};
                     int[] ys = {m, size - m, size - m};
                     g.fillPolygon(xs, ys, 3);
                 } else if (isEntry) {
-                    // downward-pointing triangle ▼
                     int[] xs = {size / 2, m, size - m};
                     int[] ys = {size - m, m, m};
                     g.fillPolygon(xs, ys, 3);
                 } else {
-                    // exit: diamond ◆
                     int cx = size / 2, cy = size / 2;
                     int[] xs = {cx, m, cx, size - m};
                     int[] ys = {m, cy, size - m, cy};

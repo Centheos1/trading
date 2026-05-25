@@ -134,13 +134,13 @@ tasks.register('fatJar', Jar) {
             'Implementation-Version': "${baseVersion}+build.${bn}",
             'Build-Number': bn,
             'Build-Time': bt,
-            'Main-Class': 'com.trading.bookmap.BookmapStrategyAddon'
+            'Main-Class': 'com.trading.bookmap.StandaloneMain'
         )
     }
     manifest {
         attributes(
             'Implementation-Title': 'Bookmap Strategy Add-on',
-            'Main-Class': 'com.trading.bookmap.BookmapStrategyAddon'
+            'Main-Class': 'com.trading.bookmap.StandaloneMain'
         )
     }
     from sourceSets.main.output

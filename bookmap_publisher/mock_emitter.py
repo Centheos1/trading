@@ -50,8 +50,12 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument(
         "--base-price",
         type=float,
-        default=67250.0,
-        help="Anchor price for ENTRY/EXIT events",
+        default=77000.0,
+        help=(
+            "Anchor price for ENTRY/EXIT events. Override to match the "
+            "instrument's current price so markers land on the visible "
+            "heatmap (e.g. --base-price 77000 for BTC, 3500 for ETH)."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -83,7 +87,8 @@ class _MockState:
         self.tick = 0
 
     def step_price(self) -> float:
-        drift = random.gauss(0.0, 5.0)
+        sigma = max(1.0, self.base_price * 0.0005)
+        drift = random.gauss(0.0, sigma)
         self.base_price = max(1.0, self.base_price + drift)
         return self.base_price
 
