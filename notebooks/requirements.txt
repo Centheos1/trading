@@ -1,0 +1,12 @@
+# Research-notebook dependencies.
+#
+# Layered on top of the project's top-level ``requirements.txt`` — install
+# both: ``pip install -r requirements.txt -r notebooks/requirements.txt``.
+#
+# The notebooks themselves only import from the existing strategy modules
+# (``schemas``, ``tide``, ``wave``, ``strategies.orderflow``, ``hmm``) plus
+# the helpers below.
+
+jupyterlab>=4.0,<5
+ipywidgets>=8.1,<9
+plotly>=5.20,<6

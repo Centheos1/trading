@@ -73,14 +73,76 @@ logger = logging.getLogger("collect_ticks")
 # S3 upload helper
 # ---------------------------------------------------------------------------
 
-def _upload_to_s3(local_path: str, bucket: str, key: str) -> bool:
-    """Upload a file to S3 using boto3. Returns True on success."""
+def _create_h5_snapshot(src_path: str, dst_path: str) -> bool:
+    """Copy an open HDF5 tick file to a clean, self-consistent snapshot.
+
+    When the C++ TickStore has ``src_path`` open for writing, the HDF5
+    root-group navigation metadata (object header, symbol table nodes, local
+    heap) lives in libhdf5's internal page cache and may not have been
+    flushed to the OS-level file.  Uploading the raw file to S3 in that
+    state produces an unreadable copy.
+
+    On Linux, a second h5py process opening the same file in read-only mode
+    reads through the OS page cache, which *does* contain the unflushed
+    writes from the C++ process.  We exploit this to copy all datasets to a
+    freshly created file that has fully consistent on-disk metadata.
+
+    Returns True on success, False if the read or write failed.
+    """
+    try:
+        import h5py
+
+        with h5py.File(src_path, "r", locking=False) as src, \
+             h5py.File(dst_path, "w") as dst:
+            for name in src.keys():
+                src.copy(name, dst, expand_soft=True, expand_external=True)
+
+        logger.info("HDF5 snapshot written to %s", dst_path)
+        return True
+    except Exception as exc:
+        logger.error("HDF5 snapshot failed: %s", exc)
+        return False
+
+
+def _upload_to_s3(local_path: str, bucket: str, key: str,
+                  *, collector_running: bool = False) -> bool:
+    """Upload a tick HDF5 file to S3.
+
+    When ``collector_running=True`` the C++ TickStore still has the file
+    open, so a direct upload would capture an inconsistent on-disk state
+    (unflushed HDF5 metadata).  In that case a clean snapshot is created
+    first via :func:`_create_h5_snapshot` and the snapshot is uploaded
+    instead.  The original file is left untouched.
+
+    When ``collector_running=False`` (i.e. called after the store has been
+    flushed and closed) the file is uploaded directly.
+    """
     try:
         import boto3
+        import os
+
+        upload_path = local_path
+
+        if collector_running:
+            snapshot = local_path + ".snapshot.h5"
+            logger.info(
+                "Collector is running — creating HDF5 snapshot before upload"
+            )
+            if _create_h5_snapshot(local_path, snapshot):
+                upload_path = snapshot
+            else:
+                logger.warning(
+                    "Snapshot failed; uploading raw file (may be unreadable)"
+                )
+
         s3 = boto3.client("s3")
-        logger.info("Uploading %s → s3://%s/%s", local_path, bucket, key)
-        s3.upload_file(local_path, bucket, key)
+        logger.info("Uploading %s → s3://%s/%s", upload_path, bucket, key)
+        s3.upload_file(upload_path, bucket, key)
         logger.info("S3 upload complete: s3://%s/%s", bucket, key)
+
+        if upload_path != local_path and os.path.exists(upload_path):
+            os.unlink(upload_path)
+
         return True
     except Exception as exc:
         logger.error("S3 upload failed: %s", exc)
@@ -219,7 +281,12 @@ def main() -> int:
             logger.error("Error closing tick store: %s", exc)
 
         if args.s3_bucket:
-            ok = _upload_to_s3(store_path, args.s3_bucket, args.s3_key)
+            # collector_running=False: store was flushed+closed above, so
+            # the on-disk file is self-consistent and can be uploaded directly.
+            ok = _upload_to_s3(
+                store_path, args.s3_bucket, args.s3_key,
+                collector_running=False,
+            )
             if not ok:
                 exit_code = max(exit_code, 2)
 
@@ -228,5 +295,38 @@ def main() -> int:
     return exit_code
 
 
+def upload_snapshot() -> int:
+    """Upload a clean HDF5 snapshot to S3 without stopping the collector.
+
+    Use this from a cron job or systemd timer to push fresh data to S3
+    while collect_ticks.py is still running::
+
+        # crontab — upload every 6 hours
+        0 */6 * * *  cd /path/to/backtest && python collect_ticks.py --upload-snapshot \\
+                         --s3-bucket trading-data-centheos
+
+    Because the collector is running during the upload we use
+    :func:`_create_h5_snapshot` to produce a clean copy first.
+    """
+    import argparse as _ap
+
+    p = _ap.ArgumentParser(description="Upload HDF5 snapshot without stopping collector")
+    p.add_argument("--s3-bucket", required=True)
+    p.add_argument("--s3-key", default="ticks/binance_ticks.h5")
+    p.add_argument("--exchange", default="binance")
+    p.add_argument("--data-dir", default="data")
+    p.add_argument("--log-level", default="INFO")
+    args = p.parse_args()
+
+    _setup_logging(args.log_level)
+    store_path = os.path.join(args.data_dir, f"{args.exchange}_ticks.h5")
+    ok = _upload_to_s3(store_path, args.s3_bucket, args.s3_key, collector_running=True)
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    import sys as _sys
+    if "--upload-snapshot" in _sys.argv:
+        _sys.argv.remove("--upload-snapshot")
+        _sys.exit(upload_snapshot())
+    _sys.exit(main())
