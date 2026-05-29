@@ -117,14 +117,16 @@ def _upload_to_s3(local_path: str, bucket: str, key: str,
     When ``collector_running=False`` (i.e. called after the store has been
     flushed and closed) the file is uploaded directly.
     """
+    import boto3
+    import os
+
+    # Resolve the snapshot path upfront so the finally block can always find
+    # it — regardless of whether the upload succeeds or raises.
+    snapshot: str | None = (local_path + ".snapshot.h5") if collector_running else None
+    upload_path = local_path
+
     try:
-        import boto3
-        import os
-
-        upload_path = local_path
-
         if collector_running:
-            snapshot = local_path + ".snapshot.h5"
             logger.info(
                 "Collector is running — creating HDF5 snapshot before upload"
             )
@@ -139,14 +141,17 @@ def _upload_to_s3(local_path: str, bucket: str, key: str,
         logger.info("Uploading %s → s3://%s/%s", upload_path, bucket, key)
         s3.upload_file(upload_path, bucket, key)
         logger.info("S3 upload complete: s3://%s/%s", bucket, key)
-
-        if upload_path != local_path and os.path.exists(upload_path):
-            os.unlink(upload_path)
-
         return True
+
     except Exception as exc:
         logger.error("S3 upload failed: %s", exc)
         return False
+
+    finally:
+        # Always remove the snapshot — on success, on upload failure, and on
+        # any unexpected exception — so failed uploads never accumulate files.
+        if snapshot and os.path.exists(snapshot):
+            os.unlink(snapshot)
 
 
 # ---------------------------------------------------------------------------
