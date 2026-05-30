@@ -31,33 +31,56 @@ fi
 UPLOADED=0
 FAILED=0
 
-sync_file() {
-    local local_path="$1"
-    local s3_key="$2"
-    if [ ! -f "${local_path}" ]; then
-        return 0
+# ---------------------------------------------------------------------------
+# Tick files — snapshot upload via the running Docker container.
+#
+# A raw "aws s3 cp" of an open HDF5 file copies it mid-write: the C++
+# TickStore's root-group metadata is still in libhdf5's page cache and has
+# never been flushed to the OS-level file.  The resulting S3 object is
+# structurally unreadable by h5py.
+#
+# Instead we exec into the container (where h5py can read through the OS
+# page cache and see the complete in-memory state) and run the snapshot
+# command, which:
+#   1. Copies all datasets to a clean temporary HDF5 file.
+#   2. Uploads that file to S3.
+#   3. Deletes the temp file.
+# The running collector is never paused or restarted.
+# ---------------------------------------------------------------------------
+
+CONTAINER="${TICK_CONTAINER:-trading-data}"
+
+sync_tick_snapshot() {
+    local container="$1"
+    local s3_key="$2"           # e.g. ticks/binance_ticks.h5
+    local data_dir="${3:-/app/data}"
+
+    if ! docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null | grep -q true; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [WARN] container ${container} not running — skipping tick snapshot" >> "${LOG_FILE}"
+        return 1
     fi
-    if aws s3 cp "${local_path}" "s3://${S3_BUCKET}/${s3_key}" --only-show-errors; then
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [OK] ${local_path} → s3://${S3_BUCKET}/${s3_key}" >> "${LOG_FILE}"
+
+    if docker exec "${container}" python collect_ticks.py \
+            --upload-snapshot \
+            --s3-bucket "${S3_BUCKET}" \
+            --s3-key "${s3_key}" \
+            --data-dir "${data_dir}" >> "${LOG_FILE}" 2>&1; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [OK] tick snapshot → s3://${S3_BUCKET}/${s3_key}" >> "${LOG_FILE}"
         UPLOADED=$((UPLOADED + 1))
     else
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [FAIL] ${local_path}" >> "${LOG_FILE}"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [FAIL] tick snapshot for ${container}" >> "${LOG_FILE}"
         FAILED=$((FAILED + 1))
     fi
 }
 
-# Default single-symbol tick file
-sync_file "data/binance_ticks.h5" "ticks/binance_ticks.h5"
+# Default single-symbol container → ticks/binance_ticks.h5
+sync_tick_snapshot "${CONTAINER}" "ticks/binance_ticks.h5"
 
-# Per-symbol tick files from multi-instance setup (data/<SYMBOL>/binance_ticks.h5)
-# Skip data/ohlcv/ — that's a directory of Parquet files synced separately below.
-for dir in data/*/; do
-    sym=$(basename "${dir}")
-    if [ "${sym}" = "ohlcv" ]; then
-        continue
-    fi
-    f="${dir}binance_ticks.h5"
-    sync_file "${f}" "ticks/binance_ticks_${sym}.h5"
+# Multi-symbol: per-symbol containers named trading-data-{SYMBOL}
+# (created by scripts/add_symbol.sh). Skip trading-data itself — already done.
+for container in $(docker ps --format '{{.Names}}' | grep '^trading-data-'); do
+    sym="${container#trading-data-}"
+    sync_tick_snapshot "${container}" "ticks/binance_ticks_${sym}.h5"
 done
 
 # OHLCV Parquet tree (data/ohlcv/{exchange}/{symbol}/{tf}.parquet → ohlcv/…)
