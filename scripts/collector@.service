@@ -16,9 +16,12 @@ EnvironmentFile=/app/.env
 ExecStart=/app/.venv/bin/python /app/collect_ticks.py \
     --symbol %i \
     --s3-bucket ${S3_BUCKET} \
-    --s3-key ticks/binance_ticks_%i.h5 \
-    --data-dir data/%i \
+    --data-dir data \
+    --parquet-flush-interval 900 \
+    --max-h5-gb 8 \
     --log-level INFO
+# Restart on any non-zero exit — including EXIT_ROTATE (75) which is
+# emitted by collect_ticks.py after archiving a full HDF5 file.
 Restart=on-failure
 RestartSec=30
 TimeoutStopSec=30

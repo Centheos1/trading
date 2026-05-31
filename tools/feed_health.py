@@ -160,13 +160,28 @@ def _is_oanda_daily_close(after_ts_ms: int, gap_ms: int) -> bool:
 # ---------------------------------------------------------------------------
 
 def _find_tick_files(data_dir: str) -> List[Tuple[str, str]]:
-    """Return list of (symbol, path) for all tick HDF5 files."""
+    """Return list of (symbol, path) for all tick HDF5 files.
+
+    Looks in (current) ``data/ticks/{SYMBOL}_ticks.h5`` first, then
+    the two legacy layouts (``data/binance_ticks.h5`` single-file and
+    ``data/{SYMBOL}/binance_ticks.h5`` per-symbol-subdir) so older
+    deployments still report correctly.
+    """
     results: List[Tuple[str, str]] = []
-    # Default layout: data/binance_ticks.h5
+
+    # Current layout: data/ticks/{SYMBOL}_ticks.h5
+    ticks_dir = os.path.join(data_dir, "ticks")
+    if os.path.isdir(ticks_dir):
+        for entry in sorted(os.listdir(ticks_dir)):
+            if entry.endswith("_ticks.h5"):
+                sym = entry[:-len("_ticks.h5")]
+                results.append((sym, os.path.join(ticks_dir, entry)))
+
+    # Legacy single-file layout: data/binance_ticks.h5
     default = os.path.join(data_dir, "binance_ticks.h5")
     if os.path.exists(default):
         results.append(("DEFAULT", default))
-    # Per-symbol layout: data/SYMBOL/binance_ticks.h5
+    # Legacy per-symbol-subdir layout: data/{SYMBOL}/binance_ticks.h5
     for entry in sorted(os.listdir(data_dir)):
         candidate = os.path.join(data_dir, entry, "binance_ticks.h5")
         if os.path.isfile(candidate):

@@ -176,7 +176,12 @@ def list_ohlcv(
 # ──────────────────────────────────────────────────────────────────────
 
 
-_TICKS_DEFAULT_PATH = "data/binance_ticks.h5"
+# Legacy single-file HDF5 layout left here for back-compat with
+# ``load_ticks``.  New code should prefer ``load_ticks_parquet`` which
+# reads the per-day Parquet mirror under ``data/ticks/{exchange}/...``.
+# The collector writes per-symbol HDF5 to ``data/ticks/{SYMBOL}_ticks.h5``;
+# the legacy lookup below resolves that path at call time.
+_TICKS_LEGACY_PATH = "data/binance_ticks.h5"
 
 
 def _safe_read_2d(dataset, cap: Optional[int]) -> np.ndarray:
@@ -279,9 +284,19 @@ def _clear_hdf5_open_flag(path: Path) -> bool:
         fh.write((flags & ~_HDF5_WRITE_IN_PROGRESS).to_bytes(4, "little"))
         return True
 
-# S3 key patterns used by collect_ticks.py.  BTCUSDT uses the default key
-# (no symbol suffix); every other symbol appends _{SYMBOL}.
 def _ticks_s3_key(exchange: str, symbol: str) -> str:
+    """Resolve the S3 key the collector uploads to for ``symbol``.
+
+    Current convention (May 2026): one HDF5 file per symbol at
+    ``ticks/{SYMBOL}_ticks.h5``.  The legacy BTCUSDT-only key
+    (``ticks/binance_ticks.h5``) is no longer written by the collector.
+    """
+    return f"ticks/{symbol.upper()}_ticks.h5"
+
+
+def _legacy_ticks_s3_key(exchange: str, symbol: str) -> str:
+    """Pre-May-2026 S3 key for ``symbol``. Used as a fallback when the
+    new key is missing so older S3 archives remain readable."""
     base = f"ticks/{exchange}_ticks"
     if symbol.upper() == "BTCUSDT":
         return f"{base}.h5"
@@ -317,7 +332,25 @@ def _sync_ticks_from_s3(
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
     s3 = session.client("s3")
 
-    head = s3.head_object(Bucket=bucket, Key=s3_key)
+    # Try the current per-symbol key first; fall back to the legacy
+    # key so historical archives still resolve.
+    from botocore.exceptions import ClientError
+    try:
+        head = s3.head_object(Bucket=bucket, Key=s3_key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+            legacy_key = _legacy_ticks_s3_key(exchange, symbol)
+            if legacy_key != s3_key:
+                print(
+                    f"  s3://{bucket}/{s3_key} not found — falling back to "
+                    f"legacy key s3://{bucket}/{legacy_key}"
+                )
+                s3_key = legacy_key
+                head = s3.head_object(Bucket=bucket, Key=s3_key)
+            else:
+                raise
+        else:
+            raise
     s3_etag = head["ETag"].strip('"')
     s3_size_bytes = head["ContentLength"]
     s3_mtime = head["LastModified"]
@@ -416,18 +449,24 @@ def load_ticks(
     if path:
         target = Path(path)
     else:
-        cached = _TICKS_CACHE_DIR / f"{exchange}_ticks.h5"
-        local  = _ROOT / _TICKS_DEFAULT_PATH
+        # New per-symbol layout (written by collect_ticks.py since May 2026)
+        new_local  = _ROOT / "data" / "ticks" / f"{symbol.upper()}_ticks.h5"
+        # Legacy single-file layout (kept for back-compat)
+        legacy_local = _ROOT / _TICKS_LEGACY_PATH
+        new_cached    = _TICKS_CACHE_DIR / f"{symbol.upper()}_ticks.h5"
+        legacy_cached = _TICKS_CACHE_DIR / f"{exchange}_ticks.h5"
 
         if refresh:
             # Explicit refresh: sync from S3 (ETag-gated, only downloads if newer)
             target = _sync_ticks_from_s3(exchange, symbol)
-        elif cached.exists():
-            # Previous refresh exists — use it without re-downloading
-            target = cached
+        elif new_cached.exists():
+            target = new_cached
+        elif new_local.exists():
+            target = new_local
+        elif legacy_cached.exists():
+            target = legacy_cached
         else:
-            # No cache yet — fall back to local file
-            target = local
+            target = legacy_local
 
     if not target.exists():
         raise FileNotFoundError(
@@ -473,6 +512,202 @@ def load_ticks(
                     columns=["timestamp", "side", "price", "quantity"]
                 )
             out[name] = df
+
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Ticks (Parquet — preferred since the May-2026 collector rewrite)
+# ──────────────────────────────────────────────────────────────────────
+#
+# The live collector flushes HDF5 → daily Parquet every 15 minutes and the
+# hourly cron syncs those files to ``s3://${S3_BUCKET}/ticks-parquet/``.
+# Notebooks should prefer ``load_ticks_parquet`` over ``load_ticks`` for
+# any new analysis — it downloads only the day-files needed for the
+# requested window, not the full multi-GB HDF5 archive.
+
+_TICKS_PARQUET_CACHE_DIR: Path = _DATA_DIR / "cache" / "ticks_parquet"
+
+_TICK_DATASETS: Tuple[str, ...] = ("trades", "depth_snapshots", "depth_updates")
+_TRADES_COLS = ["timestamp", "price", "quantity", "is_buyer_maker"]
+_DEPTH_COLS = ["timestamp", "side", "price", "quantity"]
+
+
+def _parquet_columns_for(dataset: str) -> list:
+    return _TRADES_COLS if dataset == "trades" else _DEPTH_COLS
+
+
+def _sync_ticks_parquet_from_s3(
+    exchange: str,
+    symbol: str,
+    datasets: Tuple[str, ...],
+    *,
+    from_date: Optional[str],
+    to_date: Optional[str],
+    s3_bucket: Optional[str] = None,
+    aws_profile: Optional[str] = None,
+) -> Path:
+    """Download per-day Parquet files for ``symbol`` from S3 into the local cache.
+
+    Only files within ``[from_date, to_date]`` are downloaded, and any
+    file already present locally is skipped (ETag is not checked because
+    daily files become immutable once the day rolls over).
+
+    Returns the local cache directory ``{cache}/{exchange}/{SYMBOL}/``.
+    """
+    import boto3
+    from botocore.exceptions import ClientError
+
+    bucket = s3_bucket or os.environ.get("S3_BUCKET")
+    if not bucket:
+        raise ValueError(
+            "S3 bucket not specified. Set S3_BUCKET env var or pass s3_bucket=."
+        )
+    profile = aws_profile or os.environ.get("AWS_PROFILE")
+    session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+    s3 = session.client("s3")
+
+    sym = symbol.upper()
+    local_root = _TICKS_PARQUET_CACHE_DIR / exchange / sym
+    n_downloaded = 0
+    n_skipped = 0
+    n_failed = 0
+
+    for dataset in datasets:
+        if dataset not in _TICK_DATASETS:
+            raise ValueError(
+                f"Unknown dataset {dataset!r}; expected one of {_TICK_DATASETS}"
+            )
+        prefix = f"ticks-parquet/{exchange}/{sym}/{dataset}/"
+        local_dir = local_root / dataset
+        local_dir.mkdir(parents=True, exist_ok=True)
+
+        keys: list[str] = []
+        try:
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []) or []:
+                    key = obj["Key"]
+                    day = key.rsplit("/", 1)[-1].removesuffix(".parquet")
+                    if not key.endswith(".parquet"):
+                        continue
+                    if from_date is not None and day < from_date:
+                        continue
+                    if to_date is not None and day > to_date:
+                        continue
+                    keys.append(key)
+        except ClientError as exc:
+            print(f"  [WARN] could not list s3://{bucket}/{prefix}: {exc}")
+            continue
+
+        for key in sorted(keys):
+            local_path = local_dir / Path(key).name
+            if local_path.exists() and local_path.stat().st_size > 0:
+                n_skipped += 1
+                continue
+            tmp = local_path.with_suffix(".tmp")
+            try:
+                s3.download_file(bucket, key, str(tmp))
+                tmp.rename(local_path)
+                n_downloaded += 1
+            except ClientError as exc:
+                print(f"  [WARN] download failed s3://{bucket}/{key}: {exc}")
+                n_failed += 1
+
+    summary = f"  ticks-parquet sync {exchange}/{sym}: " \
+              f"downloaded={n_downloaded} cached={n_skipped} failed={n_failed}"
+    if from_date or to_date:
+        summary += f"  (window {from_date or 'start'}…{to_date or 'now'})"
+    print(summary)
+    return local_root
+
+
+def load_ticks_parquet(
+    symbol: str = "BTCUSDT",
+    *,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    exchange: str = "binance",
+    datasets: Tuple[str, ...] = ("trades", "depth_snapshots", "depth_updates"),
+    refresh: bool = False,
+) -> Dict[str, pd.DataFrame]:
+    """Load trades / depth from the Parquet tick mirror.
+
+    Use this instead of :func:`load_ticks` for any new analysis. It
+    fetches only the daily Parquet files needed for the requested
+    ``[from_date, to_date]`` window (inclusive ``YYYY-MM-DD`` strings),
+    not the entire multi-GB HDF5 archive.
+
+    Data source — resolution order
+    ------------------------------
+    1. ``refresh=True`` — download any missing day-files for the window
+       from ``s3://${S3_BUCKET}/ticks-parquet/`` to the local cache.
+    2. Existing cache — ``<project_root>/data/cache/ticks_parquet/…``.
+    3. Live local store — ``<project_root>/data/ticks/…`` (the location
+       the collector writes to; useful when running notebooks on the
+       collector host itself).
+
+    ``S3_BUCKET`` and ``AWS_PROFILE`` env vars are required for S3 sync.
+
+    Returns a dict with one DataFrame per dataset (defaults to all three):
+
+    * ``trades``           — columns ``timestamp, price, quantity, is_buyer_maker``
+    * ``depth_snapshots``  — columns ``timestamp, side, price, quantity``
+    * ``depth_updates``    — columns ``timestamp, side, price, quantity``
+
+    Schema matches :func:`load_ticks`. Timestamps are ``int64`` ms-since-epoch.
+    """
+    from tick_parquet_store import TickParquetStore  # late import keeps notebook startup quick
+
+    for dataset in datasets:
+        if dataset not in _TICK_DATASETS:
+            raise ValueError(
+                f"Unknown dataset {dataset!r}; expected one of {_TICK_DATASETS}"
+            )
+
+    if refresh:
+        _sync_ticks_parquet_from_s3(
+            exchange, symbol, datasets,
+            from_date=from_date, to_date=to_date,
+        )
+
+    # Resolve which root to read from. Prefer the freshly synced cache,
+    # fall back to the live store on the collector host.
+    sym = symbol.upper()
+    cache_root = _TICKS_PARQUET_CACHE_DIR
+    live_root  = _ROOT / "data" / "ticks"
+
+    candidate_roots: list[Path] = []
+    if (cache_root / exchange / sym).is_dir():
+        candidate_roots.append(cache_root)
+    if (live_root / exchange / sym).is_dir():
+        candidate_roots.append(live_root)
+
+    out: Dict[str, pd.DataFrame] = {}
+    for dataset in datasets:
+        frames: list[pd.DataFrame] = []
+        for root in candidate_roots:
+            store = TickParquetStore(root=str(root))
+            df = store.read(
+                sym, dataset,
+                from_date=from_date, to_date=to_date, exchange=exchange,
+            )
+            if not df.empty:
+                frames.append(df)
+        if frames:
+            merged = pd.concat(frames, ignore_index=True)
+            if dataset == "trades":
+                subset = ["timestamp", "price", "quantity", "is_buyer_maker"]
+            else:
+                subset = ["timestamp", "side", "price", "quantity"]
+            merged = (
+                merged.drop_duplicates(subset=subset, keep="last")
+                      .sort_values("timestamp")
+                      .reset_index(drop=True)
+            )
+            out[dataset] = merged
+        else:
+            out[dataset] = pd.DataFrame(columns=_parquet_columns_for(dataset))
 
     return out
 

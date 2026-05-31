@@ -24,12 +24,25 @@ Local Mac  ──git push──►  GitHub
             (BTCUSDT)               (ETHUSDT)
                     │                   │
                     └─────────┬─────────┘
-                              │ hourly cron
+                              │
+                              │ Inline (every 15 min, in-process flush thread)
+                              ▼
+                   data/ticks/binance/{SYMBOL}/{dataset}/YYYY-MM-DD.parquet
+                              │
+                              │ Hourly cron — s3_sync.sh
                               ▼
                    S3: trading-data-centheos
-                       ticks/binance_ticks.h5
-                       ticks/binance_ticks_ETHUSDT.h5
+                       ticks/{SYMBOL}_ticks.h5            (live HDF5 snapshot)
+                       ticks-parquet/binance/{SYMBOL}/…   (date-partitioned)
+                       ticks/archive/binance/…            (rotated HDF5)
 ```
+
+> **Why two formats?** HDF5 is the canonical store (the C++ ``TickStore``
+> writes there at line-rate). Parquet is the durable, queryable mirror —
+> per-day files synced to S3 so notebooks can fetch a single date window
+> without downloading multi-GB HDF5 files. If the live HDF5 corrupts
+> (disk full, host crash), the worst-case data loss is the last 15
+> minutes — everything before that lives in Parquet/S3.
 
 ---
 
@@ -337,8 +350,22 @@ aws s3 ls s3://trading-data-centheos/ticks/
 Expected:
 
 ```
-ticks/binance_ticks.h5
-ticks/binance_ticks_ETHUSDT.h5
+ticks/BTCUSDT_ticks.h5
+ticks/ETHUSDT_ticks.h5
+```
+
+And the Parquet date-partitioned mirror:
+
+```bash
+aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/trades/ | head
+```
+
+Expected (one file per UTC day):
+
+```
+2026-05-31.parquet
+2026-06-01.parquet
+…
 ```
 
 Verify OHLCV Parquet uploads (written directly by the collector when
@@ -405,7 +432,35 @@ docker compose --profile multi up -d     # restart ETHUSDT
 
 ## Part 7 — Download data to dev machine
 
-### Tick data (HDF5) — needed for HMM campaign
+### Tick data — Parquet by date range (preferred)
+
+For any analysis bound to a date window, fetch only the Parquet day-files
+you need — no multi-GB HDF5 download required:
+
+```python
+import os
+os.environ["S3_BUCKET"]   = "trading-data-centheos"
+os.environ["AWS_PROFILE"] = "default"   # or whichever profile has read access
+
+from notebooks.utils import load_ticks_parquet
+data = load_ticks_parquet(
+    "BTCUSDT",
+    from_date="2026-05-15",
+    to_date="2026-05-29",
+    datasets=("trades",),
+    refresh=True,          # downloads missing day-files from S3
+)
+trades = data["trades"]    # int64 ms timestamp + price/quantity/is_buyer_maker
+```
+
+Downloaded day-files are cached at
+``data/cache/ticks_parquet/binance/{SYMBOL}/{dataset}/``; subsequent
+calls without ``refresh=True`` read directly from cache.
+
+### Tick data (HDF5) — full archive download
+
+Use this only when you need the entire historical archive (e.g. the
+HMM campaign that scans the full history at once):
 
 ```bash
 # On your local Mac
@@ -413,7 +468,7 @@ export S3_BUCKET=trading-data-centheos
 bash scripts/download_ticks.sh BTCUSDT ETHUSDT
 
 # Verify
-python -c "import h5py; f=h5py.File('data/binance_ticks.h5'); print(list(f.keys()))"
+python -c "import h5py; f=h5py.File('data/ticks/BTCUSDT_ticks.h5'); print(list(f.keys()))"
 ```
 
 ### OHLCV (Parquet) — needed for backtests / PCA / cross-asset analysis
@@ -508,13 +563,69 @@ docker compose logs collector --tail 50
 ```
 
 ### Healthcheck failing on first start
-The healthcheck waits for `data/binance_ticks.h5` to be written. This file
-is created on first trade receipt. Wait 30 seconds for the `start_period`
-to pass before checking status.
+The healthcheck waits for `data/ticks/{SYMBOL}_ticks.h5` to be written.
+The file is created on the first trade receipt. Wait 30 seconds for the
+`start_period` to pass before checking status.
 
 ### S3 sync shows FAILED in logs
 
 ```bash
 cat ~/app/trading/logs/s3_sync.log
 aws s3 ls s3://trading-data-centheos/ticks/
+aws s3 ls s3://trading-data-centheos/ticks-parquet/ --recursive | head
 ```
+
+### Verify a live HDF5 isn't corrupt
+
+```bash
+docker compose exec data python3 -c "
+import h5py, sys
+for sym in ('BTCUSDT', 'ETHUSDT'):
+    try:
+        f = h5py.File(f'/app/data/ticks/{sym}_ticks.h5', 'r', locking=False)
+        print(f'{sym} OK — datasets:', {k: f[sym][k].shape for k in f[sym]})
+        f.close()
+    except (OSError, FileNotFoundError) as e:
+        print(f'{sym} FAILED: {e}', file=sys.stderr)
+"
+```
+
+If a file is corrupt, the Parquet mirror in S3
+(`s3://${S3_BUCKET}/ticks-parquet/binance/{SYMBOL}/`) still holds
+everything older than the last 15 minutes. Stop the symbol, delete the
+corrupt HDF5, and restart — fresh HDF5 collection resumes immediately
+and the Parquet mirror keeps writing without interruption:
+
+```bash
+docker compose stop data
+rm ~/app/trading/data/ticks/BTCUSDT_ticks.h5    # or ETHUSDT_ticks.h5
+docker compose up -d data
+docker compose logs -f data
+```
+
+### HDF5 file grew past the rotation limit
+
+The collector auto-rotates HDF5 when it exceeds `--max-h5-gb` (default
+8 GB): archives the old file to `s3://${S3_BUCKET}/ticks/archive/…`,
+deletes the local copy, and exits with code 75. Docker
+`restart: unless-stopped` (and systemd `Restart=on-failure`) start a
+fresh process with a new empty HDF5. Verify after a rotation:
+
+```bash
+docker compose logs data --tail 50 | grep -E 'rotation|archive'
+aws s3 ls s3://trading-data-centheos/ticks/archive/binance/ | tail
+```
+
+### EC2 disk usage budget
+
+With the rotation + Parquet-cleanup design, expected steady-state local
+disk usage per symbol:
+
+| Data | Local retention | Permanent home |
+|------|----------------|----------------|
+| HDF5 live buffer | ≤ 8 GB per symbol (auto-rotated) | S3 archive |
+| Parquet (recent) | 7 days per symbol | S3 (`ticks-parquet/`) |
+| Parquet (older)  | Deleted by `s3_sync.sh` after S3 sync | S3 |
+
+For 2 symbols (BTCUSDT + ETHUSDT) peak local usage is ~16 GB HDF5 +
+~1–2 GB Parquet. A 30–50 GB EC2 root volume leaves comfortable headroom.

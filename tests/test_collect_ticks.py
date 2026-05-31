@@ -11,7 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -44,8 +44,6 @@ class TestArgParsing(unittest.TestCase):
         self.ct = _load_module()
 
     def test_defaults(self):
-        args = self.ct._parse_args.__wrapped__ if hasattr(
-            self.ct._parse_args, "__wrapped__") else None
         # Call with empty argv
         with patch("sys.argv", ["collect_ticks.py"]):
             args = self.ct._parse_args()
@@ -55,8 +53,28 @@ class TestArgParsing(unittest.TestCase):
         self.assertTrue(args.futures)
         self.assertEqual(args.duration, 0)
         self.assertIsNone(args.s3_bucket)
-        self.assertEqual(args.s3_key, "ticks/binance_ticks.h5")
+        # --s3-key defaults to None now; the per-symbol key is computed
+        # by _default_s3_key(symbol) at upload time.
+        self.assertIsNone(args.s3_key)
         self.assertEqual(args.log_level, "INFO")
+        self.assertEqual(args.parquet_flush_interval, 900)
+        self.assertEqual(args.max_h5_gb, 8.0)
+
+    def test_default_s3_key_per_symbol(self):
+        self.assertEqual(self.ct._default_s3_key("BTCUSDT"),
+                         "ticks/BTCUSDT_ticks.h5")
+        self.assertEqual(self.ct._default_s3_key("ethusdt"),
+                         "ticks/ETHUSDT_ticks.h5")
+
+    def test_ticks_h5_path_uses_ticks_subdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.ct._ticks_h5_path(tmp, "BTCUSDT")
+            self.assertEqual(
+                path, os.path.join(tmp, "ticks", "BTCUSDT_ticks.h5")
+            )
+            # The ticks/ subdir is created eagerly so the C++ store can
+            # open the file without further setup.
+            self.assertTrue(os.path.isdir(os.path.join(tmp, "ticks")))
 
     def test_custom_symbol(self):
         with patch("sys.argv", ["collect_ticks.py", "--symbol", "ETHUSDT"]):
@@ -156,28 +174,34 @@ class TestSigtermHandler(unittest.TestCase):
 
     def setUp(self):
         self.ct = _load_module()
+        self.ct._shutdown_requested.clear()
 
-    def test_sigterm_sets_event(self):
-        import asyncio
-        loop = asyncio.new_event_loop()
-        event = loop.run_until_complete(self._make_event(loop))
-        self.ct._shutdown_event = event
-        self.ct._handle_sigterm(15, None)
-        self.assertTrue(event.is_set())
-        loop.close()
+    def tearDown(self):
+        self.ct._shutdown_requested.clear()
 
-    async def _make_event(self, loop):
-        import asyncio
-        return asyncio.Event()
+    def test_sigterm_sets_shutdown_flag(self):
+        # os.kill is patched so the handler doesn't actually signal the
+        # test process (which would terminate the runner).
+        with patch.object(self.ct.os, "kill"):
+            self.ct._handle_sigterm(15, None)
+        self.assertTrue(self.ct._shutdown_requested.is_set())
 
-    def test_sigterm_no_event_no_crash(self):
-        self.ct._shutdown_event = None
-        self.ct._handle_sigterm(15, None)  # must not raise
+    def test_sigterm_idempotent(self):
+        # A second invocation while shutdown is already pending must be
+        # a no-op (no recursive os.kill storm).
+        with patch.object(self.ct.os, "kill") as mock_kill:
+            self.ct._handle_sigterm(15, None)
+            self.ct._handle_sigterm(15, None)
+        mock_kill.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
 # Main function integration (with TickDataCollector stubbed)
 # ---------------------------------------------------------------------------
+#
+# All tests pass ``--parquet-flush-interval 0`` to disable the background
+# Parquet flusher — the tests stub the C++ store entirely so there's
+# nothing to flush, and a running flush thread can delay test teardown.
 
 class TestMainFunction(unittest.TestCase):
 
@@ -186,21 +210,25 @@ class TestMainFunction(unittest.TestCase):
         collector.store = MagicMock()
         return collector
 
+    def _argv(self, tmpdir, *extra):
+        return [
+            "collect_ticks.py",
+            "--symbol", "BTCUSDT",
+            "--duration", "1",
+            "--data-dir", tmpdir,
+            "--parquet-flush-interval", "0",
+            *extra,
+        ]
+
     def test_main_single_symbol_collects_and_exits_0(self):
         ct = _load_module()
         mock_collector = self._make_mock_collector()
 
-        with patch("sys.argv", ["collect_ticks.py", "--symbol", "BTCUSDT",
-                                 "--duration", "1"]):
-            with patch.object(ct, "TickDataCollector",
-                              return_value=mock_collector):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    with patch("sys.argv",
-                               ["collect_ticks.py",
-                                "--symbol", "BTCUSDT",
-                                "--duration", "1",
-                                "--data-dir", tmpdir]):
-                        rc = ct.main()
+        with patch.object(ct, "TickDataCollector",
+                          return_value=mock_collector):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch("sys.argv", self._argv(tmpdir)):
+                    rc = ct.main()
         self.assertEqual(rc, 0)
         mock_collector.collect.assert_called_once_with("BTCUSDT",
                                                        duration_seconds=1)
@@ -212,25 +240,25 @@ class TestMainFunction(unittest.TestCase):
         mock_collector = self._make_mock_collector()
         upload_calls = []
 
-        def mock_upload(path, bucket, key):
+        def mock_upload(path, bucket, key, **kwargs):
             upload_calls.append((path, bucket, key))
             return True
 
         with patch.object(ct, "TickDataCollector", return_value=mock_collector):
             with patch.object(ct, "_upload_to_s3", side_effect=mock_upload):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    with patch("sys.argv",
-                               ["collect_ticks.py",
-                                "--symbol", "BTCUSDT",
-                                "--duration", "1",
-                                "--s3-bucket", "my-bucket",
-                                "--data-dir", tmpdir]):
+                    with patch(
+                        "sys.argv",
+                        self._argv(tmpdir, "--s3-bucket", "my-bucket"),
+                    ):
                         rc = ct.main()
 
         self.assertEqual(rc, 0)
         self.assertEqual(len(upload_calls), 1)
-        _, bucket, _ = upload_calls[0]
+        _, bucket, key = upload_calls[0]
         self.assertEqual(bucket, "my-bucket")
+        # Per-symbol key with the new naming convention.
+        self.assertEqual(key, "ticks/BTCUSDT_ticks.h5")
 
     def test_main_s3_upload_failure_returns_exit_2(self):
         ct = _load_module()
@@ -239,12 +267,10 @@ class TestMainFunction(unittest.TestCase):
         with patch.object(ct, "TickDataCollector", return_value=mock_collector):
             with patch.object(ct, "_upload_to_s3", return_value=False):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    with patch("sys.argv",
-                               ["collect_ticks.py",
-                                "--symbol", "BTCUSDT",
-                                "--duration", "1",
-                                "--s3-bucket", "bad-bucket",
-                                "--data-dir", tmpdir]):
+                    with patch(
+                        "sys.argv",
+                        self._argv(tmpdir, "--s3-bucket", "bad-bucket"),
+                    ):
                         rc = ct.main()
 
         self.assertEqual(rc, 2)
@@ -256,11 +282,7 @@ class TestMainFunction(unittest.TestCase):
 
         with patch.object(ct, "TickDataCollector", return_value=mock_collector):
             with tempfile.TemporaryDirectory() as tmpdir:
-                with patch("sys.argv",
-                           ["collect_ticks.py",
-                            "--symbol", "BTCUSDT",
-                            "--duration", "1",
-                            "--data-dir", tmpdir]):
+                with patch("sys.argv", self._argv(tmpdir)):
                     rc = ct.main()
 
         self.assertEqual(rc, 1)
@@ -272,14 +294,12 @@ class TestMainFunction(unittest.TestCase):
         upload_calls = []
 
         with patch.object(ct, "TickDataCollector", return_value=mock_collector):
-            with patch.object(ct, "_upload_to_s3",
-                              side_effect=lambda *a: upload_calls.append(a) or True):
+            with patch.object(
+                ct, "_upload_to_s3",
+                side_effect=lambda *a, **kw: upload_calls.append(a) or True,
+            ):
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    with patch("sys.argv",
-                               ["collect_ticks.py",
-                                "--symbol", "BTCUSDT",
-                                "--duration", "1",
-                                "--data-dir", tmpdir]):
+                    with patch("sys.argv", self._argv(tmpdir)):
                         ct.main()
 
         self.assertEqual(len(upload_calls), 0)
@@ -290,11 +310,16 @@ class TestMainFunction(unittest.TestCase):
 
         with patch.object(ct, "TickDataCollector", return_value=mock_collector):
             with tempfile.TemporaryDirectory() as tmpdir:
-                with patch("sys.argv",
-                           ["collect_ticks.py",
-                            "--symbols", "BTCUSDT,ETHUSDT",
-                            "--duration", "1",
-                            "--data-dir", tmpdir]):
+                with patch(
+                    "sys.argv",
+                    [
+                        "collect_ticks.py",
+                        "--symbols", "BTCUSDT,ETHUSDT",
+                        "--duration", "1",
+                        "--data-dir", tmpdir,
+                        "--parquet-flush-interval", "0",
+                    ],
+                ):
                     rc = ct.main()
 
         self.assertEqual(rc, 0)
@@ -310,10 +335,15 @@ class TestMainFunction(unittest.TestCase):
 
         with patch.object(ct, "TickDataCollector", return_value=mock_collector):
             with tempfile.TemporaryDirectory() as tmpdir:
-                with patch("sys.argv",
-                           ["collect_ticks.py",
-                            "--symbol", "BTCUSDT",
-                            "--data-dir", tmpdir]):
+                with patch(
+                    "sys.argv",
+                    [
+                        "collect_ticks.py",
+                        "--symbol", "BTCUSDT",
+                        "--data-dir", tmpdir,
+                        "--parquet-flush-interval", "0",
+                    ],
+                ):
                     rc = ct.main()
 
         self.assertEqual(rc, 0)

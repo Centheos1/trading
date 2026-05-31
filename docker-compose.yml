@@ -52,6 +52,8 @@ services:
       python collect_ticks.py
         --symbol ${SYMBOLS:-BTCUSDT}
         --s3-bucket ${S3_BUCKET:-}
+        --parquet-flush-interval ${PARQUET_FLUSH_INTERVAL:-900}
+        --max-h5-gb ${MAX_H5_GB:-8}
         --log-level ${LOG_LEVEL:-INFO}
     depends_on:
       redis:
@@ -60,8 +62,10 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
     healthcheck:
+      # Healthy when at least one per-symbol HDF5 file under data/ticks/
+      # was mtime-updated in the last 2 minutes (i.e. WS data is flowing).
       test: ["CMD", "python", "-c",
-             "import os, time; age=time.time()-os.path.getmtime('/app/data/binance_ticks.h5'); exit(0 if age<120 else 1)"]
+             "import glob, os, sys, time; files = glob.glob('/app/data/ticks/*_ticks.h5'); sys.exit(0 if files and (time.time() - max(os.path.getmtime(f) for f in files)) < 120 else 1)"]
       interval: 60s
       timeout: 10s
       retries: 3

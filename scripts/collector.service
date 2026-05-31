@@ -12,11 +12,15 @@ EnvironmentFile=/app/.env
 ExecStart=/app/.venv/bin/python /app/collect_ticks.py \
     --symbol ${SYMBOLS:-BTCUSDT} \
     --s3-bucket ${S3_BUCKET} \
+    --parquet-flush-interval 900 \
+    --max-h5-gb 8 \
     --log-level INFO
+# Restart on any non-zero exit — including EXIT_ROTATE (75) which is
+# emitted by collect_ticks.py after archiving a full HDF5 file.
 Restart=on-failure
 RestartSec=30
-# Allow 15 s for graceful flush + S3 upload on shutdown
-TimeoutStopSec=30
+# Allow time for graceful flush + S3 upload + Parquet drain on shutdown.
+TimeoutStopSec=60
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=collector
