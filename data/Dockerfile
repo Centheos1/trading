@@ -61,7 +61,7 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 # are copied — keep the image lean.
 # ---------------------------------------------------------------------------
 COPY collect_ticks.py collect_ohlcv.py data_service.py database.py \
-     ohlcv_store.py utils.py schemas.py models.py /app/
+     ohlcv_store.py tick_parquet_store.py utils.py schemas.py models.py /app/
 COPY data_feed/ /app/data_feed/
 COPY exchanges/ /app/exchanges/
 
