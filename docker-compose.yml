@@ -50,7 +50,7 @@ services:
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     command: >
       python collect_ticks.py
-        --symbol ${SYMBOLS:-BTCUSDT}
+        --symbols ${SYMBOLS:-BTCUSDT,ETHUSDT}
         --s3-bucket ${S3_BUCKET:-}
         --parquet-flush-interval ${PARQUET_FLUSH_INTERVAL:-900}
         --max-h5-gb ${MAX_H5_GB:-8}
