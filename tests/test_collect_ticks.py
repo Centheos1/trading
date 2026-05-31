@@ -232,8 +232,12 @@ class TestMainFunction(unittest.TestCase):
         self.assertEqual(rc, 0)
         mock_collector.collect.assert_called_once_with("BTCUSDT",
                                                        duration_seconds=1)
-        mock_collector.store.flush.assert_called_once()
-        mock_collector.store.close.assert_called_once()
+        # store.flush() and store.close() are owned exclusively by
+        # data_service.TickDataCollector.collect() — NOT by collect_ticks.py.
+        # The mock's collect() is a no-op, so these must be zero here.
+        # A double-close regression would cause these to be > 0.
+        mock_collector.store.flush.assert_not_called()
+        mock_collector.store.close.assert_not_called()
 
     def test_main_s3_upload_called_on_clean_exit(self):
         ct = _load_module()
@@ -286,7 +290,10 @@ class TestMainFunction(unittest.TestCase):
                     rc = ct.main()
 
         self.assertEqual(rc, 1)
-        mock_collector.store.flush.assert_called_once()
+        # Even on an unhandled exception collect() still owns flush/close.
+        # collect_ticks must not call them.
+        mock_collector.store.flush.assert_not_called()
+        mock_collector.store.close.assert_not_called()
 
     def test_main_no_s3_upload_when_bucket_not_set(self):
         ct = _load_module()
@@ -347,7 +354,42 @@ class TestMainFunction(unittest.TestCase):
                     rc = ct.main()
 
         self.assertEqual(rc, 0)
-        mock_collector.store.flush.assert_called_once()
+        # KeyboardInterrupt is caught and treated as clean exit.
+        # store lifecycle is owned by data_service — not called here.
+        mock_collector.store.flush.assert_not_called()
+        mock_collector.store.close.assert_not_called()
+
+    def test_store_lifecycle_owned_by_data_service_not_collect_ticks(self):
+        """collect_ticks must never call store.flush() or store.close().
+
+        The C++ TickStore must be closed exactly once — inside
+        data_service.TickDataCollector.collect(). Calling it a second
+        time from _collect_one() is a double-close and is undefined
+        behaviour that can corrupt the HDF5 file.
+
+        This test asserts the contract: no matter which shutdown path
+        (normal, KeyboardInterrupt, unhandled exception) is taken,
+        collect_ticks never touches store.flush or store.close.
+        """
+        ct = _load_module()
+
+        for side_effect, label in [
+            (None,                  "clean exit"),
+            (KeyboardInterrupt(),   "KeyboardInterrupt"),
+            (RuntimeError("boom"),  "unhandled exception"),
+        ]:
+            with self.subTest(shutdown=label):
+                mock_collector = self._make_mock_collector()
+                mock_collector.collect.side_effect = side_effect
+
+                with patch.object(ct, "TickDataCollector",
+                                  return_value=mock_collector):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        with patch("sys.argv", self._argv(tmpdir)):
+                            ct.main()
+
+                mock_collector.store.flush.assert_not_called()
+                mock_collector.store.close.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

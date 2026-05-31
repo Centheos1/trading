@@ -606,9 +606,25 @@ def _build_adapters(exchange_arg: str) -> List[ExchangeAdapter]:
     if exchange_arg in ("oanda", "all"):
         try:
             adapters.append(OandaAdapter())
+            logger.info("Oanda adapter ready")
+        except EnvironmentError as exc:
+            # Missing credentials — this is always a fatal configuration error.
+            # In "all" mode we surface it as ERROR so it's impossible to miss,
+            # and we still exit 1 to prevent silently collecting only Binance.
+            logger.error(
+                "Oanda adapter failed (credentials not configured): %s  "
+                "Set OANDA_ACCOUNT_ID, OANDA_ACCESS_TOKEN, and "
+                "OANDA_ACCOUNT_TYPE in .env and restart.",
+                exc,
+            )
+            # Return empty list: main() will detect no adapters and exit 1.
+            return []
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Oanda adapter unavailable (%s) — skipping.", exc,
+            # Transient errors (network, API outage) — log prominently.
+            logger.error(
+                "Oanda adapter initialisation failed: %s  "
+                "Oanda data will NOT be collected this run.",
+                exc,
             )
     return adapters
 
@@ -633,12 +649,56 @@ def _resolve_symbols_by_adapter(
     return out
 
 
+def _check_storage_safety(args: argparse.Namespace) -> None:
+    """Refuse to run --all-symbols with a local store to prevent disk exhaustion.
+
+    Collecting every Binance perpetual + all Oanda instruments at 1m
+    from 2020 generates many gigabytes.  If the caller has an S3 bucket
+    configured but has not set DATA_STORE=s3 they almost certainly
+    intended to write to S3, not to the local disk.
+    """
+    backend = (
+        args.data_store
+        or os.environ.get("DATA_STORE")
+        or "local_parquet"
+    ).lower()
+    is_local = backend in ("local", "local_parquet", "parquet")
+    all_symbols_mode = args.all_symbols or not args.symbols
+    s3_bucket_configured = bool(
+        args.s3_bucket or os.environ.get("S3_BUCKET")
+    )
+
+    if is_local and all_symbols_mode:
+        if s3_bucket_configured:
+            logger.critical(
+                "SAFETY ABORT: DATA_STORE=%s but --all-symbols is set and "
+                "S3_BUCKET is configured.  Collecting all candles locally "
+                "will exhaust EC2 disk.  "
+                "Fix: set DATA_STORE=s3 in .env (or pass --data-store s3). "
+                "Aborting.",
+                backend,
+            )
+        else:
+            logger.critical(
+                "SAFETY ABORT: DATA_STORE=%s with --all-symbols and no "
+                "S3_BUCKET set.  Collecting all instruments to local disk "
+                "will exhaust storage.  "
+                "Fix: set DATA_STORE=s3 and S3_BUCKET=<bucket> in .env, "
+                "or restrict symbols with --symbols BTCUSDT,EURUSD,...  "
+                "Aborting.",
+                backend,
+            )
+        sys.exit(1)
+
+
 def main() -> int:
     args = _parse_args()
     _setup_logging(args.log_level)
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
+
+    _check_storage_safety(args)
 
     store = get_ohlcv_store(
         backend=args.data_store,

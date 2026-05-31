@@ -422,6 +422,10 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
 
     exit_code = 0
     try:
+        # collect() owns the store lifecycle — it calls store.flush() and
+        # store.close() in its own finally block before returning.  Do NOT
+        # call flush/close here; doing so would be a double-close of the
+        # C++ TickStore which is undefined behaviour.
         collector.collect(symbol, duration_seconds=args.duration)
     except KeyboardInterrupt:
         if _rotation_requested.is_set():
@@ -432,19 +436,17 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
         logger.exception("Unhandled exception for %s: %s", symbol, exc)
         exit_code = 1
     finally:
-        logger.info("Flushing and closing tick store for %s", symbol)
-        try:
-            collector.store.flush()
-            collector.store.close()
-        except Exception as exc:
-            logger.error("Error closing tick store for %s: %s", symbol, exc)
+        # At this point data_service.collect() has already called
+        # store.flush() + store.close().  The HDF5 file is closed and
+        # self-consistent on disk — safe to read with locking=False.
 
-        # Stop the flush thread and give it a moment to drain. We then do
-        # one final flush from this thread so any rows written between
-        # the worker's last iteration and store.close() land in Parquet.
+        # 1. Stop the Parquet flush thread and wait for it to drain.
         flush_stop.set()
         if flush_thread is not None:
             flush_thread.join(timeout=30)
+
+        # 2. Final Parquet flush: captures any rows the background thread
+        #    missed between its last wake-up and store.close().
         try:
             TickParquetStore(root=parquet_root).flush_from_h5(
                 store_path, symbol, exchange
@@ -452,6 +454,7 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
         except Exception as exc:
             logger.warning("Final Parquet flush failed: %s", exc)
 
+        # 3. Either archive+rotate or upload the closed HDF5 to S3.
         if _rotation_requested.is_set():
             _archive_and_remove_h5(store_path, args.s3_bucket, exchange, symbol)
             exit_code = EXIT_ROTATE

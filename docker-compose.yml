@@ -123,7 +123,7 @@ services:
         --mode ${OHLCV_MODE:-continuous}
         --poll-interval ${OHLCV_POLL_INTERVAL:-3600}
         --workers ${OHLCV_WORKERS:-4}
-        --data-store ${DATA_STORE:-local_parquet}
+        --data-store ${DATA_STORE:-s3}
         --s3-bucket ${S3_BUCKET:-}
         --log-level ${LOG_LEVEL:-INFO}
     volumes:

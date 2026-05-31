@@ -23,8 +23,29 @@ class OandaClient:
     def __init__(self):
         self.account_id = os.getenv("OANDA_ACCOUNT_ID")
         self.access_token = os.getenv("OANDA_ACCESS_TOKEN")
-        self.account_type = os.getenv("OANDA_ACCOUNT_TYPE")
-        self.client = API(access_token=self.access_token)
+        self.account_type = os.getenv("OANDA_ACCOUNT_TYPE", "practice")
+
+        # Validate credentials before any network call so failures surface
+        # immediately with a clear message instead of a cryptic HTTP 401.
+        missing = [
+            name
+            for name, val in [
+                ("OANDA_ACCOUNT_ID", self.account_id),
+                ("OANDA_ACCESS_TOKEN", self.access_token),
+            ]
+            if not val
+        ]
+        if missing:
+            raise EnvironmentError(
+                f"Oanda credentials not set: {', '.join(missing)}. "
+                "Add them to .env (see .env.template for details)."
+            )
+
+        # oandapyV20 defaults to the practice environment; pass the env
+        # explicitly so live accounts are routed to api-fxtrade.oanda.com.
+        env = "live" if self.account_type.lower().startswith("live") else "practice"
+        self.client = API(access_token=self.access_token, environment=env)
+        logger.info("OandaClient initialised (environment=%s, account=%s)", env, self.account_id)
 
         # CandlestickGranularity().definitions.keys()
         self.granularities = ['S5', 'S10', 'S15', 'S30', 'M1', 'M2', 'M4', 'M5', 'M10', 'M15', 'M30', 'H1', 'H2', 'H3',
