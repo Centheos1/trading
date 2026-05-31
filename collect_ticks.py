@@ -468,11 +468,77 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
     return exit_code
 
 
+def _build_child_argv(symbol: str) -> list:
+    """Reconstruct sys.argv for a single-symbol child process.
+
+    Replaces ``--symbols A,B,...`` (or ``--symbols=A,B,...``) with
+    ``--symbol <symbol>`` so each spawned child uses the well-tested
+    single-symbol code path and manages its own signal / store lifecycle.
+    """
+    argv = list(sys.argv)
+    result: list = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--symbols" and i + 1 < len(argv):
+            result += ["--symbol", symbol]
+            i += 2
+        elif argv[i].startswith("--symbols="):
+            result += [f"--symbol={symbol}"]
+            i += 1
+        else:
+            result.append(argv[i])
+            i += 1
+    return result
+
+
+def _run_multi_symbol(symbols: list) -> int:
+    """Spawn one child process per symbol and run them all in parallel.
+
+    Each child is a fresh invocation of this script with ``--symbol <X>``
+    so it owns its own HDF5 store, Parquet flush thread, SIGTERM handler,
+    and S3 upload.  The parent only forwards signals and collects exit codes.
+
+    Returns the maximum exit code of all children (so rotation exit code 75
+    propagates correctly to Docker/systemd restart logic).
+    """
+    import subprocess
+
+    children: dict = {}
+    for sym in symbols:
+        child_argv = _build_child_argv(sym)
+        p = subprocess.Popen(child_argv)
+        children[sym] = p
+        logger.info("Spawned collector for %s (pid=%d)", sym, p.pid)
+
+    def _forward_signal(signum, frame):  # noqa: ANN001
+        name = signal.Signals(signum).name
+        logger.info(
+            "%s received in parent — forwarding to %d child collectors",
+            name, len(children),
+        )
+        for p in children.values():
+            if p.poll() is None:
+                try:
+                    p.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+
+    signal.signal(signal.SIGTERM, _forward_signal)
+    signal.signal(signal.SIGINT, _forward_signal)
+
+    max_exit = 0
+    for sym, p in children.items():
+        rc = p.wait()
+        rc = rc if rc is not None else 1
+        max_exit = max(max_exit, rc)
+        logger.info("Collector for %s exited (rc=%d)", sym, rc)
+
+    return max_exit
+
+
 def main() -> int:
     args = _parse_args()
     _setup_logging(args.log_level)
-
-    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     symbols = (
         [s.strip().upper() for s in args.symbols.split(",")]
@@ -491,21 +557,26 @@ def main() -> int:
         args.max_h5_gb,
     )
 
+    # Multiple symbols: each runs in its own subprocess so they collect in
+    # parallel and each handles its own signal / HDF5 / S3 lifecycle.
+    if len(symbols) > 1:
+        overall_exit = _run_multi_symbol(symbols)
+        logger.info("collect_ticks (parent) exiting with code %d", overall_exit)
+        return overall_exit
+
+    # Single symbol: run directly in this process.
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     overall_exit = 0
-    for sym in symbols:
-        if _shutdown_requested.is_set():
-            logger.info("Shutdown requested — skipping remaining symbols")
-            break
-        logger.info("Starting collection for %s", sym)
-        code = _collect_one(args, sym)
-        overall_exit = max(overall_exit, code)
-        if code == EXIT_ROTATE:
-            logger.info(
-                "Exiting with code %d so the supervisor restarts us with a "
-                "fresh HDF5 file",
-                EXIT_ROTATE,
-            )
-            break
+    sym = symbols[0]
+    logger.info("Starting collection for %s", sym)
+    overall_exit = _collect_one(args, sym)
+    if overall_exit == EXIT_ROTATE:
+        logger.info(
+            "Exiting with code %d so the supervisor restarts us with a "
+            "fresh HDF5 file",
+            EXIT_ROTATE,
+        )
 
     logger.info("collect_ticks exiting with code %d", overall_exit)
     return overall_exit

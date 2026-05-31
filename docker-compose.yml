@@ -28,6 +28,11 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -43,6 +48,9 @@ services:
       dockerfile: data/Dockerfile
     container_name: trading-data
     restart: unless-stopped
+    # Allow 120 s for each child collector to flush Parquet + upload HDF5
+    # to S3 before Docker force-kills the container.
+    stop_grace_period: 120s
     env_file: .env
     environment:
       PYTHONUNBUFFERED: "1"
@@ -61,6 +69,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       # Healthy when at least one per-symbol HDF5 file under data/ticks/
       # was mtime-updated in the last 2 minutes (i.e. WS data is flowing).
@@ -101,6 +114,11 @@ services:
     volumes:
       - ./data:/app/data:ro
       - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   # ------------------------------------------------------------------
   # OHLCV historical collector (opt-in profile)
@@ -129,6 +147,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     profiles: ["ohlcv"]
 
   # ------------------------------------------------------------------

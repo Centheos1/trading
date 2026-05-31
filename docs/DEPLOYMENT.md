@@ -336,8 +336,21 @@ Expected OHLCV collector log line during backfill:
 
 ## Part 5 — Verify S3 upload
 
-The hourly cron at `/etc/cron.hourly/s3_sync` runs automatically.
-To trigger manually:
+### 5.1 Install / refresh the hourly cron
+
+`setup_ec2.sh` installs the cron automatically on first setup.  After any
+update to `scripts/s3_sync.sh`, refresh it on the running instance:
+
+```bash
+cd ~/app/trading
+sudo cp scripts/s3_sync.sh /etc/cron.hourly/s3_sync
+sudo chmod +x /etc/cron.hourly/s3_sync
+
+# Verify it's there and executable
+ls -l /etc/cron.hourly/s3_sync
+```
+
+Trigger an immediate sync to confirm it works:
 
 ```bash
 sudo bash /etc/cron.hourly/s3_sync

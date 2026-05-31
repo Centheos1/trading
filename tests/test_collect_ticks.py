@@ -311,11 +311,15 @@ class TestMainFunction(unittest.TestCase):
 
         self.assertEqual(len(upload_calls), 0)
 
-    def test_main_multi_symbol_calls_collect_for_each(self):
+    def test_main_multi_symbol_spawns_subprocesses(self):
+        """With --symbols A,B main() dispatches to _run_multi_symbol(),
+        which spawns one subprocess per symbol.  We stub _run_multi_symbol
+        to verify it is called with the correct symbol list and that main()
+        propagates its return value.
+        """
         ct = _load_module()
-        mock_collector = self._make_mock_collector()
 
-        with patch.object(ct, "TickDataCollector", return_value=mock_collector):
+        with patch.object(ct, "_run_multi_symbol", return_value=0) as mock_rms:
             with tempfile.TemporaryDirectory() as tmpdir:
                 with patch(
                     "sys.argv",
@@ -330,10 +334,24 @@ class TestMainFunction(unittest.TestCase):
                     rc = ct.main()
 
         self.assertEqual(rc, 0)
-        calls = mock_collector.collect.call_args_list
-        symbols_called = [c[0][0] for c in calls]
-        self.assertIn("BTCUSDT", symbols_called)
-        self.assertIn("ETHUSDT", symbols_called)
+        mock_rms.assert_called_once_with(["BTCUSDT", "ETHUSDT"])
+
+    def test_build_child_argv_replaces_symbols_with_symbol(self):
+        """_build_child_argv must replace --symbols X,Y with --symbol X."""
+        ct = _load_module()
+        with patch("sys.argv", [
+            "collect_ticks.py",
+            "--symbols", "BTCUSDT,ETHUSDT",
+            "--s3-bucket", "my-bucket",
+            "--log-level", "DEBUG",
+        ]):
+            argv = ct._build_child_argv("ETHUSDT")
+        self.assertIn("--symbol", argv)
+        self.assertIn("ETHUSDT", argv)
+        self.assertNotIn("--symbols", argv)
+        self.assertNotIn("BTCUSDT,ETHUSDT", argv)
+        self.assertIn("--s3-bucket", argv)
+        self.assertIn("my-bucket", argv)
 
     def test_main_keyboard_interrupt_exits_0(self):
         ct = _load_module()
