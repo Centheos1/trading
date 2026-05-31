@@ -52,6 +52,22 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
 
 # Allow SERVICE_USER to run docker without sudo
 sudo usermod -aG docker "${SERVICE_USER}"
+
+# Configure Docker daemon with default log rotation so container logs can
+# never fill the root disk, regardless of individual compose file settings.
+# max-size: 50m = each container's log file caps at 50 MB
+# max-file: 3   = keep 3 rotated files → max 150 MB per container total
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json > /dev/null <<'DAEMON_JSON'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "50m",
+    "max-file": "3"
+  }
+}
+DAEMON_JSON
+
 sudo systemctl enable docker
 sudo systemctl start docker
 
@@ -106,6 +122,11 @@ fi
 # ---------------------------------------------------------------------------
 log "Building Docker image (this takes ~5 minutes on first run)..."
 docker compose build
+
+# Remove dangling build cache and old image layers immediately after build.
+# On a 30 GB root volume, accumulated build layers are the #1 cause of
+# "no space left on device" errors during subsequent builds or deploys.
+docker system prune -f --filter "until=1h"
 
 log "Image built."
 

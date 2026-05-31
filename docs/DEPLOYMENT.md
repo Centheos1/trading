@@ -7,6 +7,107 @@ to EC2. Follow the steps in order on a fresh instance.
 
 ---
 
+## Emergency Recovery (EC2 hung / can't SSH)
+
+Use this section whenever the instance is unresponsive. **Do not panic — tick data
+on the EBS volume is never lost; the instance can always be recovered.**
+
+### Step 1 — Connect without SSH
+
+Try in order (stop when one works):
+
+**A — EC2 Serial Console** (t3 instances are Nitro — this always works):
+AWS Console → EC2 → your instance → Actions → **Monitor and troubleshoot →
+EC2 Serial Console → Connect**
+Login as `ubuntu` (no password needed if EC2 Instance Connect is enabled).
+
+**B — AWS Systems Manager Session Manager**:
+AWS Console → EC2 → your instance → **Connect → Session Manager → Connect**
+_(Requires `AmazonSSMManagedInstanceCore` on the IAM role)_
+
+**C — Stop → Start** (last resort, clears hung processes, EBS data is preserved):
+AWS Console → EC2 → Instance State → **Stop** → wait until stopped → **Start**
+The public IP changes — get the new one from the console before SSH-ing.
+
+### Step 2 — Diagnose and clear disk
+
+```bash
+# Check what's full
+df -h /
+
+# Find the biggest consumers
+sudo du -sh /var/lib/docker/* 2>/dev/null | sort -rh | head -10
+
+# Clear ALL container logs immediately (zero-byte truncate — containers keep running)
+for f in $(sudo find /var/lib/docker/containers -name '*-json.log' 2>/dev/null); do
+    sudo truncate -s 0 "$f"
+done
+
+# Remove dangling Docker images and build cache (typically 4–8 GB)
+docker system prune -af
+
+# Verify disk recovered
+df -h /
+```
+
+### Step 3 — Apply Docker daemon log rotation (one-time fix)
+
+If `/etc/docker/daemon.json` does not exist or does not contain `log-opts`:
+
+```bash
+sudo tee /etc/docker/daemon.json > /dev/null <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "50m",
+    "max-file": "3"
+  }
+}
+EOF
+sudo systemctl restart docker
+```
+
+This caps every container's log at 150 MB total, regardless of compose settings.
+**Must be applied on the existing instance — setup_ec2.sh sets this automatically
+for new instances.**
+
+### Step 4 — Pull latest code and restart
+
+```bash
+cd ~/app/trading
+git pull
+
+# Reinstall cron
+sudo cp scripts/s3_sync.sh /etc/cron.hourly/s3_sync
+sudo chmod +x /etc/cron.hourly/s3_sync
+
+# Rebuild data service
+docker compose build data
+docker system prune -f --filter "until=1h"   # ← always prune after build
+docker compose up -d --remove-orphans
+
+# Rebuild ohlcv-collector (picks up log rotation + reduced verbosity)
+docker compose --profile ohlcv build ohlcv-collector
+docker system prune -f --filter "until=1h"
+docker compose --profile ohlcv up -d --no-deps --force-recreate ohlcv-collector
+
+# Verify
+docker ps
+docker compose logs --tail=20 data
+docker compose --profile ohlcv logs --tail=20 ohlcv-collector | grep -v credentials
+```
+
+### Root causes and permanent fixes applied
+
+| Root cause | Permanent fix |
+|------------|--------------|
+| `aiobotocore` credentials log per S3 write (1000s of lines/hour) | Silenced at WARNING in `collect_ohlcv.py` `_setup_logging` |
+| Docker build cache accumulates (4–8 GB per build) | `docker system prune` runs after every `docker compose build` |
+| No daemon-level log cap | `/etc/docker/daemon.json` sets 50m/3-file default for all containers |
+| Compose log rotation only applies on container recreate | Daemon config applies immediately system-wide |
+
+---
+
 ## Overview
 
 ```
@@ -281,16 +382,17 @@ ssh ec2-trading
 
 cd ~/app/trading
 
-# Build if needed
-# In a second SSH session
+# Build (always prune after to reclaim build cache)
 docker compose build --progress=plain > /tmp/build.log 2>&1 &
 tail -f /tmp/build.log
+docker system prune -f --filter "until=1h"   # reclaim build cache (4–8 GB)
 
-# Tick collectors — real-time WebSocket trades + L2 depth (HDF5 → S3)
-docker compose up -d                              # BTCUSDT
-docker compose --profile multi up -d              # ETHUSDT
+# Tick collector — BTCUSDT + ETHUSDT in parallel (single container)
+docker compose up -d --remove-orphans
 
 # OHLCV collector — backfills 2020→now then polls hourly forever (Parquet → S3)
+docker compose --profile ohlcv build ohlcv-collector
+docker system prune -f --filter "until=1h"
 docker compose --profile ohlcv up -d
 
 # Verify all three are running
@@ -421,9 +523,12 @@ docker compose ps
 ```bash
 cd ~/app/trading
 git pull
-docker compose build
-docker compose up -d
-docker compose --profile multi up -d
+docker compose build data
+docker system prune -f --filter "until=1h"   # always prune after build
+docker compose up -d --remove-orphans
+docker compose --profile ohlcv build ohlcv-collector
+docker system prune -f --filter "until=1h"
+docker compose --profile ohlcv up -d --no-deps --force-recreate ohlcv-collector
 ```
 
 ### Check logs after a restart

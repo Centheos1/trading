@@ -75,6 +75,19 @@ def _setup_logging(level: str, log_dir: str = "logs") -> None:
     fh.setLevel(logging.DEBUG)
     root.addHandler(fh)
 
+    # Suppress chatty AWS SDK internals that log one "Found credentials"
+    # line per worker per S3 call — during backfill this generates thousands
+    # of lines and is the primary cause of container log disk exhaustion.
+    for noisy in (
+        "aiobotocore",
+        "aiobotocore.credentials",
+        "botocore",
+        "botocore.credentials",
+        "s3transfer",
+        "urllib3",
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 logger = logging.getLogger("collect_ohlcv")
 
