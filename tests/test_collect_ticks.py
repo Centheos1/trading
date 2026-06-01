@@ -337,7 +337,8 @@ class TestMainFunction(unittest.TestCase):
         mock_rms.assert_called_once_with(["BTCUSDT", "ETHUSDT"])
 
     def test_build_child_argv_replaces_symbols_with_symbol(self):
-        """_build_child_argv must replace --symbols X,Y with --symbol X."""
+        """_build_child_argv must prepend sys.executable, use an absolute
+        script path, and replace --symbols X,Y with --symbol X."""
         ct = _load_module()
         with patch("sys.argv", [
             "collect_ticks.py",
@@ -346,10 +347,17 @@ class TestMainFunction(unittest.TestCase):
             "--log-level", "DEBUG",
         ]):
             argv = ct._build_child_argv("ETHUSDT")
+
+        # First element must be the Python interpreter so Popen can run it.
+        self.assertEqual(argv[0], sys.executable)
+        # Second element must be an absolute path to the script.
+        self.assertTrue(os.path.isabs(argv[1]), f"script path not absolute: {argv[1]}")
+        # --symbols must be replaced with --symbol <symbol>
         self.assertIn("--symbol", argv)
         self.assertIn("ETHUSDT", argv)
         self.assertNotIn("--symbols", argv)
         self.assertNotIn("BTCUSDT,ETHUSDT", argv)
+        # Other args must be passed through unchanged.
         self.assertIn("--s3-bucket", argv)
         self.assertIn("my-bucket", argv)
 

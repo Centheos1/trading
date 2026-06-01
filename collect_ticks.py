@@ -471,12 +471,16 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
 def _build_child_argv(symbol: str) -> list:
     """Reconstruct sys.argv for a single-symbol child process.
 
-    Replaces ``--symbols A,B,...`` (or ``--symbols=A,B,...``) with
-    ``--symbol <symbol>`` so each spawned child uses the well-tested
-    single-symbol code path and manages its own signal / store lifecycle.
+    Uses ``sys.executable`` as the interpreter and resolves ``sys.argv[0]``
+    to an absolute path so the subprocess can be found regardless of the
+    working directory.  Replaces ``--symbols A,B,...`` with ``--symbol X``.
     """
-    argv = list(sys.argv)
-    result: list = []
+    # Always use the current interpreter + absolute script path so Popen
+    # can locate the script even when argv[0] is a bare filename.
+    script = os.path.abspath(sys.argv[0])
+    result: list = [sys.executable, script]
+
+    argv = list(sys.argv[1:])  # argv[0] handled above
     i = 0
     while i < len(argv):
         if argv[i] == "--symbols" and i + 1 < len(argv):
