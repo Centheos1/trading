@@ -23,45 +23,50 @@ parameter optimisation (NSGA-II), and a C++ order flow engine.
 
 ---
 
-## ⚠️ Status correction (2026-06-01 audit)
+## Architecture — distributed service stack (current)
 
-The mode table below describes the **previous monolith** (root `main.py`
-CLI + Qt desktop UI). Both have since been **removed** in favour of a
-distributed Redis + FastAPI service stack (`docker compose up`, see top
-of this file). As a result:
+The previous monolith (`main.py` CLI + Qt desktop UI) was replaced in 2026
+by a distributed Docker Compose stack. The table below describes the current
+deployed architecture.
 
-- **Backtest / optimise** remain fully working — now via REST
-  (`POST /api/backtest`, `POST /api/optimise`) instead of `main.py`.
-- **Live execution is mid-migration.** The Phase 14 V1-compliant
-  execution code (`execution/`) still exists and passes its tests, but
-  the deployed `strategy` service currently only **logs signals** — it
-  does not yet route Ripple-driven, risk-gated orders to a broker.
-  Re-wiring it is tracked as **Phase 21** (highest priority) in
-  `implementation_plan.md` §1A + §7.2.
+| Service | Role |
+|---|---|
+| `data` (`collect_ticks.py` / `data_service.py`) | Binance WebSocket → HDF5 / Parquet; publishes to Redis |
+| `ohlcv-collector` (`collect_ohlcv.py`) | Binance / Oanda OHLCV → Parquet / S3 |
+| `strategy` (`strategy/main.py`) | FastAPI: backtest (`POST /api/backtest`), optimise (`POST /api/optimise`), live execution, health |
+| `redis` | Pub/sub bus between `data` and `strategy` services |
 
-Treat the "✅ V1-complete (live execute)" row below as **engine-complete
-but not yet wired into the deployed service.** See `implementation_plan.md`
-§1A for the authoritative current-state description and the path to
-completion.
+**Live execution** is controlled via `ARM_EXECUTION` env var and the REST API:
 
-## V1 Status — engine GA (2026-05-11); live-path re-wire pending (Phase 21)
+```bash
+# Check execution posture (OBSERVE / PAPER / LIVE)
+curl http://localhost:8000/api/execution
 
-**TL;DR.** All five Phase 14 sub-phases (14A–14E) were completed against
-the monolith: Ripple-driven (event-time), Tide / Wave / RV snapshots on
-60 s / 5 s / 1 s cadences, every intent gated by
-`intent_risk_block_reason`, cross-venue boost factors as `WaveConfig`
-parameters, and `num_trades` as an NSGA-II Pareto axis. That logic now
-lives in `execution/` and is unit-tested, but the 2026 service refactor
-left it **orphaned** — see the status correction above and §1A of the
-implementation plan.
+# Arm live execution (routes Ripple intents through risk gate → broker)
+curl -X POST http://localhost:8000/api/execution/arm -H 'Content-Type: application/json' -d '{"armed":true}'
+```
 
-| Mode (legacy CLI — see correction above) | Status | Safe to use? |
+Default posture is `OBSERVE` (full strategy pipeline runs, zero broker orders).
+
+## V1 Status — ✅ GA (2026-05-11); distributed live-path ✅ wired (Phase 21, 2026-06-01)
+
+**TL;DR.** All five Phase 14 sub-phases (14A–14E) closed the V1 contract
+on the monolith: Ripple-driven (event-time), Tide / Wave / RV snapshots on
+60 s / 5 s / 1 s cadences, every intent gated by `intent_risk_block_reason`,
+cross-venue boost factors as `WaveConfig` parameters, `num_trades` as an
+NSGA-II Pareto axis. **Phase 21 (2026-06-01)** re-closes the same contract
+on the deployed `strategy` service via `strategy/engine/execution_bridge.py`
+and `strategy/engine/live_engine.py`. The same V1 primitives are used on
+both paths — no divergent gate logic.
+
+| Capability | Status | How to invoke |
 |---|---|---|
-| `backtest` (orderflow / wave / tide) — now `POST /api/backtest` | ✅ engine-complete | Yes |
-| `optimise` (NSGA-II, three-axis Pareto) — now `POST /api/optimise` | ✅ engine-complete | Yes |
-| Live Binance USD-M futures trading | ⚠️ **engine-complete, NOT wired into deployed service** — Phase 14A–14F logic exists in `execution/` but the running `strategy` service only logs signals. **Phase 21 re-wires it.** | **No — not live yet** |
-| `tools/replay_harness.py` (deterministic replay verifier) | ✅ complete | Yes |
-| `tools/hmm_abtest.py` (Phase 7V HMM A/B harness) | ✅ V2 research tooling | Yes (research only) |
+| Backtest (orderflow / wave / tide) | ✅ complete | `POST /api/backtest` |
+| Optimise (NSGA-II, three-axis Pareto) | ✅ complete | `POST /api/optimise` |
+| Live Binance USD-M futures trading | ✅ **wired in deployed service (Phase 21)** — default posture is OBSERVE | `ARM_EXECUTION=true` + `POST /api/execution/arm` |
+| Paper trading | ✅ complete | `EXECUTION_BROKER=paper ARM_EXECUTION=true` |
+| Deterministic replay verifier | ✅ complete | `tools/replay_harness.py` |
+| HMM A/B harness | ✅ V2 research tooling | `python -m tools.hmm_abtest` |
 
 **V1 closure work — all done:**
 
@@ -84,7 +89,24 @@ explicitly out-of-scope for V1.
 ## Architecture Overview
 
 ```
-main.py                          CLI entry point (data / tide / wave / backtest / optimise / execute)
+── Distributed Services (Docker Compose) ────────────────────────────────────
+strategy/main.py                 FastAPI entry point (uvicorn strategy.main:app)
+strategy/engine/live_engine.py   Headless multi-symbol live engine; Redis consumer
+strategy/engine/execution_bridge.py  Per-symbol gate + dispatch (OBSERVE / PAPER / LIVE)
+strategy/api/rest_routes.py      REST control plane: /api/backtest, /api/optimise,
+                                   /api/execution, /api/execution/arm
+
+collect_ticks.py / data_service.py  Data service: Binance WS → HDF5/Parquet → Redis
+collect_ohlcv.py / ohlcv_store.py   OHLCV collector: Binance/Oanda → Parquet/S3
+
+── Execution Layer ───────────────────────────────────────────────────────────
+execution/models.py              Order/position models; ripple_decision_to_intent;
+                                   intent_risk_block_reason (single source of gate logic)
+execution/execution_manager.py   Orchestration: arm/disarm, event-time cooldown, sizing
+execution/paper_engine.py        Paper fills (RippleDecision → simulated fill)
+execution/binance_broker.py      Live fills (REST MARKET orders + fill polling)
+execution/live_runner.py         In-process WS transport (dev / Bookmap loop);
+                                   reuses V1 primitives from execution/models.py
 
 ── Tide Layer (macro bias, risk budgeting) ──────────────────────────────────
 tide/
@@ -112,12 +134,11 @@ wave/
 schemas.py                       Canonical data contracts (TideBias, VolRegime, WaveRegime, PermissionSet, …)
 METRICS_GLOSSARY.md              Full mathematical + plain-language definitions of every metric
 
-── Legacy Order Flow Engine ─────────────────────────────────────────────────
-data_service.py                  Tick data collection (Python WebSocket → C++ engine → HDF5)
-backtester.py                    Strategy dispatcher (obv, sma, orderflow, …)
-optimiser.py                     Legacy NSGA-II (for legacy strategies)
-strategies/orderflow.py          Python wrapper for C++ order flow backtest
-backtestingCpp/orderflow/        C++ order flow engine (L2 order book, signal generation, TickStore, …)
+── Order Flow Engine (C++ hot path + Python wrappers) ───────────────────────
+backtestingCpp/orderflow/        C++ engine: OrderBook, Ripple, RiskEngine, TickStore, ReplayFeed, …
+strategies/orderflow.py          Python wrapper for C++ backtest
+backtester.py                    Backtest orchestration
+optimiser.py                     NSGA-II (three-axis Pareto: cagr, sharpe_ratio, num_trades)
 ```
 
 ---
@@ -289,14 +310,6 @@ mkdir -p logs data reports
 ---
 
 ## Running the Tide Layer
-
-### Interactive mode
-
-```bash
-python main.py
-# Mode: tide
-# Subcommand: backtest
-```
 
 ### CLI — single backtest
 
@@ -473,39 +486,38 @@ docker compose run --rm collector \
 
 # Native macOS
 python collect_ticks.py --symbol BTCUSDT --duration 30
-
-# Legacy interactive prompt (still works)
-python main.py
-# Mode: data | Exchange: binance | Symbol: BTCUSDT | Pull type: ticks | Duration: 30
 ```
 
 ### Backtest the order flow strategy
 
 ```bash
-python main.py
-# Mode: backtest | Exchange: binance | Symbol: BTCUSDT | Strategy: orderflow | Timeframe: 1m
+# Via the strategy service REST API
+curl -X POST http://localhost:8000/api/backtest \
+  -H 'Content-Type: application/json' \
+  -d '{"exchange":"binance","symbol":"BTCUSDT","strategy":"orderflow","timeframe":"1m"}'
 ```
 
 ### Optimise (NSGA-II)
 
 ```bash
-python main.py
-# Mode: optimise | Strategy: orderflow | Population: 10 | Generations: 3
+curl -X POST http://localhost:8000/api/optimise \
+  -H 'Content-Type: application/json' \
+  -d '{"strategy":"orderflow","pop_size":10,"generations":3}'
 ```
 
 ---
 
 ## Remaining Work
 
-### Live Execute Path (Phase 12 + Phase 14A — Ripple-driven)
+### Live Execute Path — ✅ V1-complete on distributed service (Phase 21)
 
-The outbound order-routing layer mirrors the Phase 10 inbound-feed
-hardening. Phase 12 added the unit-test scaffolding the
-`PaperEngine` / `ExecutionManager` / `BinanceBroker` layer was missing.
-**Phase 14A** (2026-05-09) rewired the live execution topology so that
-both paper and live paths consume `RippleDecision` intents (which
-already pass through the lifecycle FSM, scaling logic, exit taxonomy,
-and `RiskEngine`).
+Phase 12 added the unit-test scaffolding for `PaperEngine` /
+`ExecutionManager` / `BinanceBroker`. Phase 14A–14F built and verified the
+V1-compliant execution topology. **Phase 21 (2026-06-01)** re-wired that
+topology into the deployed `strategy` service via `ExecutionBridge` and the
+updated `LiveEngine`. Both paper and live paths consume `RippleDecision`
+intents through the lifecycle FSM, scaling logic, exit taxonomy, and
+`RiskEngine`.
 
 > **Phase 14B (Tide / Wave / Vol wiring) shipped 2026-05-11.** The
 > headless live entry point (`execute`) now pushes Tide budget on a
@@ -531,26 +543,25 @@ and `RiskEngine`).
 ```
 RippleEngine (C++)
   → RippleDecision
-    ├─ ripple_decision_to_intent (execution/models.py)
-    │    ├─ paper:  PaperEngine.on_intent          ← unchanged from Phase 12
-    │    │            → _handle_entry / _handle_exit
-    │    │            → order_callback → TradeBlotter / AccountPanel
-    │    └─ live:   intent_risk_block_reason       ← Phase 14C (V1 §22.2 #12 gate)
-    │                 (Wave permissions, ES budget, Tide risk_multiplier,
-    │                  max_position_usd — exits + cancels always pass)
-    │                 → ExecutionManager.on_intent ← Phase 14A
-    │                     (event-time cooldown via intent.timestamp)
-    │                     → asyncio worker loop
-    │                       → BinanceBroker.place_order (REST, MARKET)
-    │                         → _poll_order_fill until FILLED
-    └─ recorder.record_ripple_decision (sidecar — Phase 13)
+    └─ ripple_decision_to_intent (execution/models.py)
+         ├─ strategy service path (Phase 21 — deployed):
+         │    ExecutionBridge.dispatch
+         │      → intent_risk_block_reason       ← V1 §22.2 #12 gate
+         │          (Wave permissions, ES budget, Tide risk_multiplier,
+         │           max_position_usd — exits + cancels always pass)
+         │          → [OBSERVE] log only
+         │          → [PAPER]   PaperEngine.on_intent → simulated fill
+         │          → [LIVE]    ExecutionManager.on_intent
+         │                        (event-time cooldown via intent.timestamp)
+         │                        → asyncio worker loop
+         │                          → BinanceBroker.place_order (REST, MARKET)
+         │                            → _poll_order_fill until FILLED
+         └─ in-process WS path (execution/live_runner.py — dev/Bookmap loop):
+              same gate + ExecutionManager topology; reuses execution/models.py
+              primitives — no divergent logic
 
 SignalEngine (C++)
-  → Signal
-    └─ recorder.record_signal (sidecar — Phase 13, observation only)
-       NB: signals NO LONGER drive ExecutionManager post-14A.
-       The deprecated ExecutionManager.on_signal entry point logs a
-       one-time WARNING if any caller still routes signals through it.
+  → Signal (observation only — deprecated on_signal entry removed in Phase 14F)
 ```
 
 Phase 12 added ≈ 83 new offline tests across four suites (no real
@@ -595,49 +606,15 @@ the 5-second budget. No production-code patches were required — the
 audit pass during test writing did not surface any defect.
 
 **V1 closure work (Phase 14 — see `implementation_plan.md` §7.1):**
-- ✅ **14A — DONE 2026-05-09.** Replaced `set_signal_callback(on_signal)`
-  with `set_ripple_callback(...)` → `ripple_decision_to_intent` →
-  `ExecutionManager.on_intent`. Wall-clock cooldown moved to event-time
-  (`intent.timestamp` → `_last_intent_ts_ms`). 23 new tests in
-  `tests/test_execution_manager.py`, 13 new tests in
-  `tests/test_live_runner.py`. Both grep gates pass.
-- ✅ **14B — DONE 2026-05-11.** Headless `run_live_execute` now pushes
-  `TideSnapshot` (60 s), `WaveSnapshot` (5 s), and realized vol (1 s)
-  into the C++ engine via the three `RippleEngine` setters. WS trade
-  callback feeds `WaveEngine.on_price` and a rolling RV buffer. 24 new
-  tests in `tests/test_layered_live_wiring.py`. All three grep gates
-  pass with multiple production hits each.
-- ✅ **14C — DONE 2026-05-12.** End-to-end V1 §22.2 #12 contract pinned
-  by `tests/test_live_execution_v1_compliance.py` (18 tests).
-  `intent_risk_block_reason` re-applies the C++ Wave/Risk gate on the
-  Python side from inside `execution/live_runner.py:_ripple_cb` so a
-  real broker provably receives zero orders under all six failure
-  modes (ES exhausted,
-  Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades
-  concurrent, cooldown active). Exits + happy-path negative-controls
-  pin no over-suppression.
-- ✅ **14D — DONE 2026-05-11.** Cross-venue divergence + correlation
-  boost factors are now `WaveConfig.crossvenue_divergence_boost` /
-  `crossvenue_correlation_boost` parameters (previously hardcoded
-  `2.0` / `0.5`). Two new tests in `test_crossvenue_wave.py`.
-- ✅ **14E — DONE 2026-05-11.** `num_trades` is a third Pareto axis in
-  NSGA-II (`crowding_distance` iterates it; `non_dominated_sorting`
-  treats it as "higher is better" alongside `cagr` and `sharpe`).
-  Closes `strategy.md` §22.2 #15. Both `# TODO add num_trades` markers
-  removed from `optimiser.py`; 4 new tests in `test_optimiser.py`.
-- ✅ **14F — DONE 2026-05-12.** V1 closure tail:
-  - Deleted the deprecated `ExecutionManager.on_signal` /
-    `_execute_signal` surface and the `import time` it required.
-    Wall-clock reads on the decision path are now impossible by
-    construction (the `time` module is no longer in
-    `execution/execution_manager.py`'s namespace).
-  - Added `tests/test_strat_params_audit.py` (7 tests) to pin the
-    Wave/Tide `STRAT_PARAMS` ↔ dataclass-field contract (Phase 13Y
-    parity follow-up).
-  - Added 12 new tests for `execution.live_runner._layered_push_step`
-    pinning RV/Wave/Tide cadences, snapshot translation and counter
-    stall on `get_ripple()` failure.
-  - Documentation drift sweep across `implementation_plan.md`.
+- ✅ **14A — DONE 2026-05-09.** Ripple-driven topology; event-time cooldown.
+- ✅ **14B — DONE 2026-05-11.** Tide / Wave / RV snapshot push on 60 s / 5 s / 1 s cadences.
+- ✅ **14C — DONE 2026-05-12.** V1 §22.2 #12 acceptance test (18 tests in `tests/test_live_execution_v1_compliance.py`).
+- ✅ **14D — DONE 2026-05-11.** Cross-venue boost factors as `WaveConfig` params.
+- ✅ **14E — DONE 2026-05-11.** `num_trades` as NSGA-II Pareto axis.
+- ✅ **14F — DONE 2026-05-12.** Deprecated `on_signal` deleted; `STRAT_PARAMS` audit; layered-push test coverage.
+
+**Phase 21 — distributed service re-wire (see `implementation_plan.md` §7.2):**
+- ✅ **21 — DONE 2026-06-01.** `ExecutionBridge` + updated `LiveEngine` close the same V1 contract on the deployed `strategy` service. `tests/test_strategy_live_engine.py` (18+ tests) pins the distributed path. `GET /api/execution` and `POST /api/execution/arm` expose execution diagnostics + arming via REST.
 
 **Deferred to V2:**
 - LIMIT / OCO order support and partial-fill bookkeeping

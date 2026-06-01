@@ -12,7 +12,7 @@ The system is a mixed **C++ / Python** application that implements a layered tra
 | **Wave** | Market structure / regime classification | Python (research); C++ proxy (live) |
 | **Ripple** | Execution: order flow analysis, liquidity transitions, trade lifecycle | C++ (hot path) |
 
-The application operates in three modes: **data collection**, **backtest**, and **optimise**. Backtest and optimise modes require strict determinism — identical inputs must produce identical outputs on every run.
+The application runs as a **distributed Docker Compose stack** with three services: `data` (tick/OHLCV collection → Redis), `redis` (pub/sub bus), and `strategy` (FastAPI: backtest, optimise, live execution). The `strategy` service operates in three execution postures: **OBSERVE** (default — pipeline runs, zero broker orders), **PAPER** (simulated fills), and **LIVE** (real broker). Backtest and optimise modes require strict determinism — identical inputs must produce identical outputs on every run.
 
 Testing is critical because:
 
@@ -74,6 +74,8 @@ Each implementation phase has specific test requirements. A phase is not complet
 | 6 — Optimization | Full pipeline, full parameter space, optimization convergence |
 | 7 — HMM Extensions | HMM math, model load, HMM vs rule-based, HMM determinism |
 | 8 — Cross-Venue | Cross-venue features, multi-venue→Wave, multi-venue replay |
+| 14 — V1 Live Execution | Risk-gate acceptance (18 tests), Ripple-driven topology, event-time cooldown, exits-never-blocked |
+| 21 — Distributed Service | `ExecutionBridge` dispatch, `LiveEngine` wiring, OBSERVE/PAPER/LIVE mode selection, service REST endpoints |
 
 ---
 
@@ -439,18 +441,34 @@ python -m unittest tests.test_schemas.TestFeatureRegistry.test_canonical_s16_com
 
 ### 6.3 Available Python Test Files
 
-| File | What it tests |
-|---|---|
-| `tests/test_schemas.py` | Enums, data contracts, defaults, config JSON round-trip, feature registry completeness, StrategySnapshot construction/determinism/serialization, pre-phase defaults |
-| `tests/test_tide_engine.py` | TideEngine risk multiplier by regime (§7.4.7), LSI stress penalty, cadence gating, snapshot fields, bias/vol passthrough, determinism, invariants |
-| `tests/test_risk_bindings.py` | RiskEngine pybind11 bindings: construction, set_budget, check_new_order, get_allowed_size, compute_position_size, on_fill, PnL, reset, determinism |
-| `tests/test_wave_engine.py` | WaveEngine trend efficiency (§8.5.4), distance-to-structure (§8.5.5), permissions matrix (§18, all 12 rows), regime state machine (§8.8, all transitions), cadence gating, determinism, property invariants, boundary cases |
-| `tests/test_wave_bindings.py` | Wave pybind11 bindings: WaveSnapshot, PermissionSet, WaveConfig, WaveRegime/PermissionLevel enums, RippleEngine wave snapshot set/get/reset |
-| `tests/test_replay_determinism.py` | Full-pipeline replay determinism: identical event sequences → identical StrategySnapshot output, multiple parameter configs, triple replay, paper-fills on/off |
-| `tests/test_hmm_trainer.py` | HMM Baum-Welch trainer: convergence, BIC model selection, transition/variance validity, deterministic training, model JSON round-trip, save/load file, C++-compatible format |
-| `tests/test_hmm_bindings.py` | HMM pybind11 bindings: HMMBasedInference class, model load from string, config hmm_enabled/hmm_model_path, RippleEngine set_hmm_backend/set_score_backend swap |
-| `tests/test_crossvenue_engine.py` | CrossVenueEngine: Pearson correlation, lead/lag, divergence, cadence gating, window trimming, determinism, CSV store round-trip, replay determinism |
-| `tests/test_crossvenue_wave.py` | Cross-venue → Wave integration: low correlation → BREAKDOWN, large divergence → BREAKDOWN, high correlation no breakdown, baseline preservation, reset, accessors, determinism |
+| File | Phase | What it tests |
+|---|---|---|
+| `tests/test_schemas.py` | 1 | Enums, data contracts, defaults, config JSON round-trip, feature registry completeness, StrategySnapshot construction/determinism/serialization, pre-phase defaults |
+| `tests/test_tide_engine.py` | 4 | TideEngine risk multiplier by regime (§7.4.7), LSI stress penalty, cadence gating, snapshot fields, bias/vol passthrough, determinism, invariants |
+| `tests/test_risk_bindings.py` | 4 | RiskEngine pybind11 bindings: construction, set_budget, check_new_order, get_allowed_size, compute_position_size, on_fill, PnL, reset, determinism |
+| `tests/test_wave_engine.py` | 5 | WaveEngine trend efficiency (§8.5.4), distance-to-structure (§8.5.5), permissions matrix (§18, all 12 rows), regime state machine (§8.8, all transitions), cadence gating, determinism, property invariants, boundary cases |
+| `tests/test_wave_bindings.py` | 5 | Wave pybind11 bindings: WaveSnapshot, PermissionSet, WaveConfig, WaveRegime/PermissionLevel enums, RippleEngine wave snapshot set/get/reset |
+| `tests/test_replay_determinism.py` | 6 | Full-pipeline replay determinism: identical event sequences → identical StrategySnapshot output, multiple parameter configs, triple replay, paper-fills on/off |
+| `tests/test_hmm_trainer.py` | 7 | HMM Baum-Welch trainer: convergence, BIC model selection, transition/variance validity, deterministic training, model JSON round-trip, save/load file, C++-compatible format |
+| `tests/test_hmm_bindings.py` | 7 | HMM pybind11 bindings: HMMBasedInference class, model load from string, config hmm_enabled/hmm_model_path, RippleEngine set_hmm_backend/set_score_backend swap |
+| `tests/test_crossvenue_engine.py` | 8 | CrossVenueEngine: Pearson correlation, lead/lag, divergence, cadence gating, window trimming, determinism, CSV store round-trip, replay determinism |
+| `tests/test_crossvenue_wave.py` | 8 | Cross-venue → Wave integration: low correlation → BREAKDOWN, large divergence → BREAKDOWN, high correlation no breakdown, baseline preservation, reset, accessors, determinism |
+| `tests/test_execution_manager.py` | 12 / 14A | ExecutionManager: lifecycle (start/stop/idempotent), arm/disarm, event-time cooldown, `on_intent` dispatch, `_compute_quantity` for all SizingModes, `_periodic_refresh` resilience |
+| `tests/test_paper_engine.py` | 12 | PaperEngine: all `on_intent` branches, suppression rules, realized-PnL signing, all three SizingModes, `unrealized_pnl`, `update_sizing`, `reset`, order-callback safety |
+| `tests/test_binance_broker.py` | 12 | BinanceBroker: connect/disconnect, `get_account_info`, `place_order`, `cancel_order`, `get_position`, `close_position`, `_round_quantity`, `_map_status` |
+| `tests/test_execution_models.py` | 12 | `ripple_decision_to_intent`, `_RIPPLE_INTENT_MAP` round-trips, `intent_risk_block_reason` gate, `NO_ACTION` short-circuit |
+| `tests/test_stream_health.py` | 10 | `FeedStreamHealth` FSM transitions, `consecutive_failures` threshold, `short_status` rendering |
+| `tests/test_binance_futures_ws.py` | 10 | `run_binance_usdm_futures_ws_feed`: trade/depth parse+dispatch, dedupe, `ConnectionClosed` reconnect, watchdog, exponential backoff, `stop_event` |
+| `tests/test_run_live.py` | 10B | `strategies/orderflow.py::run_live`: engine config, WS dispatch, signal-callback wiring, REST snapshot, `stop()` |
+| `tests/test_live_runner.py` | 10C / 14A | `execution/live_runner.py::run_live_execute`: WS dispatch, status-loop cadence, shutdown disarm contract, `_layered_push_step` cadences |
+| `tests/test_layered_live_wiring.py` | 14B | `_run_layered_push_loop`: Tide/Wave/RV cadences, snapshot translation, CRISIS propagation, counter stall on `get_ripple()` failure |
+| `tests/test_live_execution_v1_compliance.py` | 14C | V1 §22.2 #12 contract (in-process WS path): ES exhausted, Wave DISABLED, Tide CRISIS, max_position, two-trades concurrent, cooldown active — all yield zero broker orders; exits never blocked; happy-path fires |
+| `tests/test_replay_harness.py` | 13 | Deterministic replay: schema, serialization, `load_sidecar` errors, divergence detection, end-to-end capture+replay with real C++ engine |
+| `tests/test_orderflow_backtest.py` | 13X / 13Y | Backtest double-fire fix (VP/CVD counts), `_RIPPLE_MAP` / `_LIFECYCLE_KEYS` binding drift, `STRAT_PARAMS` round-trip |
+| `tests/test_hmm_abtest.py` | 7V | HMM A/B helpers: `derive_state_map`, `compare_metrics`, `summarize_winner`, `run_abtest` end-to-end stub-runner |
+| `tests/test_strat_params_audit.py` | 14F | Wave/Tide `STRAT_PARAMS` ↔ dataclass-field contract |
+| `tests/test_collect_ticks.py` | 16P | `collect_ticks.py` CLI (22 tests) |
+| `tests/test_strategy_live_engine.py` | **21** | `ExecutionBridge` + `LiveEngine` on distributed service path: intent decode/dispatch, risk-gate blocks (ES/Wave/Tide/max-position), exits never blocked, OBSERVE mode, `ExecutionManager` integration, `LiveEngine` wiring (ripple callback, layered push, Wave/RV feed) |
 
 ### 6.4 Discovering Python Tests
 
@@ -709,8 +727,11 @@ Feed a sequence of synthetic events and verify:
 
 ### 12.3 Mode Compatibility
 
-- **Backtest mode:** Uses `ReplayFeed`, produces deterministic results.
-- **Optimise mode:** Runs backtest in a loop with parameter variation, each run is deterministic.
+- **Backtest mode** (`POST /api/backtest`): Uses `ReplayFeed`, produces deterministic results.
+- **Optimise mode** (`POST /api/optimise`): Runs backtest in a loop with parameter variation, each run is deterministic.
+- **OBSERVE posture** (default live): Full strategy pipeline runs; zero broker orders. Use for monitoring before arming.
+- **PAPER posture** (`EXECUTION_BROKER=paper`): Simulated fills from `PaperEngine`; no real orders.
+- **LIVE posture** (`ARM_EXECUTION=true EXECUTION_BROKER=binance`): Real MARKET orders via `BinanceBroker`; full `intent_risk_block_reason` gate active.
 
 ---
 
@@ -1025,47 +1046,76 @@ Tests that depend on configuration should either:
 
 | Test Suite | Tests | Status | Phase |
 |---|---|---|---|
-| `test_schemas.py` (Python) | 56 tests | Passing | 1 |
+| `test_schemas.py` (Python) | 56 | Passing | 1 |
 | `test_schemas.cpp` (C++) | 396 checks | Passing | 1 |
 | `test_ripple.cpp` (C++) | 163 checks | Passing | 1 |
 | `test_trade_lifecycle.cpp` (C++) | 126 checks | Passing | 2 |
 | `test_liquidity_map.cpp` (C++) | 112 checks | Passing | 3 |
 | `test_risk_engine.cpp` (C++) | 190 checks | Passing | 4 |
-| `test_tide_engine.py` (Python) | 19 tests | Passing | 4 |
-| `test_risk_bindings.py` (Python) | 11 tests | Passing | 4 |
+| `test_tide_engine.py` (Python) | 19 | Passing | 4 |
+| `test_risk_bindings.py` (Python) | 11 | Passing | 4 |
 | `test_wave_integration.cpp` (C++) | 38 checks | Passing | 5 |
-| `test_wave_engine.py` (Python) | 56 tests | Passing | 5 |
-| `test_wave_bindings.py` (Python) | 11 tests | Passing | 5 |
-| `test_replay_determinism.py` (Python) | 8 tests | Passing | 6 |
+| `test_wave_engine.py` (Python) | 65 | Passing | 5 |
+| `test_wave_bindings.py` (Python) | 11 | Passing | 5 |
+| `test_replay_determinism.py` (Python) | 8 | Passing | 6 |
 | `benchmark_pipeline` (C++) | 1 benchmark | Passing (P99 < 100 µs) | 6 |
 | `test_hmm_inference.cpp` (C++) | 59 checks | Passing | 7 |
-| `test_hmm_trainer.py` (Python) | 11 tests | Passing | 7 |
-| `test_hmm_bindings.py` (Python) | 8 tests | Passing | 7 |
-| `test_crossvenue_engine.py` (Python) | 21 tests | Passing | 8 |
-| `test_crossvenue_wave.py` (Python) | 9 tests | Passing | 8 |
-| `test_strategy_store.py` (Python) | 63 checks | Passing | Storage |
+| `test_hmm_trainer.py` (Python) | 11 | Passing | 7 |
+| `test_hmm_bindings.py` (Python) | 8 | Passing | 7 |
+| `test_hmm_abtest.py` (Python) | 38 | Passing | 7V |
+| `test_crossvenue_engine.py` (Python) | 21 | Passing | 8 |
+| `test_crossvenue_wave.py` (Python) | 16 | Passing | 8 |
+| `test_strategy_store.py` (Python) | 63 | Passing | Storage |
+| `test_stream_health.py` (Python) | 19 | Passing | 10 |
+| `test_binance_futures_ws.py` (Python) | 11 | Passing | 10 |
+| `test_run_live.py` (Python) | 14 | Passing | 10B |
+| `test_live_runner.py` (Python) | 13+ | Passing | 10C / 14A |
+| `test_paper_engine.py` (Python) | 26 | Passing | 12 |
+| `test_execution_manager.py` (Python) | 48 | Passing | 12 / 14A |
+| `test_binance_broker.py` (Python) | 19 | Passing | 12 |
+| `test_execution_models.py` (Python) | 13 | Passing | 12 |
+| `test_replay_harness.py` (Python) | 34 | Passing | 13 |
+| `test_orderflow_backtest.py` (Python) | 9 | Passing | 13X / 13Y |
+| `test_layered_live_wiring.py` (Python) | 24 | Passing | 14B |
+| `test_live_execution_v1_compliance.py` (Python) | 18 | Passing | 14C |
+| `test_strat_params_audit.py` (Python) | 7 | Passing | 14F |
+| `test_collect_ticks.py` (Python) | 22 | Passing | 16P |
+| `test_strategy_live_engine.py` (Python) | 18+ | Passing | **21** |
 
 ### 19.2 Planned Test Suites by Phase
 
 | Phase | New Test Suite | Focus | Status |
 |---|---|---|---|
-| 2 | `test_trade_lifecycle.cpp` | Lifecycle FSM transitions, exit types, scaling, trailing stop, permissions, intents, determinism | **Done** (99 checks) |
-| 2 | `test_trigger_detection.cpp` | Bounce/breakout detection (covered partially via lifecycle tests; dedicated suite deferred) | Deferred |
-| 3 | `test_liquidity_map.cpp` | Map components, scores, void corridors, CVD divergence boost, scale-out plan, wall quality filter, determinism | **Done** (112 checks) |
-| 4 | `test_risk_engine.cpp` | ES estimation, position sizing, budget enforcement, fill tracking, PnL, boundary cases, determinism | **Done** (190 checks) |
-| 4 | `test_tide_engine.py` | Risk multiplier by regime (§7.4.7), LSI stress penalty, cadence gating, snapshot fields, determinism, invariants | **Done** (19 tests) |
+| 2 | `test_trade_lifecycle.cpp` | Lifecycle FSM transitions, exit types, scaling, trailing stop, permissions, intents, determinism | **Done** (126 checks) |
+| 2 | `test_trigger_detection.cpp` | Bounce/breakout detection (partially covered via lifecycle; dedicated suite deferred) | Deferred |
+| 3 | `test_liquidity_map.cpp` | Map components, scores, void corridors, CVD divergence boost, scale-out plan, determinism | **Done** (112 checks) |
+| 4 | `test_risk_engine.cpp` | ES estimation, position sizing, budget enforcement, fill tracking, PnL, boundary cases | **Done** (190 checks) |
+| 4 | `test_tide_engine.py` | Risk multiplier by regime, LSI stress penalty, cadence gating, determinism, invariants | **Done** (19 tests) |
 | 4 | `test_risk_bindings.py` | RiskEngine pybind11 binding verification | **Done** (11 tests) |
-| 5 | `test_wave_integration.cpp` | WaveSnapshot storage/reset, PermissionSet enforcement, §18 matrix (all 12 rows), reduced-fraction custom values | **Done** (38 checks) |
-| 5 | `test_wave_engine.py` | Trend efficiency, distance-to-structure, regime state machine (all transitions), permissions matrix, cadence gating, determinism, property invariants, boundary cases | **Done** (56 tests) |
-| 5 | `test_wave_bindings.py` | Wave pybind11 binding verification (WaveSnapshot, PermissionSet, RippleEngine wave accessors) | **Done** (11 tests) |
-| 6 | `test_replay_determinism.py` | Full pipeline replay determinism: default config, tight thresholds, fast pipeline, paper-fills on/off, triple replay, multi-config (4 configs) | **Done** (8 tests) |
-| 6 | `benchmark_pipeline` | Tick-to-decision latency: 5000 events, P99 < 100 µs target, mean/median/P95/P99/max | **Done** (PASS, P99 ≈ 0.04 µs) |
-| 7 | `test_hmm_inference.cpp` | HMM forward algorithm, posterior distributions, Gaussian emission, model load/save, determinism, state transitions, confidence bounds, 3/5-state models | **Done** (59 checks) |
-| 7 | `test_hmm_trainer.py` | Baum-Welch convergence, BIC model selection, transition/variance validity, deterministic training, JSON round-trip, save/load | **Done** (11 tests) |
-| 7 | `test_hmm_bindings.py` | HMM pybind11 bindings: class, model load, config fields, RippleEngine backend swap (HMM ↔ ScoreBased) | **Done** (8 tests) |
-| 8 | `test_crossvenue_engine.py` | CrossVenueEngine features (Pearson, lead/lag, divergence), cadence gating, window trimming, determinism, CSV store round-trip, replay determinism | **Done** (21 tests) |
-| 8 | `test_crossvenue_wave.py` | Cross-venue → Wave integration: correlation/divergence → BREAKDOWN boost, baseline preservation, reset, accessors, determinism | **Done** (9 tests) |
-| Storage | `test_strategy_store.py` | HDF5 schema versioning, signal write/read roundtrip, snapshot buffered write/flush, session event persistence, time-range filtering, legacy file detection, readonly open, reopen persistence, default fields | **Done** (63 checks) |
+| 5 | `test_wave_integration.cpp` | WaveSnapshot storage/reset, PermissionSet enforcement, §18 matrix (all 12 rows) | **Done** (38 checks) |
+| 5 | `test_wave_engine.py` | Trend efficiency, regime state machine, permissions matrix, cadence gating, determinism | **Done** (65 tests) |
+| 5 | `test_wave_bindings.py` | Wave pybind11 binding verification | **Done** (11 tests) |
+| 6 | `test_replay_determinism.py` | Full pipeline replay determinism: default config, tight thresholds, paper-fills on/off, triple replay | **Done** (8 tests) |
+| 6 | `benchmark_pipeline` | Tick-to-decision latency: P99 < 100 µs target | **Done** (P99 ≈ 0.04 µs) |
+| 7 | `test_hmm_inference.cpp` | HMM forward algorithm, posteriors, Gaussian emission, model load/save, determinism | **Done** (59 checks) |
+| 7 | `test_hmm_trainer.py` | Baum-Welch convergence, BIC model selection, JSON round-trip, save/load | **Done** (11 tests) |
+| 7 | `test_hmm_bindings.py` | HMM pybind11 bindings; RippleEngine backend swap | **Done** (8 tests) |
+| 7V | `test_hmm_abtest.py` | `derive_state_map`, `compare_metrics`, `run_abtest` end-to-end | **Done** (38 tests) |
+| 8 | `test_crossvenue_engine.py` | CrossVenueEngine features, cadence gating, determinism, CSV round-trip | **Done** (21 tests) |
+| 8 | `test_crossvenue_wave.py` | Cross-venue → Wave BREAKDOWN boost, baseline preservation | **Done** (16 tests) |
+| Storage | `test_strategy_store.py` | HDF5 schema versioning, signal write/read, snapshot flush, session events | **Done** (63 checks) |
+| 10 | `test_stream_health.py` | `FeedStreamHealth` FSM transitions | **Done** (19 tests) |
+| 10 | `test_binance_futures_ws.py` | `run_binance_usdm_futures_ws_feed`: parse, dedupe, reconnect, watchdog | **Done** (11 tests) |
+| 10B | `test_run_live.py` | `strategies/orderflow.py::run_live` | **Done** (14 tests) |
+| 10C / 14A | `test_live_runner.py` | `execution/live_runner.py`: WS dispatch, `_layered_push_step` cadences, shutdown | **Done** (13+ tests) |
+| 12 | `test_paper_engine.py`, `test_execution_manager.py`, `test_binance_broker.py`, `test_execution_models.py` | Execution layer: PaperEngine, ExecutionManager, BinanceBroker, models | **Done** (83+ tests) |
+| 13 | `test_replay_harness.py` | Capture sidecar, divergence detection, end-to-end with real C++ engine | **Done** (34 tests) |
+| 13X / 13Y | `test_orderflow_backtest.py` | Double-fire fix, binding drift, STRAT_PARAMS round-trip | **Done** (9 tests) |
+| 14B | `test_layered_live_wiring.py` | `_run_layered_push_loop`: Tide/Wave/RV cadences, CRISIS propagation | **Done** (24 tests) |
+| 14C | `test_live_execution_v1_compliance.py` | V1 §22.2 #12 acceptance (in-process WS path) | **Done** (18 tests) |
+| 14F | `test_strat_params_audit.py` | `STRAT_PARAMS` ↔ dataclass-field contract | **Done** (7 tests) |
+| 16P | `test_collect_ticks.py` | `collect_ticks.py` CLI | **Done** (22 tests) |
+| **21** | `test_strategy_live_engine.py` | `ExecutionBridge` + `LiveEngine` on distributed service path; V1 §22.2 #12 contract re-verified | **Done** (18+ tests) |
 
 ### 19.3 Test Architecture
 
