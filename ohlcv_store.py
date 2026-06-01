@@ -33,12 +33,37 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from abc import ABC, abstractmethod
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-path append locks
+# ---------------------------------------------------------------------------
+#
+# ``append`` is a read-modify-write of a single Parquet file. The continuous
+# collector runs it from a ThreadPoolExecutor; the driver dispatches one job
+# per unique (exchange, symbol) so distinct paths never collide in practice,
+# but a per-path lock makes the RMW safe even if the same path is ever
+# submitted twice (duplicate jobs, multi-adapter overlap). Cheap insurance
+# against silent last-write-wins data loss.
+
+_PATH_LOCKS: Dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: str) -> threading.Lock:
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _PATH_LOCKS[path] = lock
+        return lock
 
 
 # ---------------------------------------------------------------------------
@@ -187,21 +212,22 @@ class LocalParquetStore(OhlcvStore):
             return 0
         path = self.path_for(exchange, symbol, timeframe)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if os.path.exists(path):
-            existing = pd.read_parquet(path)
-            n_before = len(existing)
-            combined = pd.concat([existing, new_df], ignore_index=True)
-            combined = combined.drop_duplicates(
-                subset=["timestamp"], keep="last"
-            ).sort_values("timestamp").reset_index(drop=True)
-            n_written = len(combined) - n_before
-            combined.to_parquet(path, index=False, compression="snappy")
-        else:
-            new_df = new_df.drop_duplicates(
-                subset=["timestamp"], keep="last"
-            ).sort_values("timestamp").reset_index(drop=True)
-            new_df.to_parquet(path, index=False, compression="snappy")
-            n_written = len(new_df)
+        with _lock_for(path):
+            if os.path.exists(path):
+                existing = pd.read_parquet(path)
+                n_before = len(existing)
+                combined = pd.concat([existing, new_df], ignore_index=True)
+                combined = combined.drop_duplicates(
+                    subset=["timestamp"], keep="last"
+                ).sort_values("timestamp").reset_index(drop=True)
+                n_written = len(combined) - n_before
+                combined.to_parquet(path, index=False, compression="snappy")
+            else:
+                deduped = new_df.drop_duplicates(
+                    subset=["timestamp"], keep="last"
+                ).sort_values("timestamp").reset_index(drop=True)
+                deduped.to_parquet(path, index=False, compression="snappy")
+                n_written = len(deduped)
         return int(max(n_written, 0))
 
     def list_symbols(
@@ -301,31 +327,32 @@ class S3ParquetStore(OhlcvStore):
         if new_df.empty:
             return 0
         path = self.path_for(exchange, symbol, timeframe)
-        if self.exists(exchange, symbol, timeframe):
-            existing = pd.read_parquet(path, storage_options={"anon": False})
-            n_before = len(existing)
-            combined = pd.concat([existing, new_df], ignore_index=True)
-            combined = combined.drop_duplicates(
-                subset=["timestamp"], keep="last"
-            ).sort_values("timestamp").reset_index(drop=True)
-            n_written = len(combined) - n_before
-            combined.to_parquet(
-                path,
-                index=False,
-                compression="snappy",
-                storage_options={"anon": False},
-            )
-        else:
-            new_df = new_df.drop_duplicates(
-                subset=["timestamp"], keep="last"
-            ).sort_values("timestamp").reset_index(drop=True)
-            new_df.to_parquet(
-                path,
-                index=False,
-                compression="snappy",
-                storage_options={"anon": False},
-            )
-            n_written = len(new_df)
+        with _lock_for(path):
+            if self.exists(exchange, symbol, timeframe):
+                existing = pd.read_parquet(path, storage_options={"anon": False})
+                n_before = len(existing)
+                combined = pd.concat([existing, new_df], ignore_index=True)
+                combined = combined.drop_duplicates(
+                    subset=["timestamp"], keep="last"
+                ).sort_values("timestamp").reset_index(drop=True)
+                n_written = len(combined) - n_before
+                combined.to_parquet(
+                    path,
+                    index=False,
+                    compression="snappy",
+                    storage_options={"anon": False},
+                )
+            else:
+                deduped = new_df.drop_duplicates(
+                    subset=["timestamp"], keep="last"
+                ).sort_values("timestamp").reset_index(drop=True)
+                deduped.to_parquet(
+                    path,
+                    index=False,
+                    compression="snappy",
+                    storage_options={"anon": False},
+                )
+                n_written = len(deduped)
         return int(max(n_written, 0))
 
     def list_symbols(

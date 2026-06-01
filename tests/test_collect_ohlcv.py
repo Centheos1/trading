@@ -263,5 +263,66 @@ class TestOandaClientEnvironment(unittest.TestCase):
                 oanda_mod.OandaClient()
 
 
+# ---------------------------------------------------------------------------
+# _collect_one fetch retry (no silent gaps)
+# ---------------------------------------------------------------------------
+
+class _FlakyAdapter:
+    """Adapter whose fetch_candles fails ``fail_times`` then succeeds."""
+
+    name = "binance"
+
+    def __init__(self, fail_times: int, rows):
+        self._fail_times = fail_times
+        self._rows = rows
+        self.calls = 0
+
+    def list_symbols(self):
+        return ["BTCUSDT"]
+
+    def fetch_candles(self, symbol, timeframe, from_ts, to_ts):
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            raise RuntimeError("simulated transient API error")
+        return self._rows
+
+
+class TestCollectOneRetry(unittest.TestCase):
+    """A transient fetch error must be retried, not turned into a silent gap."""
+
+    def setUp(self):
+        # Make backoff instant so the test is fast.
+        self._orig_backoff = co._FETCH_BACKOFF_BASE_S
+        co._FETCH_BACKOFF_BASE_S = 0.0
+        co._shutdown.clear()
+
+    def tearDown(self):
+        co._FETCH_BACKOFF_BASE_S = self._orig_backoff
+
+    def test_transient_failure_is_retried_then_succeeds(self):
+        rows = [(_DAY := 1_609_459_200_000, 1.0, 2.0, 0.5, 1.5, 10.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalParquetStore(root=tmp)
+            adapter = _FlakyAdapter(fail_times=co._FETCH_MAX_ATTEMPTS - 1, rows=rows)
+            n = co._collect_one(
+                adapter, store, "BTCUSDT", "1m",
+                default_from_ts=_DAY, to_ts=_DAY + 60_000,
+            )
+            self.assertEqual(n, 1)
+            self.assertEqual(adapter.calls, co._FETCH_MAX_ATTEMPTS)
+
+    def test_persistent_failure_returns_zero_after_exhausting_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalParquetStore(root=tmp)
+            adapter = _FlakyAdapter(fail_times=99, rows=[])
+            _DAY = 1_609_459_200_000
+            n = co._collect_one(
+                adapter, store, "BTCUSDT", "1m",
+                default_from_ts=_DAY, to_ts=_DAY + 60_000,
+            )
+            self.assertEqual(n, 0)
+            self.assertEqual(adapter.calls, co._FETCH_MAX_ATTEMPTS)
+
+
 if __name__ == "__main__":
     unittest.main()

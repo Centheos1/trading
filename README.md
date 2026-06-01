@@ -23,22 +23,44 @@ parameter optimisation (NSGA-II), and a C++ order flow engine.
 
 ---
 
-## V1 Status — ✅ GA AS OF 2026-05-11
+## ⚠️ Status correction (2026-06-01 audit)
 
-**TL;DR.** All five Phase 14 sub-phases (14A–14E) are done. The live
-execute path is now V1-compliant: Ripple-driven (event-time), Tide /
-Wave / RV snapshots pushed on 60 s / 5 s / 1 s cadences, every intent
-gated by `intent_risk_block_reason`, cross-venue boost factors are
-`WaveConfig` parameters (no magic constants), and `num_trades` is a
-first-class NSGA-II Pareto axis. See `implementation_plan.md` §7.1 for
-the full Phase 14 closure record.
+The mode table below describes the **previous monolith** (root `main.py`
+CLI + Qt desktop UI). Both have since been **removed** in favour of a
+distributed Redis + FastAPI service stack (`docker compose up`, see top
+of this file). As a result:
 
-| Mode | V1 Status | Safe to use? |
+- **Backtest / optimise** remain fully working — now via REST
+  (`POST /api/backtest`, `POST /api/optimise`) instead of `main.py`.
+- **Live execution is mid-migration.** The Phase 14 V1-compliant
+  execution code (`execution/`) still exists and passes its tests, but
+  the deployed `strategy` service currently only **logs signals** — it
+  does not yet route Ripple-driven, risk-gated orders to a broker.
+  Re-wiring it is tracked as **Phase 21** (highest priority) in
+  `implementation_plan.md` §1A + §7.2.
+
+Treat the "✅ V1-complete (live execute)" row below as **engine-complete
+but not yet wired into the deployed service.** See `implementation_plan.md`
+§1A for the authoritative current-state description and the path to
+completion.
+
+## V1 Status — engine GA (2026-05-11); live-path re-wire pending (Phase 21)
+
+**TL;DR.** All five Phase 14 sub-phases (14A–14E) were completed against
+the monolith: Ripple-driven (event-time), Tide / Wave / RV snapshots on
+60 s / 5 s / 1 s cadences, every intent gated by
+`intent_risk_block_reason`, cross-venue boost factors as `WaveConfig`
+parameters, and `num_trades` as an NSGA-II Pareto axis. That logic now
+lives in `execution/` and is unit-tested, but the 2026 service refactor
+left it **orphaned** — see the status correction above and §1A of the
+implementation plan.
+
+| Mode (legacy CLI — see correction above) | Status | Safe to use? |
 |---|---|---|
-| `python main.py backtest` (orderflow / wave / tide) | ✅ V1-complete | Yes |
-| `python main.py optimise` (NSGA-II) | ✅ V1-complete (three-axis Pareto post-14E: cagr, sharpe, num_trades) | Yes |
-| `python main.py execute` (live Binance USD-M futures trading) | ✅ **V1-complete** — Phase 14A (Ripple-driven, event-time cooldown), 14B (Tide budget, Wave snapshot, RV pushed live), 14C (V1 §22.2 #12 contract pinned by 18-test compliance suite — broker provably sees zero orders under ES exhausted / Wave DISABLED / Tide CRISIS / max_position exceeded / two-trades-concurrent / cooldown active), 14D (cross-venue boost factors are `WaveConfig` parameters), 14E (`num_trades` is a Pareto axis) | **TESTNET soak recommended before flipping `BINANCE_TESTNET=false`** — all V1 contract violations and quality gaps are closed; ordinary pre-prod hygiene (broker key rotation, account isolation, position limits) still applies. |
-| `tools/replay_harness.py` (deterministic replay verifier) | ✅ V1-complete | Yes |
+| `backtest` (orderflow / wave / tide) — now `POST /api/backtest` | ✅ engine-complete | Yes |
+| `optimise` (NSGA-II, three-axis Pareto) — now `POST /api/optimise` | ✅ engine-complete | Yes |
+| Live Binance USD-M futures trading | ⚠️ **engine-complete, NOT wired into deployed service** — Phase 14A–14F logic exists in `execution/` but the running `strategy` service only logs signals. **Phase 21 re-wires it.** | **No — not live yet** |
+| `tools/replay_harness.py` (deterministic replay verifier) | ✅ complete | Yes |
 | `tools/hmm_abtest.py` (Phase 7V HMM A/B harness) | ✅ V2 research tooling | Yes (research only) |
 
 **V1 closure work — all done:**

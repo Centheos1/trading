@@ -98,6 +98,13 @@ logger = logging.getLogger("collect_ohlcv")
 
 _shutdown = threading.Event()
 
+# Per-symbol fetch retry policy. A transient API/network error should not
+# leave a permanent gap in the OHLCV history, so each fetch is retried with
+# exponential backoff before the (exchange, symbol) pair is skipped for this
+# pass. The next pass re-reads ``last_ts`` and resumes from the same point.
+_FETCH_MAX_ATTEMPTS: int = 3
+_FETCH_BACKOFF_BASE_S: float = 2.0
+
 
 def _handle_signal(signum, frame):  # noqa: ANN001
     name = signal.Signals(signum).name
@@ -419,11 +426,30 @@ def _collect_one(
         return 0
 
     t0 = time.monotonic()
-    try:
-        rows = adapter.fetch_candles(symbol, timeframe, from_ts, to_ts)
-    except Exception as exc:  # noqa: BLE001
+    rows = None
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _FETCH_MAX_ATTEMPTS + 1):
+        if _shutdown.is_set():
+            return 0
+        try:
+            rows = adapter.fetch_candles(symbol, timeframe, from_ts, to_ts)
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < _FETCH_MAX_ATTEMPTS:
+                backoff = _FETCH_BACKOFF_BASE_S * (2 ** (attempt - 1))
+                logger.warning(
+                    "[%s/%s/%s] fetch failed (attempt %d/%d, retrying in %.1fs): %s",
+                    adapter.name, symbol, timeframe,
+                    attempt, _FETCH_MAX_ATTEMPTS, backoff, exc,
+                )
+                _shutdown.wait(backoff)
+    if rows is None:
+        # Exhausted retries. Logged at ERROR so the gap is visible to the
+        # feed-health monitor / log scrapers rather than silently swallowed.
         logger.error(
-            "[%s/%s/%s] fetch failed: %s", adapter.name, symbol, timeframe, exc
+            "[%s/%s/%s] fetch failed after %d attempts — leaving gap from %d: %s",
+            adapter.name, symbol, timeframe, _FETCH_MAX_ATTEMPTS, from_ts, last_exc,
         )
         return 0
 

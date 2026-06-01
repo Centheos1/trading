@@ -163,8 +163,12 @@ class DataCollector:
                 data.clear()
             time.sleep(1.1)
 
-        logger.info(
-            f"{self.exchange} {symbol}: Collected {len(data)} most recent data from {ms_to_dt(data[0][0])} to {ms_to_dt(data[-1][0])}")
+        if len(data):
+            logger.info(
+                f"{self.exchange} {symbol}: Collected {len(data)} most recent data from {ms_to_dt(data[0][0])} to {ms_to_dt(data[-1][0])}")
+        else:
+            logger.info(
+                f"{self.exchange} {symbol}: Collected {len(data)} most recent data.")
 
         self._write_data(symbol, data)
         data.clear()

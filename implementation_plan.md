@@ -12,6 +12,75 @@ This document translates the strategy design defined in `strategy.md` into a con
 
 ---
 
+## 1A. ⚠️ Architecture Migration & Live-Path Reality (2026-06-01 audit)
+
+> **Read this before trusting any "wired live" / "GA" claim below.**
+> A 2026-06-01 codebase audit found that the runtime architecture was
+> refactored into a **distributed Redis + FastAPI service model** since
+> the Phase 14 V1-GA record was written. The refactor **re-opened the
+> very "unit-test-complete ≠ wired live" gap** that Phase 14 closed.
+> Sections §2.2, §2.3, §7.1, §10, §12 and large parts of `README.md`
+> still describe the *previous* monolith (root `main.py` CLI + Qt
+> `ui/` desktop app) and are now **partially stale**. Where this
+> section conflicts with them, **this section is ground truth** until
+> the older sections are rewritten (tracked as Phase 21 below).
+
+### What changed
+
+| Was (Phase 1–14 monolith) | Is now (2026-06-01) |
+|---|---|
+| Root `main.py` with `data` / `backtest` / `optimise` / `execute` CLI modes | **Removed.** No root `main.py`. Entry point is `strategy/main.py` (`uvicorn strategy.main:app`). |
+| Qt desktop UI (`ui/main_window.py`, `ui/live_trading_session.py`) drove the live loop and pushed Tide/Wave/Risk snapshots | **Removed entirely** (commit `317787f` "Remove all custom UI code"). Live visualisation is now external via the Bookmap add-on. |
+| Live execute = in-process WS feed → `execution/live_runner.py::run_live_execute` (Ripple-driven, Tide/Wave/Risk push, broker orders, `intent_risk_block_reason` gate) | **Orphaned.** `run_live_execute` still exists and is unit-tested, but **no production code calls it.** |
+| Single process | Three Docker services: `redis` (pub/sub bus), `data` (`collect_ticks.py` → Binance WS → HDF5/Parquet **+** Redis `trades:{SYM}`/`depth:{SYM}`), `strategy` (`uvicorn strategy.main:app`). |
+
+### The critical gap (V1 regression)
+
+The deployed `strategy` service (`strategy/engine/live_engine.py::LiveEngine`)
+currently does the following and **nothing more**:
+
+```
+Redis trades:/depth:  ──►  C++ OrderFlowEngine (per symbol)  ──►  set_signal_callback  ──►  logger.info(...)
+```
+
+It uses the **deprecated `set_signal_callback`** surface (not the
+Ripple-driven `set_ripple_callback` topology that Phase 14A made
+canonical), and it has **no** `ExecutionManager`, **no** broker, **no**
+Tide/Wave/Risk snapshot push, and **no** `intent_risk_block_reason`
+gate. In other words:
+
+- **V1 live execution is built and unit-tested (`execution/`) but is
+  NOT wired into the running service.** The Phase 14 acceptance suite
+  (`tests/test_live_execution_v1_compliance.py`) still passes because it
+  drives `execution/live_runner.py` directly — but that module is no
+  longer on the deployed path.
+- The Phase 14B/14C grep gates in §7.1 (e.g. `grep -rn "set_risk_budget"
+  execution/ main.py`) were written against `ui/live_trading_session.py`
+  + root `main.py`, **both of which no longer exist**. The only surviving
+  production hit is in `execution/live_runner.py` (the orphaned module).
+
+### What still works (verified 2026-06-01)
+
+- **Backtest / optimise**: exposed via REST (`POST /api/backtest`,
+  `POST /api/optimise`) in `strategy/api/rest_routes.py`. The C++ engine,
+  Ripple pipeline, NSGA-II optimiser, replay determinism, and all
+  research tooling are intact.
+- **Python test suite**: 813 tests pass (`python -m unittest discover -s tests`).
+- **C++ test suite**: ~1,104 checks across 7 binaries pass locally, but
+  are **not run by `build.sh` and not gated by CI** (no CI exists).
+- **Data collection (Phase 16P/16Q)**: `data` + `ohlcv-collector` services
+  collect to HDF5/Parquet/S3 and publish to Redis.
+
+### Consequence for the roadmap
+
+"V1 GA" remains **true for the engine and backtest/optimise control
+plane**, but is **no longer true for the deployed live-execution path**.
+Closing that is **Phase 21** (see §7.2) and is the single highest
+priority on the path to completion — it must land before any live
+trading and before the V2 model phases (17–20) are worth wiring.
+
+---
+
 ## 2. Assumptions About the Existing Codebase
 
 ### 2.1 Current Architecture
@@ -68,6 +137,12 @@ flowchart TB
 > Python but never invoked by any live entry point — the live path
 > runs against the relevant `Default*` snapshot. The "wired live?"
 > column is the V1 closure axis tracked by `Phase 14` in §7.1.
+>
+> **⚠️ 2026-06-01 caveat (see §1A):** the "✅ wired live" marks in the
+> execution/Tide/Wave/Risk rows below reflect the *pre-refactor* monolith
+> (root `main.py` + Qt `ui/`), both now removed. On the current deployed
+> `strategy` service these are **built but not wired** until **Phase 21**.
+> Ingestion, engine, backtest, and optimise rows remain accurate.
 
 | Capability | Status | Wired live? | Location |
 |---|---|---|---|
@@ -2718,6 +2793,7 @@ evaluated before Phase 17 work begins.
 
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
+| **21** | 🔴 Re-wire Live Execution into the Distributed Strategy Service | `NOT STARTED — V1 regression, highest priority` (see §1A) | §22.2 #4/#8/#9/#12 | Phase 14 (built, orphaned) |
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
 | **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting cleanly since 2026-06-01 (migrated to t3.medium, parallel subprocess architecture, log rotation applied); unblocks Phase 16 on **2026-07-01** (30 days)` | — | None (infrastructure prerequisite) |
 | **16Q** | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; Binance backfill complete; Oanda backfill in progress (127 instruments, 2020→now)` | — | Phase 16P infrastructure |
@@ -2727,6 +2803,51 @@ evaluated before Phase 17 work begins.
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
 | **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
 | **20** | Liquidity-Map Logistic Hold/Break Calibration | `NOT STARTED` | §10.3, §23 | Phase 3 (DONE) + labelled data |
+
+---
+
+### 🧭 Path to Completion — master sequence (2026-06-01)
+
+This is the single prioritised sequence to take the project from its
+current state to V2 GA. Phases are ordered by dependency and risk, not by
+number. Each row links to its detailed spec above.
+
+| # | Work item | Why now / blocks | Gate to start | Effort |
+|---|---|---|---|---|
+| **1** | **Phase 21 — Re-wire live execution into the `strategy` service** | 🔴 V1 regression: deployed service only logs signals; no risk-gated execution. Everything live depends on this. | None — start immediately | 2–4 days |
+| **2** | **Data-collection hardening** (see "Hardening backlog" below) | Phase 16 verdict quality depends on clean, gapless data; current code has silent-gap + watermark-loss + crash-on-empty bugs. | Parallel with #1 | 2–3 days |
+| **3** | **CI / test gating** — run Python (`unittest discover`) **and** C++ (`./test_*`) on every push; add `build.sh` post-build test hook | ~1,104 C++ checks exist but are never run automatically; doc-drift like §1A went unnoticed for weeks without it. | Parallel | 1 day |
+| **4** | **Doc reconciliation** — rewrite §2.2/§2.3/§7.1/§10/§12 + `README.md` + `TESTING_GUIDE.md` to the distributed architecture; delete `ui/`/`main.py` references | Prevents the next agent from trusting stale "wired live" claims. Partially started by §1A. | After #1 lands (so docs describe the real path) | 1 day |
+| **5** | **Phase 16P/16Q → 30 days clean data** | Hard prerequisite for the Phase 16 HMM A/B verdict. | Calendar: **2026-07-01** | passive |
+| **6** | **Phase 16 — record real `CampaignVerdict`** | The hard evidence gate for Phase 17. | #5 complete | 0.5 day run |
+| **7** | **Phase 17 — HMM Wave classifier** | Only if Phase 16 `promote == True`. | #6 verdict | 3–5 days |
+| **8** | **Phase 18 — Cross-venue features in C++ Ripple** | Independent of HMM; can run in parallel with 17. | Phase 8 (DONE) | 3–4 days |
+| **9** | **Phase 19 — Hierarchical ES / Euler decomposition** | Independent; sharpens risk budgeting. | Phase 4 (DONE) | 3–4 days |
+| **10** | **Phase 20 — Liquidity-map logistic calibration** | Needs labelled backtest data; lowest risk-adjusted priority. | Labelled data | 3–4 days |
+| **11** | **Bookmap V1 cut** — close `event_builder.py` qty + extended-metric TODOs (§6.1–6.3 of `docs/BOOKMAP_INTEGRATION.md`) | Visualisation polish; not on the trading-critical path. | Anytime | 1 day |
+
+**V2 GA gate (unchanged):** Phases 15–21 complete + Phase 16
+`CampaignVerdict` recorded. Phase 21 is now part of the V2 GA gate
+because it restores the V1 contract on the deployed path.
+
+#### Data-collection hardening backlog (work item #2)
+
+Concrete bugs/fragilities found in the 2026-06-01 audit. **Most are fixed
+(2026-06-01)** — see the Status column. Verified by 820 passing Python
+tests including the new `tests/test_tick_parquet_store.py` (7) +
+`TestCollectOneRetry` (2).
+
+| Severity | File | Issue | Status |
+|---|---|---|---|
+| 🔴 Bug | `data_service.py` | Logged `data[0][0]`/`data[-1][0]` after the "most recent" loop even when `data` is empty → `IndexError`. | ✅ Fixed — guarded like the older-data block. |
+| 🔴 Data-loss | `tick_parquet_store.py` | An HDF5 read failure **advanced the watermark**, permanently skipping that row range from the Parquet mirror. | ✅ Fixed — bounded retry (`_MAX_READ_FAILURES=5`); watermark held on transient failure, only skipped (logged ERROR) after persistent failure. |
+| 🟠 Data-loss | `tick_parquet_store.py` | Corrupt existing Parquet → overwritten with the new chunk only. | ✅ Fixed — corrupt day file is quarantined to `*.corrupt-<ts>` then a fresh file is written. |
+| 🟠 Silent gap | `collect_ohlcv.py` | `_collect_one` fetch exception returned 0 rows with only a log line → silent OHLCV gaps in continuous mode. | ✅ Fixed — `_FETCH_MAX_ATTEMPTS=3` exponential-backoff retry; ERROR log (not silent) when exhausted. |
+| 🟠 Race | `ohlcv_store.py` | `ThreadPoolExecutor` shares one `OhlcvStore`; concurrent read-modify-write append could race. | ✅ Fixed (defensive) — per-path `_lock_for(path)` around the append RMW. Note: current driver already dispatches one job per unique symbol, so the practical race window was nil; lock guards future duplicate-job cases. |
+| 🟠 Partial | `collect_ohlcv.py` | `--exchange all` with Oanda init failure. | ✅ Already adequate — credential errors return `[]` → `main()` exits 1; transient errors log ERROR and continue Binance-only (intentional resilience for a long-running collector). No change. |
+| 🟡 Coverage | `tests/` | No `test_tick_parquet_store.py`. | ✅ Fixed — new suite covers round-trip, idempotent re-flush, watermark retry/skip, and corrupt-file quarantine. |
+| 🟡 Ops | `scripts/s3_sync.sh` | Missing `S3_BUCKET` exited 0 (skip), so a misconfigured cron looked healthy while nothing synced. | ✅ Fixed — now logs ERROR to stderr + log and exits 1. |
+| 🟡 OOM | `ohlcv_store.py` | Full-file read on every append → memory spike on large 1m histories. | ⬜ Deferred — per-symbol 1m files stay well under ~100 MB (a few years ≈ tens of MB), so RMW is acceptable; revisit only if multi-year files grow large. |
 
 ---
 
@@ -2748,6 +2869,49 @@ satisfied. This checklist is derived from the V1 lesson that
 | 8 | **Grep gate included** | Phase spec includes a `grep` command that must return at least one production-code hit for each new API. |
 | 9 | **A/B metric gate (model phases)** | For Phases 16, 17, 20: a quantitative comparison shows the new path is ≥ deterministic baseline on at least one defined metric. |
 | 10 | **CampaignVerdict recorded (Phase 16 only)** | The `CampaignVerdict(promote, win_ratio, median_sharpe_delta)` result is written back to this section of `implementation_plan.md`. |
+
+---
+
+### Phase 21 — Re-wire Live Execution into the Distributed Strategy Service `[NOT STARTED — 🔴 HIGHEST PRIORITY]`
+
+**Why this exists.** See §1A. The 2026 service refactor (Redis pub/sub +
+FastAPI) replaced the monolith's in-process live loop. The deployed
+`strategy` service (`strategy/engine/live_engine.py`) currently consumes
+Redis and **only logs signals** via the deprecated `set_signal_callback`.
+All of Phase 14's V1-compliant execution machinery (`execution/`) still
+exists and passes its unit tests, but **nothing calls it on the deployed
+path**. This is a V1 contract regression: per `strategy.md` §22.2 the
+live path must be Ripple-driven (#4/#12), enforce the ES throttle (#8),
+and enforce Wave permissions (#9). None of that runs today.
+
+**Objective.** Make the `strategy` service the V1-compliant live path:
+Redis → C++ engine → **`set_ripple_callback`** → `intent_risk_block_reason`
+gate → `ExecutionManager.on_intent` → broker, with Tide/Wave/RV snapshots
+pushed on the documented cadences (60 s / 5 s / 1 s). Re-use the existing,
+already-tested primitives in `execution/live_runner.py` and
+`execution/models.py` rather than re-implementing them.
+
+**Scope.**
+
+| File | Change |
+|---|---|
+| `strategy/engine/live_engine.py` | Replace the log-only `set_signal_callback` with `set_ripple_callback` → `ripple_decision_to_intent` → `intent_risk_block_reason` → `exec_mgr.on_intent`, mirroring `execution/live_runner.py::_ripple_cb`. Construct an `ExecutionManager` (Paper or `BinanceBroker`, selected by env/config) per symbol. Add a layered-push task that calls `_layered_push_step(...)` on the 1 s tick so Tide/Wave/Risk snapshots reach the C++ engine. Feed `WaveEngine.on_price` + the realized-vol buffer from the Redis trade stream. |
+| `strategy/main.py` | Surface live-execution config (arm flag, paper vs live, `max_position_usd`) via env + `/api/strategy`. Gate live order routing behind an explicit `ARM_EXECUTION=true` (default false → observe/paper only). |
+| `strategy/api/rest_routes.py` | Add `GET /api/execution` (armed?, position, consumed_es, last block reason/count) and `POST /api/execution/arm` so the risk-gate diagnostics that Phase 14F built for the Qt UI are exposed over REST. |
+| `tests/test_strategy_live_engine.py` | NEW. Stub Redis + stub engine + `StubBroker`. Assert: a synthetic `RippleDecision` stream produces `on_intent` calls with correct type/side/qty/event-timestamp; the risk gate blocks under ES-exhausted / Wave-DISABLED / Tide-CRISIS / max-position; exits are never blocked; `ARM_EXECUTION=false` → zero broker orders; layered push calls `set_risk_budget`/`set_wave_snapshot`/`set_realized_vol` at the right cadence. Port the relevant assertions from `tests/test_live_execution_v1_compliance.py` + `tests/test_layered_live_wiring.py` to the new service path. |
+
+**Acceptance criteria.**
+
+1. `grep -rn "set_ripple_callback" strategy/` returns ≥ 1 production hit; `grep -rn "set_signal_callback" strategy/` returns **zero** order-routing hits (recorder/observation only, if any).
+2. `grep -rn "intent_risk_block_reason" strategy/` returns ≥ 1 production hit on the live order path.
+3. `grep -rn "set_risk_budget\|set_wave_snapshot\|set_realized_vol" strategy/` each return ≥ 1 production hit.
+4. The Phase 14C six failure modes (ES exhausted, Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades concurrent, cooldown active) are re-pinned on the `strategy` service path; exits are never blocked.
+5. `ARM_EXECUTION=false` (default) → byte-identical to today's observe-only behaviour (no broker orders); a test asserts this.
+6. TESTNET soak: `docker compose up` with `ARM_EXECUTION=true BINANCE_TESTNET=true` places orders only when Ripple decides AND the risk gate allows.
+7. Either delete `execution/live_runner.py` or have the `strategy` service import its primitives — there must be exactly one live path (no second orphan).
+
+**Out of scope.** New strategy behaviour, multi-symbol portfolio risk
+(V3), LIMIT/OCO routing already shipped in Phase 15 (re-use it).
 
 ---
 

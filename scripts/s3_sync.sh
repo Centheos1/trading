@@ -43,8 +43,13 @@ fi
 PARQUET_RETENTION_DAYS="${PARQUET_RETENTION_DAYS:-7}"
 
 if [ -z "${S3_BUCKET:-}" ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [WARN] S3_BUCKET not set — skipping sync" >> "${LOG_FILE}"
-    exit 0
+    # Fail loudly: a missing bucket means NOTHING is being backed up to S3.
+    # Exiting 0 here would make a misconfigured cron/timer look healthy while
+    # data silently never leaves the box. Exit non-zero so cron mail / the
+    # systemd timer's failure state surfaces it.
+    msg="S3_BUCKET not set — NOT syncing. Set S3_BUCKET in ${APP_DIR}/.env"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) [ERROR] ${msg}" | tee -a "${LOG_FILE}" >&2
+    exit 1
 fi
 
 UPLOADED=0

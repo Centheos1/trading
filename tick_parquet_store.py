@@ -74,6 +74,15 @@ _SAFETY_MARGIN: Dict[str, int] = {
 _TRADES_COLS = ["timestamp", "price", "quantity", "is_buyer_maker"]
 _DEPTH_COLS = ["timestamp", "side", "price", "quantity"]
 
+# Number of consecutive failed reads of the *same* HDF5 row range before we
+# give up and skip past it (advancing the watermark). Below this threshold a
+# read failure is treated as transient — the watermark is left untouched so
+# the next flush retries the same range. This prevents a momentary read error
+# (writer contention, partial tail write) from permanently dropping rows from
+# the durable Parquet mirror, while still guaranteeing forward progress past a
+# genuinely unreadable range.
+_MAX_READ_FAILURES: int = 5
+
 
 def _columns_for(dataset: str) -> List[str]:
     return _TRADES_COLS if dataset == "trades" else _DEPTH_COLS
@@ -136,6 +145,9 @@ class TickParquetStore:
     def __init__(self, root: str = "data/ticks") -> None:
         self.root = Path(root)
         self._watermarks = _Watermarks(self.root / ".watermarks.json")
+        # Consecutive HDF5 read-failure counts keyed by
+        # ``{exchange}.{SYMBOL}.{dataset}``. Reset on any successful read.
+        self._read_failures: Dict[str, int] = {}
 
     # -- paths ----------------------------------------------------------
 
@@ -214,23 +226,40 @@ class TickParquetStore:
         if start >= end:
             return 0
 
+        fail_key = f"{exchange}.{symbol.upper()}.{dataset}"
         try:
             arr = np.asarray(dataset_obj[start:end])
         except OSError as exc:
-            logger.warning(
-                "Skipping %s/%s/%s rows %d:%d (HDF5 read failed: %s)",
-                exchange,
-                symbol,
-                dataset,
-                start,
-                end,
-                exc,
+            fails = self._read_failures.get(fail_key, 0) + 1
+            self._read_failures[fail_key] = fails
+            if fails < _MAX_READ_FAILURES:
+                # Treat as transient: do NOT advance the watermark, so the
+                # next flush retries the same range. Losing rows from the
+                # durable mirror on a momentary error would defeat its
+                # purpose.
+                logger.warning(
+                    "%s/%s/%s rows %d:%d HDF5 read failed (attempt %d/%d, "
+                    "will retry next flush): %s",
+                    exchange, symbol, dataset, start, end,
+                    fails, _MAX_READ_FAILURES, exc,
+                )
+                return 0
+            # Persistent failure: skip past the poisoned range as a last
+            # resort so the flusher makes forward progress. Logged at ERROR
+            # because these rows are dropped from Parquet (the HDF5 may still
+            # hold them for offline recovery).
+            logger.error(
+                "%s/%s/%s rows %d:%d unreadable after %d attempts — SKIPPING "
+                "(data lost from Parquet mirror; HDF5 may still hold it): %s",
+                exchange, symbol, dataset, start, end, fails, exc,
             )
-            # Advance the watermark so we don't get stuck retrying the
-            # same bad range forever. Data in that slice is lost from
-            # Parquet but the HDF5 may still hold it.
+            self._read_failures[fail_key] = 0
             self._watermarks.set(exchange, symbol, dataset, end)
             return 0
+
+        # Successful read — clear any prior transient-failure streak.
+        if self._read_failures.get(fail_key):
+            self._read_failures[fail_key] = 0
 
         if arr.size == 0:
             self._watermarks.set(exchange, symbol, dataset, end)
@@ -304,11 +333,27 @@ class TickParquetStore:
                 existing = pq.read_table(str(path)).to_pandas()
                 combined = pd.concat([existing, chunk], ignore_index=True)
             except Exception as exc:
-                logger.warning(
-                    "Could not read existing %s (%s) — overwriting with new chunk only",
-                    path,
-                    exc,
+                # The existing day file is unreadable/corrupt. Do NOT silently
+                # overwrite it (that would discard whatever rows it still
+                # holds). Quarantine it next to the live file so it can be
+                # recovered offline, then start a fresh file from this chunk.
+                quarantine = path.with_suffix(
+                    path.suffix
+                    + f".corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
                 )
+                try:
+                    os.replace(path, quarantine)
+                    logger.error(
+                        "Corrupt Parquet %s (%s) — quarantined to %s; "
+                        "starting a fresh file from the new chunk",
+                        path, exc, quarantine,
+                    )
+                except OSError as mv_exc:
+                    logger.error(
+                        "Corrupt Parquet %s (%s) and quarantine move failed "
+                        "(%s) — writing new chunk only; existing rows lost",
+                        path, exc, mv_exc,
+                    )
                 combined = chunk
         else:
             combined = chunk
