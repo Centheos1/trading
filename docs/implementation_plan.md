@@ -12,6 +12,88 @@ This document translates the strategy design defined in `strategy.md` into a con
 
 ---
 
+<a id="toc"></a>
+
+## Table of Contents
+
+**Architecture & Context**
+- [§1A — 2026 Service Refactor (Architecture Evolution)](#s1a)
+- [§2 — Existing Codebase Assumptions](#s2)
+  - [2.1 Current Architecture](#s21)
+  - [2.2 Existing Capabilities](#s22)
+  - [2.3 What Exists vs. What Needs Building](#s23)
+- [§3 — Service / Mode Mapping](#s3)
+- [§4 — Language Responsibility Mapping](#s4)
+- [§5 — Canonical Source-of-Truth Architecture](#s5)
+  - [§5.1 — Pre-Phase Defaults](#s51)
+- [§6 — Required Modules and Interfaces](#s6)
+
+**§7 — Implementation Phases**
+
+*V1 — Deterministic Baseline* ✅
+| Phase | Title | Status |
+|---|---|---|
+| [1](#phase1) | Schema, Contracts, and Configuration | ✅ DONE |
+| [2](#phase2) | Deterministic Ripple Baseline | ✅ DONE |
+| [3](#phase3) | Liquidity Map and VP/CVD Integration | ✅ DONE |
+| [4](#phase4) | Risk Budget Plumbing | ✅ DONE |
+| [5](#phase5) | Wave Regime Baseline | ✅ DONE |
+| [6](#phase6) | Optimization, Replay Consistency, and UI Exposure | ✅ DONE |
+| [7](#phase7) | Probabilistic / HMM / Latent-State Extensions | ✅ DONE |
+| [7V](#phase7v) | HMM vs. Rule-Based Backtest A/B Validation | ✅ DONE |
+| [8](#phase8) | Cross-Venue Confirmation | ✅ DONE |
+| [9](#phase9) | Wave 5m Calibration & Backtest Hardening | ✅ DONE |
+| [10](#phase10) | Live Path Hardening | ✅ DONE |
+| [10B](#phase10b) | CLI `run_live` Migration & C++ `BinanceWsFeed` Removal | ✅ DONE |
+| [10C](#phase10c) | `main.py:execute` Migration to the Shared WS Runner | ✅ DONE |
+| [12](#phase12) | Execution Layer Hardening | ✅ DONE |
+| [13](#phase13) | Deterministic Replay Harness | ✅ DONE |
+| [13X](#phase13x) | Test-Integrity Cleanup & Backtest Double-Fire Fix | ✅ DONE |
+| [13Y](#phase13y) | Orderflow `RippleConfig` Binding Drift Fix | ✅ DONE |
+| [13Z](#phase13z) | `DepthUpdate.bids`/`.asks` Opaque-Vector Decision | ⏸ DEFERRED |
+| [13W](#phase13w) | Wave BREAKDOWN Regime Test Cleanup | ✅ DONE |
+
+*[§7.1 — V1 Closure Roadmap (Phase 14 series)](#s71)* ✅
+| Phase | Title | Status |
+|---|---|---|
+| [14A](#phase14a) | Live Execution Driven by Ripple Decisions | ✅ 2026-05-09 |
+| [14B](#phase14b) | Tide / Wave / Vol Snapshot Push to Live Engine | ✅ 2026-05-11 |
+| [14C](#phase14c) | Live Broker Risk-Rejection Acceptance Test | ✅ 2026-05-12 |
+| [14D](#phase14d) | Cross-Venue Boost Factors as `WaveConfig` Parameters | ✅ 2026-05-11 |
+| [14E](#phase14e) | Optimiser `num_trades` as a Pareto Objective | ✅ 2026-05-11 |
+| [14F](#phase14f) | V1 Closure Tail | ✅ 2026-05-12 |
+
+*[§7.2 — V2 Closure Roadmap (Phase 15–21)](#s72)*
+| Phase | Title | Status |
+|---|---|---|
+| [21](#phase21) | Re-wire Live Execution into the Distributed Strategy Service | ✅ 2026-06-01 |
+| [15](#phase15) | LIMIT / OCO Order Type Support | ✅ 2026-05-12 |
+| [16P](#phase16p) | EC2 / S3 Tick Data Collection Infrastructure | 🔄 IN PROGRESS |
+| [16Q](#phase16q) | Cross-Asset OHLCV Historical Data Collection | 🔄 IN PROGRESS |
+| [16R](#phase16r) | Feed Health Monitor & Data Quality Report | ✅ 2026-05-14 |
+| [16](#phase16) | HMM A/B Campaign at Scale | ⏳ PENDING |
+| [17](#phase17) | HMM-based Wave Regime Classifier | ❌ NOT STARTED |
+| [18](#phase18) | Cross-Venue Features in C++ Ripple | ❌ NOT STARTED |
+| [19](#phase19) | Hierarchical ES / Euler Decomposition | ❌ NOT STARTED |
+| [20](#phase20) | Liquidity-Map Logistic Hold/Break Calibration | ❌ NOT STARTED |
+
+*[§7.4 — V3 Forward Visibility](#s74)*
+
+**Summary & Reference**
+- [§8 — Test Plan Summary](#s8)
+- [§9 — Performance Concerns Per Phase](#s9)
+- [§10 — Rollout / Acceptance Criteria Per Phase](#s10)
+- [§11 — Documentation Synchronization Rules](#s11)
+- [§12 — Milestones](#s12)
+- [§13 — Risks and Implementation Pitfalls](#s13)
+- [§14 — Module Ownership Suggestion](#s14)
+- [§15 — Benchmark and Profiling Strategy](#s15)
+- [§17 — Agent Instructions](#s17)
+
+---
+
+<a id="s1a"></a>
+
 ## §1A — 2026 Service Refactor (Architecture Evolution)
 
 > **Effective 2026-06-01.** The original monolith (`root main.py` CLI + Qt desktop UI `ui/`) was removed and replaced by a distributed Docker Compose stack. All references to `§1A` in this document point here.
@@ -54,9 +136,15 @@ This document translates the strategy design defined in `strategy.md` into a con
 
 The 2026-06 service refactor orphaned all Phase 14 V1-compliant execution machinery — the engine code and tests existed but nothing called them on the deployed path. **Phase 21 (2026-06-01)** re-closed the V1 contract on the deployed `strategy` service via `strategy/engine/live_engine.py` + `strategy/engine/execution_bridge.py`. See §7.2 Phase 21 for full details.
 
+[↑ Contents](#toc)
+
 ---
 
+<a id="s2"></a>
+
 ## 2. Assumptions About the Existing Codebase
+
+<a id="s21"></a>
 
 ### 2.1 Current Architecture
 
@@ -124,6 +212,8 @@ flowchart TB
     OFE --> RF
 ```
 
+<a id="s22"></a>
+
 ### 2.2 Existing Capabilities
 
 > **Integration legend.** **Implemented + Wired** = unit-tested AND
@@ -175,6 +265,8 @@ flowchart TB
 | HMM A/B validation harness | Implemented + Wired (Phase 7V) | ✅ | `tools/hmm_abtest.py`, `hmm/abtest.py` |
 | Execution diagnostics REST API | Implemented (Phase 21) | ✅ | `GET /api/execution`, `POST /api/execution/arm` |
 
+<a id="s23"></a>
+
 ### 2.3 What Exists vs. What Needs Building
 
 > **Read this column carefully.** "Needs Work" entries marked **`Phase 14*`**
@@ -212,7 +304,11 @@ flowchart TB
 | Cross-venue confirmation | **Implemented (engine-only)** | A/B validation campaign (V2 polish) | 8 (done) |
 | Deterministic replay capture | **Implemented + Wired** | In-process WS path (`execution/live_runner.py` with `recorder=`). Phase 13C (replay UI) deferred. | 13 (done) / 13B (done) |
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s3"></a>
 
 ## 3. Service / Mode Mapping
 
@@ -249,7 +345,11 @@ flowchart TB
 | Python unit tests | `python -m unittest discover -s tests -v` |
 | Tide / Wave research CLIs | `python -m tide.tide_cli` / `python -m wave.wave_cli` |
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s4"></a>
 
 ## 4. Language Responsibility Mapping
 
@@ -303,7 +403,11 @@ flowchart TB
 - **Python for research and orchestration:** model fitting, parameter optimization, analytics, UI, and any workflow that does not need per-event latency.
 - **pybind11 bridge:** all C++ state machines and engines expose read-only snapshots and configuration setters to Python.
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s5"></a>
 
 ## 5. Canonical Source-of-Truth Architecture
 
@@ -334,7 +438,11 @@ flowchart TB
 
 **Rule:** If code behavior contradicts `strategy.md`, the code is wrong. If `implementation_plan.md` contradicts `strategy.md`, the plan must be updated. Tests are executable specifications and must agree with `strategy.md`.
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s51"></a>
 
 ## 5.1 Pre-Phase Defaults
 
@@ -360,7 +468,11 @@ Before each layer is implemented, downstream consumers use hardcoded defaults. T
 
 **Implementation requirement:** Define `DefaultTideSnapshot` and `DefaultWaveSnapshot` as `static constexpr` structs in C++ (e.g., in `Schemas.h`) and as constants in Python (`schemas.py`). These must be used wherever Tide/Wave snapshots are consumed before those layers exist.
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s6"></a>
 
 ## 6. Required Modules and Interfaces
 
@@ -553,9 +665,15 @@ flowchart LR
     end
 ```
 
+[↑ Contents](#toc)
+
 ---
 
+<a id="s7"></a>
+
 ## 7. Incremental Implementation Phases
+
+<a id="phase1"></a>
 
 ### Phase 1 — Schema, Contracts, and Configuration [COMPLETED]
 
@@ -600,6 +718,8 @@ flowchart LR
 - Tests: 396 C++ checks (`test_schemas`), 56 Python tests (`test_schemas.py`).
 
 ---
+
+<a id="phase2"></a>
 
 ### Phase 2 — Deterministic Ripple Baseline [COMPLETED]
 
@@ -723,6 +843,8 @@ Tests: 126 C++ checks (`test_trade_lifecycle`) covering:
 
 ---
 
+<a id="phase3"></a>
+
 ### Phase 3 — Liquidity Map and VP/CVD Integration [COMPLETED]
 
 **Objective:** Build the real-time liquidity map and integrate Volume Profile and CVD signals into Ripple decision-making.
@@ -829,6 +951,8 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 
 ---
 
+<a id="phase4"></a>
+
 ### Phase 4 — Risk Budget Plumbing [COMPLETED]
 
 **Objective:** Implement the risk engine, ES throttle, and Tide sizing interface.
@@ -918,6 +1042,8 @@ Tests: 190 C++ checks (`test_risk_engine`) + 19 Python tests (`test_tide_engine.
 
 ---
 
+<a id="phase5"></a>
+
 ### Phase 5 — Wave Regime Baseline [COMPLETED]
 
 **Objective:** Implement a deterministic Wave regime classifier using L1 data.
@@ -990,6 +1116,8 @@ Tests: **38** C++ checks (`test_wave_integration`) + **56** Python tests (`test_
 - pybind11 binding correctness (all Wave types, RippleEngine wave accessors)
 
 ---
+
+<a id="phase6"></a>
 
 ### Phase 6 — Optimization, Replay Consistency, and UI Exposure [COMPLETED]
 
@@ -1096,6 +1224,8 @@ V1 parameter ranges:
 
 ---
 
+<a id="phase7"></a>
+
 ### Phase 7 — Probabilistic / HMM / Latent-State Extensions `[COMPLETED]`
 
 **Objective:** Add HMM-based state inference for Ripple and potentially Wave.
@@ -1168,6 +1298,8 @@ Known limitations:
 
 
 ---
+<a id="phase7v"></a>
+
 ### Phase 7V — HMM vs. Rule-Based Backtest A/B Validation `[COMPLETED]`
 
 **Objective.** Close the explicit validation gap from Phase 7 — *"Actual
@@ -1267,6 +1399,8 @@ First real run against the in-tree tick store
    we need; not a full posterior decoding.
 
 
+<a id="phase8"></a>
+
 ### Phase 8 — Cross-Venue Confirmation `[COMPLETED]`
 
 **Objective:** Use L1 data from additional venues (Oanda, others) for cross-venue confirmation signals in Wave.
@@ -1330,6 +1464,8 @@ Known limitations:
 - **Cross-venue backtest comparison** ⬜ **OPEN TASK (Phase 18 pre-req)**: Actual backtest comparison (cross-venue on vs. off) requires stored Oanda L1 data alongside Binance tick data. Infrastructure is in place (`crossvenue/oanda_feed.py`, CSV storage). **Task**: run `python crossvenue/oanda_feed.py --symbol BTCUSDT --start 2026-06-01 --days 30` to seed the data, then replay with `--cross-venue` flag and compare Wave regime hit-rate. Blocked on 30 days of data (earliest: 2026-07-01). ~0.5 day task once data is available.
 
 ---
+
+<a id="phase9"></a>
 
 ### Phase 9 — Wave 5m Calibration & Backtest Hardening `[COMPLETED]`
 
@@ -1432,6 +1568,8 @@ Known limitations / out-of-scope:
 
 ---
 
+<a id="phase10"></a>
+
 ### Phase 10 — Live Path Hardening `[COMPLETED]`
 
 **Objective:** Add regression coverage for the existing Python-based UI live
@@ -1525,6 +1663,8 @@ Known limitations / out-of-scope:
   in the Python codebase. *(Closed by Phase 10B below.)*
 
 ---
+
+<a id="phase10b"></a>
 
 ### Phase 10B — CLI `run_live` Migration & C++ `BinanceWsFeed` Removal `[COMPLETED]`
 
@@ -1627,6 +1767,8 @@ Known limitations / out-of-scope:
   test coverage in `tests/test_run_live.py`.
 
 ---
+
+<a id="phase10c"></a>
 
 ### Phase 10C — `main.py:execute` Migration to the Shared WS Runner `[COMPLETED]`
 
@@ -1742,6 +1884,8 @@ Known limitations / out-of-scope:
   if a future feature needs them.
 
 ---
+<a id="phase12"></a>
+
 ### Phase 12 — Execution Layer Hardening `[COMPLETED]`
 
 **Objective:** Mirror the Phase 10 inbound-data-feed hardening on the
@@ -1887,6 +2031,8 @@ Known limitations / out-of-scope:
 
 ---
 
+<a id="phase13"></a>
+
 ### Phase 13 — Deterministic Replay Harness `[COMPLETED]`
 
 **Objective:** Provide tooling and tests that prove a captured live
@@ -2008,6 +2154,8 @@ Known limitations / out-of-scope:
 
 ---
 
+<a id="phase13x"></a>
+
 ### Phase 13X — Test-Integrity Cleanup & Backtest Double-Fire Fix `[COMPLETED]`
 
 **Objective:** Address two latent issues uncovered while building
@@ -2118,6 +2266,8 @@ Known limitations / out-of-scope:
 
 ---
 
+<a id="phase13y"></a>
+
 ### Phase 13Y — Orderflow `RippleConfig` Binding Drift Fix `[COMPLETED]`
 
 **Objective:** Fix a latent crash where running `python main.py
@@ -2210,6 +2360,8 @@ Known limitations / out-of-scope:
 
 ---
 
+<a id="phase13z"></a>
+
 ### Phase 13Z — `DepthUpdate.bids`/`.asks` Opaque-Vector Decision `[DOCUMENTED — DELIBERATELY DEFERRED]`
 
 **Objective:** Resolve the long-standing Phase 13X "known limitation"
@@ -2278,6 +2430,8 @@ Validation results:
 - `tests/test_replay_harness.py`: 34/34 OK (unchanged).
 
 ---
+
+<a id="phase13w"></a>
 
 ### Phase 13W — Wave BREAKDOWN Regime Test Cleanup `[COMPLETED]`
 
@@ -2348,7 +2502,11 @@ Validation results:
 - Aggregate non-Qt regression sweep: 546/546 OK (no regression in
   any other suite).
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s71"></a>
 
 ## 7.1 V1 Closure Roadmap (Phase 14 series — ✅ COMPLETE 2026-05-11; re-wired by Phase 21 2026-06-01)
 
@@ -2434,6 +2592,8 @@ the per-sub-phase completion notes below.
 
 ---
 
+<a id="phase14a"></a>
+
 ### Phase 14A — Live Execution Driven by Ripple Decisions `[COMPLETED 2026-05-09]`
 
 **Objective.** Make the live execute path consume `RippleDecision`
@@ -2494,6 +2654,8 @@ since Phase 3 but the live path never migrated.
 
 ---
 
+<a id="phase14b"></a>
+
 ### Phase 14B — Tide / Wave / Vol Snapshot Push to Live Engine `[COMPLETED 2026-05-11]`
 
 **Objective.** Make the C++ Ripple engine actually receive Tide budgets
@@ -2531,6 +2693,8 @@ later phase." Phase 14B is that phase.
 - Phase 14A gates (`set_signal_callback...on_signal`, `time.time()` in `execution_manager.py`) still green: gate 1 empty, gate 2 limited to deprecated `on_signal` / `_execute_signal` path (subsequently deleted in Phase 14F).
 
 ---
+
+<a id="phase14c"></a>
 
 ### Phase 14C — Live Broker Risk-Rejection Acceptance Test `[COMPLETED 2026-05-12]`
 
@@ -2581,6 +2745,8 @@ a trade internally.
 
 ---
 
+<a id="phase14d"></a>
+
 ### Phase 14D — Cross-Venue Boost Factors as `WaveConfig` Parameters `[COMPLETED 2026-05-11]`
 
 **Objective.** Lift the Phase 8 known limitation
@@ -2603,6 +2769,8 @@ correlation boost) into `WaveConfig` parameters per the
 3. ✅ Defaults reproduce pre-14D behaviour exactly (the two new tests use the *default* engine as a control and observe the original behaviour unchanged).
 
 ---
+
+<a id="phase14e"></a>
 
 ### Phase 14E — Optimiser `num_trades` as a Pareto Objective `[COMPLETED 2026-05-11]`
 
@@ -2628,6 +2796,8 @@ lets the optimiser distinguish "20 trades earning 1% PnL" from
 3. ✅ 4 new optimiser tests pass; existing optimiser regression tests (none previously existed in this directory) remain green. Broader regression sweep (559 tests across 18 non-Qt suites — see §8) is clean.
 
 ---
+
+<a id="phase14f"></a>
 
 ### Phase 14F — V1 Closure Tail `[COMPLETED 2026-05-12]`
 
@@ -2662,7 +2832,11 @@ Phase 14F closes all five without re-opening V2/V3 scope.
 6. ✅ **14F.6:** `rg "14D.*14E.*remain|Tide/Wave not yet implemented|Partially wired" implementation_plan.md UI_STRATEGY_INTEGRATION_PLAN.md` returns zero hits.
 7. ✅ **Broad regression:** 675 unittest tests across all non-Qt + offscreen-Qt suites (`QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests`) plus 339 custom-runner checks (`test_strategy_dashboard.py`, `test_strategy_ui.py`, `test_strategy_store.py`) — all green.
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s72"></a>
 
 ## 7.2 V2 Closure Roadmap (Phase 15 series)
 
@@ -2693,18 +2867,20 @@ evaluated before Phase 17 work begins.
 
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
-| **21** | ✅ Re-wire Live Execution into the Distributed Strategy Service | `DONE — 2026-06-01` (see §1A + §7.2) | §22.2 #4/#8/#9/#12 | Phase 14 (re-used) |
-| **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
-| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting cleanly since 2026-06-01 (migrated to t3.medium, parallel subprocess architecture, log rotation applied); unblocks Phase 16 on **2026-07-01** (30 days)` | — | None (infrastructure prerequisite) |
-| **16Q** | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; Binance backfill complete; Oanda backfill in progress (127 instruments, 2020→now)` | — | Phase 16P infrastructure |
-| **16R** | Feed Health Monitor & Data Quality Report | `DONE` | — | Phase 16P (collecting) |
-| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked **2026-07-01** when 30 days of clean data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
-| **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
-| **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
-| **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
-| **20** | Liquidity-Map Logistic Hold/Break Calibration | `NOT STARTED` | §10.3, §23 | Phase 3 (DONE) + labelled data |
+| [**21**](#phase21) | ✅ Re-wire Live Execution into the Distributed Strategy Service | `DONE — 2026-06-01` (see [§1A](#s1a) + [§7.2](#s72)) | §22.2 #4/#8/#9/#12 | [Phase 14](#s71) (re-used) |
+| [**15**](#phase15) | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | [Phase 14A](#phase14a) (DONE) |
+| [**16P**](#phase16p) | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting cleanly since 2026-06-01 (migrated to t3.medium, parallel subprocess architecture, log rotation applied); unblocks Phase 16 on **2026-07-01** (30 days)` | — | None (infrastructure prerequisite) |
+| [**16Q**](#phase16q) | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; Binance backfill complete; Oanda backfill in progress (127 instruments, 2020→now)` | — | [Phase 16P](#phase16p) infrastructure |
+| [**16R**](#phase16r) | Feed Health Monitor & Data Quality Report | `DONE` | — | [Phase 16P](#phase16p) (collecting) |
+| [**16**](#phase16) | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked **2026-07-01** when 30 days of clean data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
+| [**17**](#phase17) | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | [Phase 16](#phase16) `CampaignVerdict.promote is True` |
+| [**18**](#phase18) | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | [Phase 8](#phase8) (DONE) |
+| [**19**](#phase19) | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | [Phase 4](#phase4) (DONE) |
+| [**20**](#phase20) | Liquidity-Map Logistic Hold/Break Calibration | `NOT STARTED` | §10.3, §23 | [Phase 3](#phase3) (DONE) + labelled data |
 
 ---
+
+<a id="path-to-completion"></a>
 
 ### 🧭 Path to Completion — master sequence (2026-06-01)
 
@@ -2714,33 +2890,37 @@ number. Each row links to its detailed spec above.
 
 | # | Work item | Why now / blocks | Gate to start | Effort | Status |
 |---|---|---|---|---|---|
-| **1** | ✅ **Phase 21 — Re-wire live execution into the `strategy` service** | **DONE 2026-06-01.** Service is Ripple-driven + risk-gated again (OBSERVE by default). Remaining: TESTNET soak before mainnet arming (acceptance #6). | — | done | ✅ DONE 2026-06-01 |
+| **1** | ✅ **[Phase 21](#phase21) — Re-wire live execution into the `strategy` service** | **DONE 2026-06-01.** Service is Ripple-driven + risk-gated again (OBSERVE by default). Remaining: TESTNET soak before mainnet arming (acceptance #6). | — | done | ✅ DONE 2026-06-01 |
 | **2** | ✅ **Data-collection hardening** (backlog below) | All critical bugs fixed; only OOM deferred (non-critical). | Parallel | done | ✅ DONE 2026-06-01 |
-| **3** | ☐ **CI / test gating** — run Python (`unittest discover`) **and** C++ (`./test_*`) on every push; add `build.sh` post-build test hook | ~1,104 C++ checks exist but are never run automatically; doc-drift like §1A went unnoticed for weeks without it. | Parallel | 1 day | ⬜ NOT STARTED |
+| **3** | ☐ **CI / test gating** — run Python (`unittest discover`) **and** C++ (`./test_*`) on every push; add `build.sh` post-build test hook ([§8](#s8) test plan) | ~1,104 C++ checks exist but are never run automatically; doc-drift like §1A went unnoticed for weeks without it. | Parallel | 1 day | ⬜ NOT STARTED |
 | **4** | ✅ **Doc reconciliation** — §2.2/§2.3/§7.1/§10/§12 + `README.md` + `TESTING_GUIDE.md` rewritten to distributed architecture; `ui/`/root `main.py` references removed | **DONE 2026-06-01.** All “wired live” claims now describe the deployed service. `TESTING_GUIDE.md` phase tables updated through Phase 21. | — | done | ✅ DONE 2026-06-01 |
-| **5** | **Phase 16P/16Q → 30 days clean data** | Hard prerequisite for the Phase 16 HMM A/B verdict. | Calendar: **2026-07-01** | passive | 🔷 IN PROGRESS |
-| **6** | **Phase 16 — record real `CampaignVerdict`** | The hard evidence gate for Phase 17. | #5 complete (2026-07-01) | 0.5 day | 🟡 HARNESS READY |
-| **7** | **Phase 17 — HMM Wave classifier** | Only if Phase 16 `promote == True`. | #6 verdict | 3–5 days | ⬜ NOT STARTED |
-| **8** | **Phase 18 — Cross-venue features in C++ Ripple** | Independent of HMM; can run parallel with 17. | Phase 8 DONE | 3–4 days | ⬜ NOT STARTED |
-| **9** | **Phase 19 — Hierarchical ES / Euler decomposition** | Independent; sharpens risk budgeting. | Phase 4 DONE | 3–4 days | ⬜ NOT STARTED |
-| **10** | **Phase 20 — Liquidity-map logistic calibration** | Needs labelled backtest data; lowest risk-adjusted priority. | Labelled data | 3–4 days | ⬜ NOT STARTED |
+| **5** | **[Phase 16P](#phase16p)/[16Q](#phase16q) → 30 days clean data** | Hard prerequisite for the Phase 16 HMM A/B verdict. | Calendar: **2026-07-01** | passive | 🔷 IN PROGRESS |
+| **6** | **[Phase 16](#phase16) — record real `CampaignVerdict`** | The hard evidence gate for Phase 17. | #5 complete (2026-07-01) | 0.5 day | 🟡 HARNESS READY |
+| **7** | **[Phase 17](#phase17) — HMM Wave classifier** | Only if Phase 16 `promote == True`. | #6 verdict | 3–5 days | ⬜ NOT STARTED |
+| **8** | **[Phase 18](#phase18) — Cross-venue features in C++ Ripple** | Independent of HMM; can run parallel with 17. | Phase 8 DONE | 3–4 days | ⬜ NOT STARTED |
+| **9** | **[Phase 19](#phase19) — Hierarchical ES / Euler decomposition** | Independent; sharpens risk budgeting. | Phase 4 DONE | 3–4 days | ⬜ NOT STARTED |
+| **10** | **[Phase 20](#phase20) — Liquidity-map logistic calibration** | Needs labelled backtest data; lowest risk-adjusted priority. | Labelled data | 3–4 days | ⬜ NOT STARTED |
 | **11** | **Bookmap V1 cut** — close `event_builder.py` qty + extended-metric TODOs (§6.1–6.3 of `docs/BOOKMAP_INTEGRATION.md`) | Visualisation polish; not trading-critical. | Anytime | 1 day | ⬜ NOT STARTED |
 
-**V2 GA gate:** Phases 15 ✅ + 16P/16Q/16R ✅ + 21 ✅ + Phase 16 `CampaignVerdict` recorded + Phases 17–20 complete.
+**V2 GA gate:** [Phase 15](#phase15) ✅ + [16P](#phase16p)/[16Q](#phase16q)/[16R](#phase16r) ✅ + [Phase 21](#phase21) ✅ + [Phase 16](#phase16) `CampaignVerdict` recorded + [Phase 17](#phase17)–[20](#phase20) complete.
+
+<a id="outstanding-tasks"></a>
 
 ### 🚨 Outstanding Tasks (2026-06-01)
 
 | Priority | Task | Effort |
 |---|---|---|
-| 🔴 High | **TESTNET soak** — `docker compose up ARM_EXECUTION=true BINANCE_TESTNET=true`; confirm Ripple-driven risk-gated orders fire correctly before mainnet arming | 0.5 day |
+| 🔴 High | **TESTNET soak** — `docker compose up ARM_EXECUTION=true BINANCE_TESTNET=true`; confirm Ripple-driven risk-gated orders fire correctly before mainnet arming ([Phase 21](#phase21) acceptance #6) | 0.5 day |
 | 🔴 High | **CI / test gating** — wire Python `unittest discover` + C++ `./test_*` into CI | 1 day |
-| 🟡 Blocked until 2026-07-01 | **Phase 16 — record real `CampaignVerdict`** — `python tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT --windows 30d,60d --seed 42`; paste verdict block into `§7.2` | 0.5 day |
-| 🟡 Gated on Phase 16 | **Phase 17 — HMM Wave classifier** | 3–5 days |
-| 🟠 Independent | **Phase 18 — Cross-venue in C++ Ripple** (`CrossVenueSnapshot`, staleness rule, evidence boost) | 3–4 days |
-| 🟠 Independent | **Phase 19 — Hierarchical ES / Euler decomposition** | 3–4 days |
-| 🟠 Independent | **Phase 20 — Logistic liquidity calibration** | 3–4 days |
+| 🟡 Blocked until 2026-07-01 | **[Phase 16](#phase16) — record real `CampaignVerdict`** — `python tools/hmm_abtest.py --symbols BTCUSDT,ETHUSDT --windows 30d,60d --seed 42`; paste verdict block into `§7.2` | 0.5 day |
+| 🟡 Gated on [Phase 16](#phase16) | **[Phase 17](#phase17) — HMM Wave classifier** | 3–5 days |
+| 🟠 Independent | **[Phase 18](#phase18) — Cross-venue in C++ Ripple** (`CrossVenueSnapshot`, staleness rule, evidence boost) | 3–4 days |
+| 🟠 Independent | **[Phase 19](#phase19) — Hierarchical ES / Euler decomposition** | 3–4 days |
+| 🟠 Independent | **[Phase 20](#phase20) — Logistic liquidity calibration** | 3–4 days |
 | 🟢 Low | **Bookmap V1 cut** — `event_builder.py` qty + extended-metric TODOs | 1 day |
 | 🟢 Low | **OOM deferred** — `ohlcv_store.py` full-file read on append (non-critical at current volume) | Small |
+
+<a id="open-tasks"></a>
 
 ### 📋 Open Tasks Register (2026-06-01)
 
@@ -2749,18 +2929,18 @@ Cross-referenced to their detail sections.
 
 | # | Task | Phase / Scope | Effort | Blocked until |
 |---|---|---|---|---|
-| T-1 | **Wave params wired to backtest** — integrate `WaveEngine` into `backtester.py` so `eta_mr_threshold` / `eta_bo_threshold` / `eta_neutral_threshold` / `reduced_size_fraction` participate in NSGA-II optimisation | V2 (post Phase 16) | 1–2 days | Phase 16P data (2026-07-01) |
+| [T-1](#open-tasks) | **Wave params wired to backtest** — integrate `WaveEngine` into `backtester.py` so `eta_mr_threshold` / `eta_bo_threshold` / `eta_neutral_threshold` / `reduced_size_fraction` participate in NSGA-II optimisation | V2 (post Phase 16) | 1–2 days | Phase 16P data (2026-07-01) |
 | T-2 | **Optimization convergence test** — run a real NSGA-II loop on collected data; assert Pareto front ≥ 3 and Sharpe improvement > 0 vs. defaults | Phase 6 polish | 0.5 day | Phase 16P data (2026-07-01) |
 | T-3 | **Paper-fill PnL fees** — add `fee_bps` to `PaperEngine`; add fee-inclusive optimisation mode | V2 polish | 0.5 day | Anytime |
-| T-4 | **Dynamic Tide vol regime** — ATR/realised-vol-percentile → `VolRegime` mapping; macro LSI from on-chain/funding-rate data | Phase 19 | 3–4 days | Phase 16 verdict |
-| T-5 | **Wave HMM** — HMM-based regime classification in `WaveEngine` | Phase 17 | 3–5 days | Phase 16 verdict (2026-07-01) |
-| T-6 | **Cross-venue backtest comparison** — collect 30-day Oanda L1 data; replay with `--cross-venue` and compare Wave hit-rate | Phase 18 pre-req | 0.5 day | 2026-07-01 |
-| T-7 | **Oanda live path** — wire `oanda_feed.py` into `data` service alongside Binance tick collection | Phase 18 | 1 day | Anytime |
-| T-8 | **Multi-sequence Baum-Welch** — multi-sequence EM for HMM trainer; needs ≥ 3 independent campaign windows | V2 scope | 1 day | 2026-08-01 |
-| T-9 | **Phase 18** — Cross-venue `CrossVenueSnapshot` + staleness rule inside C++ Ripple | Phase 18 | 3–4 days | Anytime |
-| T-10 | **Phase 19** — Hierarchical ES / Euler decomposition in `RiskEngine` | Phase 19 | 3–4 days | Anytime |
-| T-11 | **Phase 20** — Logistic liquidity calibration in `LiquidityMapEngine` | Phase 20 | 3–4 days | Labelled data |
-| T-12 | **TESTNET soak** — `ARM_EXECUTION=true BINANCE_TESTNET=true`; confirm order flow before mainnet arming | Pre-V2 GA | 0.5 day | Anytime (high priority) |
+| T-4 | **Dynamic Tide vol regime** — ATR/realised-vol-percentile → `VolRegime` mapping; macro LSI from on-chain/funding-rate data | [Phase 19](#phase19) | 3–4 days | Phase 16 verdict |
+| T-5 | **Wave HMM** — HMM-based regime classification in `WaveEngine` | [Phase 17](#phase17) | 3–5 days | Phase 16 verdict (2026-07-01) |
+| T-6 | **Cross-venue backtest comparison** — collect 30-day Oanda L1 data; replay with `--cross-venue` and compare Wave hit-rate | [Phase 18](#phase18) pre-req | 0.5 day | 2026-07-01 |
+| T-7 | **Oanda live path** — wire `oanda_feed.py` into `data` service alongside Binance tick collection | [Phase 18](#phase18) | 1 day | Anytime |
+| T-8 | **Multi-sequence Baum-Welch** — multi-sequence EM for HMM trainer; needs ≥ 3 independent campaign windows | V2 scope ([Phase 16](#phase16)) | 1 day | 2026-08-01 |
+| T-9 | **[Phase 18](#phase18)** — Cross-venue `CrossVenueSnapshot` + staleness rule inside C++ Ripple | Phase 18 | 3–4 days | Anytime |
+| T-10 | **[Phase 19](#phase19)** — Hierarchical ES / Euler decomposition in `RiskEngine` | Phase 19 | 3–4 days | Anytime |
+| T-11 | **[Phase 20](#phase20)** — Logistic liquidity calibration in `LiquidityMapEngine` | Phase 20 | 3–4 days | Labelled data |
+| T-12 | **TESTNET soak** — `ARM_EXECUTION=true BINANCE_TESTNET=true`; confirm order flow before mainnet arming | Pre-V2 GA ([Phase 21](#phase21)) | 0.5 day | Anytime (high priority) |
 | T-13 | **CI / test gating** — wire Python `unittest discover` + C++ `./test_*` into CI on every push | Pre-V2 GA | 1 day | Anytime (high priority) |
 | T-14 | **Bookmap V1 cut** — close `event_builder.py` qty + extended-metric TODOs | V1 polish | 1 day | Anytime |
 | T-15 | **Multi-factor PCA** — cross-asset eigenvector dispersion model for `WaveEngine` | V3 scope | 5+ days | Post V2 GA |
@@ -2807,6 +2987,8 @@ satisfied. This checklist is derived from the V1 lesson that
 | 10 | **CampaignVerdict recorded (Phase 16 only)** | The `CampaignVerdict(promote, win_ratio, median_sharpe_delta)` result is written back to this section of `implementation_plan.md`. |
 
 ---
+
+<a id="phase21"></a>
 
 ### Phase 21 — Re-wire Live Execution into the Distributed Strategy Service `[DONE — 2026-06-01]`
 
@@ -2902,6 +3084,8 @@ fills depend on trade ticks (wired via `PaperEngine.on_trade`).
 
 ---
 
+<a id="phase15"></a>
+
 ### Phase 15 — LIMIT / OCO Order Type Support `[DONE — 2026-05-12]`
 
 **Objective.** `strategy.md` §13.3 specifies that bounce entries use
@@ -2990,6 +3174,8 @@ test case to `test_replay_determinism.py` verifying this.
 
 ---
 
+<a id="phase16p"></a>
+
 ### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — COLLECTING since 2026-06-01]`
 
 **Clean collection start: 2026-06-01 (AEST).** Earlier collection (from 2026-05-13) was
@@ -3029,17 +3215,17 @@ aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive 
 | `.devcontainer/devcontainer.json` | Cursor/VS Code dev container; `linux/amd64`; `offscreen` Qt default; X11 mount |
 | `scripts/setup_ec2.sh` | Full Ubuntu 24.04 bootstrap: apt, venv, C++ build, systemd, cron |
 | `scripts/collector.service` | systemd unit: `Restart=on-failure`, `TimeoutStopSec=30`, `EnvironmentFile=/app/.env` |
-| `scripts/collector@.service` | Template unit for multi-symbol instances |
+| `scripts/collector@.service` | Template unit for multi-symbol instances. ⚠️ **Superseded** — multi-symbol is handled by `collector-eth` service in Docker Compose (`docker compose --profile multi up -d`). |
 | `scripts/s3_sync.sh` | Hourly cron sync; handles default + per-symbol paths |
 | `scripts/download_ticks.sh` | Developer download helper; supports multiple symbols |
 | `scripts/add_symbol.sh` | Adds a second collector instance (e.g. ETHUSDT) |
-| `docs/DEPLOYMENT.md` | Step-by-step guide: IAM, EC2, systemd, S3, dev container, GUI passthrough |
+| `docs/DEPLOYMENT.md` | Step-by-step runbook (updated continuously). Covers: AWS CLI, S3 bucket + IAM role, EC2 launch (`t3.medium`, Ubuntu 24.04), `setup_ec2.sh`, Docker Compose stack (tick collectors + `ohlcv-collector`), S3 cron sync, data download (Parquet by date range or full HDF5), emergency recovery (disk-full, Docker log rotation), HMM campaign procedure, troubleshooting. |
 | `tests/test_collect_ticks.py` | 22 new tests; all pass |
 | `data_service.TickDataCollector` | `store_path` kwarg added (backward compat) |
 
 **Regression:** 862/862 tests pass (2026-05-13).
 
-**EC2 is live.** `t3.small` (`i-0f92a7647e330d9d6`, `ap-southeast-2`) running Docker Compose with BTCUSDT and ETHUSDT collectors since 2026-05-13. See `docs/DEPLOYMENT.md` for the full runbook.
+**EC2 is live.** `t3.medium` (`i-0f92a7647e330d9d6`, `ap-southeast-2`) running Docker Compose with BTCUSDT and ETHUSDT tick collectors + `ohlcv-collector` (Parquet/S3). Instance **migrated from t3.small to t3.medium on 2026-06-01** after OOM/disk-exhaustion events on the earlier t3.small instance; clean collection restarted 2026-06-01. See `docs/DEPLOYMENT.md` for the full runbook.
 
 **Objective.** The Phase 16 HMM A/B campaign requires ≥ 30 days of continuous tick data (trades + L2 depth) per symbol. Running `main.py` in `data` mode on a developer laptop for 30+ days is not viable. Phase 16P makes the data collection path deployment-ready for a headless Linux EC2 instance with data persisted to AWS S3.
 
@@ -3056,17 +3242,17 @@ aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive 
 | `backtestingCpp/orderflow/build.sh` | **MODIFY** — Add Linux code path: detect `$(uname)`, use `/usr/local` prefix on Linux instead of `/opt/homebrew`. Remove `-DCMAKE_PREFIX_PATH="/opt/homebrew"` on Linux. Add `nproc` fallback already present; ensure `sysctl` is only called on macOS. |
 | `backtestingCpp/orderflow/CMakeLists.txt` | **MODIFY** — Wrap `set(HOMEBREW_PREFIX "/opt/homebrew")` and `list(PREPEND ...)` in `if(APPLE)` guard. On Linux, rely on standard `find_package` search paths (`/usr`, `/usr/local`). |
 | `scripts/setup_ec2.sh` | **NEW** — Full EC2 bootstrap script for Ubuntu 24.04. Steps: `apt-get update`, install `build-essential cmake libhdf5-dev libboost-dev libssl-dev nlohmann-json3-dev python3 python3-venv python3-dev`; clone/pull repo; create `.venv`; `pip install -r requirements-collector.txt`; build C++ engine via `build.sh`; create `data/` and `logs/` dirs; install `systemd` service. |
-| `scripts/collector.service` | **NEW** — systemd unit file. `[Service] Type=simple`, `Restart=on-failure`, `RestartSec=30`, `ExecStart=/app/.venv/bin/python /app/collect_ticks.py --symbol BTCUSDT --s3-bucket ${S3_BUCKET} --log-level INFO`. `EnvironmentFile=/app/.env`. `StandardOutput=journal`, `StandardError=journal`. |
-| `scripts/s3_sync.sh` | **NEW** — Cron-compatible sync script. Runs `aws s3 cp data/binance_ticks.h5 s3://${S3_BUCKET}/ticks/binance_ticks.h5 --only-show-errors`. Checks exit code and logs to `logs/s3_sync.log`. Designed to be called from `/etc/cron.hourly/` or a systemd timer. |
-| `scripts/download_ticks.sh` | **NEW** — Developer-side download helper. `aws s3 cp s3://${S3_BUCKET}/ticks/binance_ticks.h5 data/binance_ticks.h5`. Used before running `tools/hmm_abtest.py` locally. |
-| `scripts/add_symbol.sh` | **NEW** — Helper to start collecting a second symbol (e.g. ETHUSDT) as a second systemd service instance. Instantiates `collector@ETHUSDT.service` from a template unit. |
+| `scripts/collector.service` | **NEW** — systemd unit file (original design). `[Service] Type=simple`, `Restart=on-failure`, `RestartSec=30`. ⚠️ **Superseded on 2026-06-01**: live EC2 deployment uses Docker Compose (`docker-compose@trading` systemd service + `docker compose up -d`) rather than per-collector systemd units. The `.service` files are retained for reference but are not the active deployment mechanism. |
+| `scripts/s3_sync.sh` | **NEW** — Hourly cron sync script (`/etc/cron.hourly/s3_sync`). Syncs HDF5 live buffers and Parquet date-partitioned files for all symbols to `s3://trading-data-centheos/`. Missing `S3_BUCKET` now exits 1 (fixed 2026-06-01). Installed automatically by `setup_ec2.sh`; refresh with `sudo cp scripts/s3_sync.sh /etc/cron.hourly/s3_sync && sudo chmod +x /etc/cron.hourly/s3_sync`. |
+| `scripts/download_ticks.sh` | **NEW** — Developer-side download helper. Usage: `bash scripts/download_ticks.sh BTCUSDT ETHUSDT` — downloads `{SYMBOL}_ticks.h5` for each symbol from `s3://trading-data-centheos/ticks/`. Used before running `tools/hmm_abtest.py` locally. Also see `docs/DEPLOYMENT.md §7` for Parquet-by-date-range download (`load_ticks_parquet()`) which avoids downloading full HDF5 archives. |
+| `scripts/add_symbol.sh` | **NEW** — Helper to start collecting a second symbol (e.g. ETHUSDT). Originally designed to instantiate `collector@ETHUSDT.service`. ⚠️ **Superseded** — ETHUSDT collection is now handled by `collector-eth` in the Docker Compose stack (see `docs/DEPLOYMENT.md §6 "Stop collection temporarily"`). |
 | `docs/DEPLOYMENT.md` | **NEW** — Step-by-step deployment guide: EC2 instance selection, IAM role, EBS sizing, running `setup_ec2.sh`, enabling the service, setting up the hourly S3 sync cron, and downloading data to dev machine. |
 
 **Recommended EC2 configuration.**
 
 | Parameter | Value | Rationale |
 |---|---|---|
-| Instance type | `t3.small` (2 vCPU, 2 GB RAM) | Data collection is I/O-bound, not compute-bound |
+| Instance type | `t3.medium` (2 vCPU, 4 GB RAM) | `t3.small` (2 GB RAM) OOM-killed during parallel BTCUSDT + ETHUSDT collection; migrated to `t3.medium` 2026-06-01 per `docs/DEPLOYMENT.md §Part 2` |
 | OS | Ubuntu 24.04 LTS | Matches Phase 9 deployment target |
 | Root volume | EBS `gp3` 30 GB | HDF5 grows ~200–400 MB/day at 2 symbols × 2 streams |
 | S3 bucket | Standard storage class, versioning enabled | Versioning protects against accidental overwrites |
@@ -3079,8 +3265,8 @@ aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive 
 2. `python collect_ticks.py --symbol BTCUSDT --duration 60 --s3-bucket my-bucket` uploads the HDF5 to S3 on clean exit; `aws s3 ls s3://my-bucket/ticks/` confirms the file.
 3. `SIGTERM` to the collector process triggers graceful shutdown (flush → close → S3 upload if `--s3-bucket` set) within 10 s.
 4. `scripts/setup_ec2.sh` runs end-to-end on a clean Ubuntu 24.04 EC2 instance without manual intervention and leaves a working `collect_ticks.py` invocation.
-5. `systemctl start collector` starts the service; `systemctl status collector` shows `active (running)`; `journalctl -u collector -f` shows trade/depth count log lines every 10 s.
-6. After 1 hour, `scripts/s3_sync.sh` (run from cron) uploads the HDF5; `scripts/download_ticks.sh` on the developer machine retrieves it; `python -c "import h5py; print(list(h5py.File('data/binance_ticks.h5').keys()))"` confirms BTCUSDT group present.
+5. ~~`systemctl start collector`~~ **Updated to Docker Compose (2026-06-01):** `docker compose up -d --remove-orphans` starts `collector` (BTCUSDT) and `collector-eth` (ETHUSDT); `docker compose ps` shows both `Up (healthy)`; `docker compose logs -f collector` shows trade/depth log lines every 10 s (per `docs/DEPLOYMENT.md §Part 4`).
+6. After 1 hour, `scripts/s3_sync.sh` (run from cron) uploads HDF5 for all symbols; `bash scripts/download_ticks.sh BTCUSDT ETHUSDT` on the developer machine retrieves both; S3 shows `ticks/BTCUSDT_ticks.h5` and `ticks/ETHUSDT_ticks.h5` (verified via `aws s3 ls s3://trading-data-centheos/ticks/`). Parquet mirror visible at `s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/trades/` (date-partitioned files) — per `docs/DEPLOYMENT.md §5`.
 7. C++ build (`build.sh`) completes without errors on Ubuntu 24.04 with only `apt`-installed dependencies (no Homebrew).
 8. Existing macOS build (`build.sh`) continues to work unchanged — the Linux path is an additive branch.
 
@@ -3089,23 +3275,31 @@ aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive 
 Once the EC2 collector has been running for ≥ 30 days with ≥ 2 symbols:
 
 ```bash
-# 1. Download latest tick data to dev machine
-bash scripts/download_ticks.sh
+# 1. Verify 30 days of data is in S3
+aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive | wc -l
+# Expect ~30 date-partitioned .parquet files
 
-# 2. Run the real Phase 16 campaign
+# 2. Download HDF5 archives to dev machine
+bash scripts/download_ticks.sh BTCUSDT ETHUSDT
+
+# 3. Run the HMM A/B campaign
 source .venv/bin/activate
 python tools/hmm_abtest.py \
     --symbols BTCUSDT,ETHUSDT \
     --windows 30d,60d \
     --seed 42
+# Results written to reports/hmm_campaign_summary_*.md
 
-# 3. Copy the CampaignVerdict block from reports/hmm_campaign_summary_*.md
-#    and paste it into implementation_plan.md §7.2, replacing the
-#    "to be recorded" block. Then flip Phase 16 status to [DONE — YYYY-MM-DD].
-#    If promote: true, Phase 17 is unblocked.
+# 4. Record the CampaignVerdict in implementation_plan.md §7.2
+#    (replace the "to be recorded" block), then flip Phase 16 status
+#    to [DONE — 2026-07-01]. If promote: true → Phase 17 is unblocked.
 ```
 
+> See also `docs/DEPLOYMENT.md §"What to do next — HMM Implementation Gate"` for the canonical procedure.
+
 ---
+
+<a id="phase16q"></a>
 
 ### Phase 16Q — Cross-Asset OHLCV Historical Data Collection `[IN PROGRESS — DEPLOYED 2026-05-13]`
 
@@ -3189,6 +3383,8 @@ python -c "import pandas as pd; df=pd.read_parquet('data/ohlcv/binance/BTCUSDT/1
 
 ---
 
+<a id="phase16r"></a>
+
 ### Phase 16R — Feed Health Monitor & Data Quality Report `[DONE — 2026-05-14]`
 
 **Objective.** Provide a single command that answers three questions about the
@@ -3254,6 +3450,8 @@ programmatic use. Example:
 6. All new tests pass; full regression 862+ tests pass.
 
 ---
+
+<a id="phase16"></a>
 
 ### Phase 16 — HMM A/B Campaign at Scale `[HARNESS DELIVERED 2026-05-12 — CAMPAIGN RECORDING PENDING]`
 
@@ -3399,6 +3597,8 @@ same campaign on the same data should reproduce the same verdict.
 
 ---
 
+<a id="phase17"></a>
+
 ### Phase 17 — HMM-based Wave Regime Classifier `[NOT STARTED]`
 
 **Dependency gate — hard block.** Phase 16 `CampaignVerdict.promote is True` must be
@@ -3450,6 +3650,8 @@ validation, the system must:
 10. UI/diagnostic exposure: Wave HMM regime label and posterior probabilities exposed as **read-only snapshot fields only** (via `WaveSnapshot`). They must not be a decision path.
 
 ---
+
+<a id="phase18"></a>
 
 ### Phase 18 — Cross-Venue Features in C++ Ripple `[NOT STARTED]`
 
@@ -3508,6 +3710,8 @@ from permanently boosting evidence scores when the Oanda feed lags.
 
 ---
 
+<a id="phase19"></a>
+
 ### Phase 19 — Hierarchical ES / Euler Decomposition `[NOT STARTED]`
 
 **Objective.** Replace the single global ES bucket with the Euler risk
@@ -3556,6 +3760,8 @@ this before publishing `EulerBudgetSnapshot`.
 9. Phase 14C risk-gate regression: identical Phase 14C event replay with `euler_cells=[]` produces identical PnL and exit decisions as V1 baseline.
 
 ---
+
+<a id="phase20"></a>
 
 ### Phase 20 — Liquidity-Map Logistic Hold/Break Calibration `[NOT STARTED]`
 
@@ -3610,7 +3816,11 @@ If `logistic_fail_fast=True` is set, process exits with code 1.
 11. All existing `test_liquidity_map.cpp` (C++) and `test_lmap_logistic.py` (Python) tests pass.
 12. **Wired live?** `grep -r "load_logistic_model\|logistic_enabled" execution/` — note: Phase 20 changes the `LiquidityMapEngine` used inside the C++ hot path; the Python wiring test asserts that `engine.load_logistic_model` is called during strategy initialization when `logistic_enabled=True`.
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s74"></a>
 
 ## 7.4 V3 Forward Visibility
 
@@ -3625,7 +3835,11 @@ forward visibility only.
 | Live model retraining pipeline | §23 | NOT STARTED | Phase 17 + optimisation framework |
 | Multi-symbol portfolio management | §22.3 / §23 | NOT STARTED | All of V2 |
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s8"></a>
 
 ## 8. Test Plan Summary
 
@@ -3661,7 +3875,11 @@ forward visibility only.
 | **16Q** 🔷 IN PROGRESS since 2026-05-13 | `tests/test_collect_ohlcv.py` — CLI args, backfill resume, continuous mode, rate-limit backoff. | `collect_ohlcv.py` + `ohlcv_store.py` + `docker compose --profile ohlcv up` | — | Binance backfill complete; Oanda backfill in progress (~127 instruments) | `docker compose --profile ohlcv logs --tail 10 ohlcv-collector` shows active fetch |
 | **16R** ✅ DONE 2026-05-14 | `tests/test_feed_health.py` — tick summary output, OHLCV gap detection, JSON mode, staleness indicator. | `tools/feed_health.py --report all` prints combined tick + OHLCV health | — | `--report tick` + `--report ohlcv` + `--report all --json` all produce expected output on real data | `tools/feed_health.py` exists; `tests/test_feed_health.py` passes |
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s9"></a>
 
 ## 9. Performance Concerns Per Phase
 
@@ -3675,6 +3893,8 @@ forward visibility only.
 | 7 | HMM forward algorithm per event | Fixed window, bounded K |
 
 ---
+
+<a id="s10"></a>
 
 ## 10. Rollout / Acceptance Criteria Per Phase
 
@@ -3709,7 +3929,11 @@ forward visibility only.
 | **16R** `[DONE 2026-05-14]` | ✅ `tools/feed_health.py --report tick` prints staleness; `--report ohlcv --exchange binance` detects gaps; `--report all --json` produces valid JSON; symbols with gaps flagged; running with `DATA_STORE=s3` reads from S3. All new tests pass. |
 | **V1 GA** | **All Phase 14 acceptance rows green; full regression sweep (Phases 1–13B + 14A–14E + 21) green; `tests/test_live_execution_v1_compliance.py` is the executable form of the V1 §22.2 #12 contract on the `execution/live_runner.py` (in-process WS) path. Phase 21 re-closes the same contract on the deployed `strategy` service; `tests/test_strategy_live_engine.py` is the matching executable specification for the distributed path. Phase 15 ships LIMIT/OCO order routing faithful to `strategy.md` §13.3.** |
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s11"></a>
 
 ## 11. Documentation Synchronization Rules
 
@@ -3719,7 +3943,11 @@ forward visibility only.
 4. **After completing a phase:** update this plan's status table and `AGENT_STRATEGY_RULES.md` if any rules changed.
 5. **Never let code drift from docs silently.** If you change behavior, document it.
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s12"></a>
 
 ## 12. Milestones
 
@@ -3731,6 +3959,8 @@ forward visibility only.
 > (§22.2 #9), and ES risk throttle (§22.2 #8) — all wired end-to-end,
 > not just unit-test-complete. HMM is explicitly V2 (§22.3 #1 + §23).
 > The mapping below is the correct one.
+
+<a id="v1-milestone"></a>
 
 ### V1 — Deterministic Baseline + Live Execution (Phases 1–6 + 9 + 10 + 10B + 10C + 12 + 13 + 13B + 14 + **21 [✅ COMPLETE]**)
 
@@ -3771,6 +4001,8 @@ forward visibility only.
 executable form of the V1 §22.2 #12 contract; cross-venue boost factors are
 config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 
+<a id="v2-milestone"></a>
+
 ### V2 — Probabilistic Extensions + Cross-Venue Confirmation (Phases 15–20)
 
 **Status: PARTIALLY DELIVERED — Phases 15, 16P, 16Q, 16R delivered; Phases 16–20 pending.**
@@ -3799,6 +4031,8 @@ config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 - ☐ **CI / test gating** — Path-to-completion work item #3: C++ tests (~1,104 checks) never run automatically. Add `unittest discover` + C++ `./test_*` hooks to CI.
 - ☐ **Bookmap V1 cut** — `event_builder.py` qty + extended-metric TODOs (§6.1–6.3 of `docs/BOOKMAP_INTEGRATION.md`). Non-trading-critical. ~1 day.
 
+<a id="v3-milestone"></a>
+
 ### V3 — Multi-Asset / Multi-Symbol / Adaptive Sizing
 
 **Status: NOT STARTED.**
@@ -3808,7 +4042,11 @@ config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 - Adaptive Kelly-like position sizing (depends on V2 HMM posteriors).
 - Live model retraining pipeline (depends on V2 HMM + optimisation framework).
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s13"></a>
 
 ## 13. Risks and Implementation Pitfalls
 
@@ -3829,7 +4067,11 @@ config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 | Fee model mismatch | Backtest PnL unrealistic | Maker/taker fees in paper engine from Phase 2 |
 | Float vs double precision | Inconsistent results across platforms | Use `double` (float64) everywhere on hot path |
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s14"></a>
 
 ## 14. Module Ownership Suggestion
 
@@ -3849,7 +4091,11 @@ config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 | Optimizer | Python | Python |
 | pybind11 bindings | C++ | C++ |
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s15"></a>
 
 ## 15. Benchmark and Profiling Strategy
 
@@ -3871,7 +4117,11 @@ Each phase adds benchmarks for its new components to a shared benchmark suite.
 - After Phase 6, performance benchmarks become part of the CI/test suite.
 - Any regression > 20% on key metrics (tick-to-decision latency, memory) must be investigated.
 
+[↑ Contents](#toc)
+
 ---
+
+<a id="s17"></a>
 
 ## 17. Agent Instructions
 
@@ -3887,3 +4137,5 @@ Coding agents working on this codebase must:
 8. **Update documentation** if assumptions or interfaces change.
 9. **Profile before optimizing.** Do not optimize speculatively.
 10. **Follow the phase order.** Dependencies are real. Do not skip phases.
+
+[↑ Contents](#toc)

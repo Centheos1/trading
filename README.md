@@ -1053,7 +1053,7 @@ Validation:
 
 ## Metric Documentation
 
-See [`METRICS_GLOSSARY.md`](METRICS_GLOSSARY.md) for full mathematical and
+See [`METRICS_GLOSSARY.md`](docs/METRICS_GLOSSARY.md) for full mathematical and
 plain-language definitions of every metric in the reports, covering:
 
 - Returns & Growth (Total Return, CAGR)

@@ -33,11 +33,13 @@ When in doubt, consult these documents in priority order:
 - **Do not refactor unrelated code** in the same change as a behavioral modification.
 - **Do not introduce dead code paths** without clear justification and a TODO for cleanup.
 
-### 3.2 Correctness First
+### 3.2 Correctness and Efficiency
 
-- **Correctness before performance.** Get behavior right, then optimize.
+- **Accuracy is non-negotiable.** Results must be numerically correct and behaviourally exact before any optimisation is considered.
+- **Efficiency is the second priority.** Prefer algorithms and data structures with lower asymptotic cost. Avoid redundant work, unnecessary copies, and O(n²) loops where O(n) or O(n log n) alternatives exist.
 - **Profile before optimizing.** Do not optimize speculatively.
 - **Performance optimizations must preserve correctness and interfaces** unless explicitly justified and documented.
+- **C++ code is performance-critical.** All C++ on the hot path is subject to the latency targets in §9.2 and the allocation rules in §9.1. Python is acceptable for orchestration and slow-path logic only.
 
 ### 3.3 Documentation
 
@@ -45,6 +47,13 @@ When in doubt, consult these documents in priority order:
 - **Update `implementation_plan.md`** if any phase scope, dependency, or acceptance criteria changes.
 - **Update this document** if any operational rule changes.
 - **Never let code drift from docs silently.**
+
+### 3.3b Stub and TODO Policy
+
+- **A task containing an unresolved stub or `TODO` is NOT complete.** A stub is any placeholder that omits real logic: `pass`, `return {}`, `throw std::runtime_error("not implemented")`, `// TODO`, `# TODO`, `raise NotImplementedError`, or any equivalent.
+- **Stubs are permitted only as explicit, tracked placeholders.** Every stub must carry a `TODO(<phase>):` tag that names the phase or ticket where it will be resolved.
+- **The Definition of Done (§12) requires zero unresolved stubs** in any file touched by the change. If a pre-existing stub is out of scope, leave it unchanged and do not mark the owning task complete.
+- **Never mark a phase or task COMPLETED in `implementation_plan.md`** if any function, method, or class in the phase scope contains an active stub or `TODO`.
 
 ### 3.4 Avoid Overengineering
 
@@ -403,6 +412,8 @@ grep -nE "@(pytest\.mark\.skip|unittest\.skip)\(" tests/test_live_execution_v1_c
 
 ## 9. Performance Rules
 
+**C++ is the performance-critical tier.** All Ripple hot-path logic, the orderflow engine, tick store, and liquidity map run in C++. The latency targets in §9.2 apply exclusively to C++ paths. Python may not be introduced on any path that contributes to tick-to-decision latency.
+
 ### 9.1 Hot Path
 
 - **No heap allocation** on the per-event C++ hot path. Use pre-allocated buffers.
@@ -410,6 +421,8 @@ grep -nE "@(pytest\.mark\.skip|unittest\.skip)\(" tests/test_live_execution_v1_c
 - **No Python callbacks** on the per-event C++ hot path.
 - **Bounded data structures** with explicit eviction. No unbounded growth.
 - **Use `double` (not `float`)** for all prices, quantities, and feature values on the hot path.
+- **Prefer cache-friendly layouts.** Struct-of-arrays over array-of-structs for hot collections. Avoid pointer chasing.
+- **Minimize branch mispredictions** on critical conditionals. Use branchless patterns where the cost is justified by profiling.
 
 ### 9.1.1 Bounded Data Structure Limits
 
@@ -507,6 +520,8 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 | Phase skipping | Implementing Phase 7 before Phase 2 complete | Follow phase order in `implementation_plan.md` |
 | Test gap | Behavior changes without test updates | Mandatory test with every behavioral change |
 | Doc rot | Code changes, docs don't | Update docs with every interface/behavior change |
+| Stub completion | Task marked COMPLETED while stubs or TODOs remain in scope | §3.3b stub policy + §12 Definition of Done stub gate |
+| Accuracy shortcut | Approximation or placeholder logic merged without a tracked TODO and accuracy test | §3.2 accuracy-first rule; every numerical output must be verified against reference data |
 | Depth-trade timestamp skew | `chart_now` shifts visible window away from trade data | Cap depth lead in `chart_now` (see §11.4) |
 | Trade-derived data disappearing | Bubbles/CVD vanish while heatmap is still live | Regression guard + pipeline diagnostics (see §11.4) |
 | Pruning with wrong time reference | Using `chart_now` instead of trade-derived time for trade pruning | Prune on `_last_trade_ts` only, never depth-influenced time (see §11.4) |
@@ -547,18 +562,22 @@ These failures cause trade-derived visualizations (bubbles, CVD) to silently dis
 
 ## 12. Definition of Done for a Change
 
-A change is **done** when all of the following are true:
+A change is **done** when **all** of the following are true. Every criterion is a hard gate — partial completion does not count.
 
 | Criterion | Check |
 |---|---|
 | Compiles | `make` / `cmake --build` succeeds |
 | Tests pass | All existing tests pass; new tests added for new behavior |
+| No unresolved stubs | Zero `TODO`, `pass`, `raise NotImplementedError`, `// TODO`, or equivalent placeholders in files touched by the change (pre-existing out-of-scope stubs are exempt but must not be in the changed diff) |
+| Accuracy verified | Outputs are numerically correct against known inputs or reference data; no silent approximation |
 | Replay deterministic | Same events + config → same outputs |
 | Linter clean | No new linter warnings in changed files |
 | Docs updated | `strategy.md` / `implementation_plan.md` / this file updated if needed |
-| Performance acceptable | No regression > 20% on key metrics |
+| Performance acceptable | No regression > 20% on key metrics; C++ hot-path changes benchmarked |
 | Change is narrow | One logical unit; no unrelated modifications |
 | Review-ready | Changed files clearly identified; rationale documented |
+
+**A task marked COMPLETED in `implementation_plan.md` must satisfy every row above.** If any stub or TODO remains in the scope of the task, the status must remain IN PROGRESS regardless of test results.
 
 ---
 
