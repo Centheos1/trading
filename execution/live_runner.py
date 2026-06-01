@@ -10,6 +10,21 @@ Designed for testability — every external dependency (the
 session, the depth-snapshot fetcher) is injectable so tests can drive
 the function with stubs and an in-process fake WebSocket without
 spawning real threads/network.
+
+Phase 21 note — single live path, two transports
+-------------------------------------------------
+``run_live_execute`` is the **in-process WebSocket** transport, kept for
+local development and the optional Bookmap publisher dev loop. The
+**deployed** live path is the distributed Redis + FastAPI ``strategy``
+service (``strategy/engine/live_engine.py`` →
+``strategy/engine/execution_bridge.py``). Both transports drive the
+*same* V1 execution primitives — :func:`execution.models.ripple_decision_to_intent`,
+:func:`execution.models.intent_risk_block_reason`, and the layered-push
+helpers :func:`_layered_push_step` / :func:`_run_layered_push_loop`
+re-used directly by the service. There is therefore exactly one set of
+gate/decode/push semantics; this module is **not** a second, divergent
+live path. Do not fork the gate logic here — change it in
+``execution/models.py`` so both transports stay in lock-step.
 """
 from __future__ import annotations
 

@@ -46,6 +46,28 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT").split(",")
 BUCKET_MS = int(os.getenv("CANDLE_BUCKET_MS", "60000"))
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Phase 21 — live-execution config. Defaults are intentionally safe:
+# ARM_EXECUTION=false → OBSERVE mode (gate + log, no broker orders).
+ARM_EXECUTION = _env_bool("ARM_EXECUTION", False)
+EXECUTION_BROKER = os.getenv("EXECUTION_BROKER", "paper").strip().lower()
+MAX_POSITION_USD = _env_float("MAX_POSITION_USD", 0.0)
+SIZING_VALUE = _env_float("SIZING_VALUE", 0.001)
+MAX_POSITION_QTY = _env_float("MAX_POSITION_QTY", 0.01)
+COOLDOWN_S = _env_float("EXECUTION_COOLDOWN_S", 5.0)
+ENABLE_LAYERED_STRATEGY = _env_bool("ENABLE_LAYERED_STRATEGY", True)
+
+
 # ---------------------------------------------------------------------------
 # Engine parameter manager
 # ---------------------------------------------------------------------------
@@ -98,6 +120,13 @@ async def lifespan(app: FastAPI):
         symbols=SYMBOLS,
         redis_url=REDIS_URL,
         bucket_ms=BUCKET_MS,
+        arm_execution=ARM_EXECUTION,
+        execution_broker=EXECUTION_BROKER,
+        max_position_usd=MAX_POSITION_USD,
+        sizing_value=SIZING_VALUE,
+        max_position_qty=MAX_POSITION_QTY,
+        cooldown_s=COOLDOWN_S,
+        enable_layered_strategy=ENABLE_LAYERED_STRATEGY,
     )
     params_mgr = _ParamManager(engine)
 
@@ -129,9 +158,19 @@ async def root() -> dict:
                 "POST /api/backtest",
                 "POST /api/optimise",
                 "GET  /api/optimise/{job_id}",
+                "GET  /api/execution",
+                "POST /api/execution/arm",
             ],
         },
     }
+
+
+def _execution_status_fn() -> dict:
+    return engine.get_execution_status() if engine else {}
+
+
+def _set_armed_fn(armed: bool) -> dict:
+    return engine.set_armed(armed) if engine else {}
 
 
 # REST router — bound to engine accessors via closures.
@@ -142,5 +181,7 @@ app.include_router(
         set_engine_params_fn=lambda update: (
             params_mgr.patch(update) if params_mgr else {}
         ),
+        execution_status_fn=_execution_status_fn,
+        set_armed_fn=_set_armed_fn,
     )
 )

@@ -24,6 +24,14 @@ This document translates the strategy design defined in `strategy.md` into a con
 > `ui/` desktop app) and are now **partially stale**. Where this
 > section conflicts with them, **this section is ground truth** until
 > the older sections are rewritten (tracked as Phase 21 below).
+>
+> **UPDATE 2026-06-01 — the live-path gap is now CLOSED by Phase 21.**
+> The deployed `strategy` service routes Ripple-driven, risk-gated
+> execution again (`strategy/engine/execution_bridge.py` +
+> `LiveEngine`), opt-in via `ARM_EXECUTION` (default OBSERVE). The
+> "critical gap" subsection below is retained for historical context but
+> describes the *pre-Phase-21* state. Doc reconciliation of §2.2/§2.3/
+> §7.1/§10/§12 + `README.md` (master-sequence item #4) is still pending.
 
 ### What changed
 
@@ -34,26 +42,31 @@ This document translates the strategy design defined in `strategy.md` into a con
 | Live execute = in-process WS feed → `execution/live_runner.py::run_live_execute` (Ripple-driven, Tide/Wave/Risk push, broker orders, `intent_risk_block_reason` gate) | **Orphaned.** `run_live_execute` still exists and is unit-tested, but **no production code calls it.** |
 | Single process | Three Docker services: `redis` (pub/sub bus), `data` (`collect_ticks.py` → Binance WS → HDF5/Parquet **+** Redis `trades:{SYM}`/`depth:{SYM}`), `strategy` (`uvicorn strategy.main:app`). |
 
-### The critical gap (V1 regression)
+### The critical gap (V1 regression) — *RESOLVED by Phase 21 (2026-06-01)*
 
-The deployed `strategy` service (`strategy/engine/live_engine.py::LiveEngine`)
-currently does the following and **nothing more**:
+> Historical snapshot of the pre-Phase-21 state. As of 2026-06-01 the
+> `strategy` service is the V1-compliant live path; see Phase 21 in §7.2.
+
+Before Phase 21, the deployed `strategy` service
+(`strategy/engine/live_engine.py::LiveEngine`) did the following and
+**nothing more**:
 
 ```
 Redis trades:/depth:  ──►  C++ OrderFlowEngine (per symbol)  ──►  set_signal_callback  ──►  logger.info(...)
 ```
 
-It uses the **deprecated `set_signal_callback`** surface (not the
+It used the **deprecated `set_signal_callback`** surface (not the
 Ripple-driven `set_ripple_callback` topology that Phase 14A made
-canonical), and it has **no** `ExecutionManager`, **no** broker, **no**
+canonical), and it had **no** `ExecutionManager`, **no** broker, **no**
 Tide/Wave/Risk snapshot push, and **no** `intent_risk_block_reason`
-gate. In other words:
+gate. In other words (pre-Phase-21):
 
-- **V1 live execution is built and unit-tested (`execution/`) but is
+- **V1 live execution was built and unit-tested (`execution/`) but
   NOT wired into the running service.** The Phase 14 acceptance suite
   (`tests/test_live_execution_v1_compliance.py`) still passes because it
-  drives `execution/live_runner.py` directly — but that module is no
-  longer on the deployed path.
+  drives `execution/live_runner.py` directly. Phase 21 added
+  `tests/test_strategy_live_engine.py` which pins the same contract on
+  the deployed service path.
 - The Phase 14B/14C grep gates in §7.1 (e.g. `grep -rn "set_risk_budget"
   execution/ main.py`) were written against `ui/live_trading_session.py`
   + root `main.py`, **both of which no longer exist**. The only surviving
@@ -73,11 +86,13 @@ gate. In other words:
 
 ### Consequence for the roadmap
 
-"V1 GA" remains **true for the engine and backtest/optimise control
-plane**, but is **no longer true for the deployed live-execution path**.
-Closing that is **Phase 21** (see §7.2) and is the single highest
-priority on the path to completion — it must land before any live
-trading and before the V2 model phases (17–20) are worth wiring.
+"V1 GA" is now **true for the engine, the backtest/optimise control
+plane, AND the deployed live-execution path** again, following
+**Phase 21** (see §7.2, completed 2026-06-01). Live trading remains
+gated behind the explicit `ARM_EXECUTION=true` flag (default OBSERVE),
+and a TESTNET soak (Phase 21 acceptance #6) should precede any mainnet
+arming. The V2 model phases (17–20) can now be wired onto a working
+live path.
 
 ---
 
@@ -2793,7 +2808,7 @@ evaluated before Phase 17 work begins.
 
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
-| **21** | 🔴 Re-wire Live Execution into the Distributed Strategy Service | `NOT STARTED — V1 regression, highest priority` (see §1A) | §22.2 #4/#8/#9/#12 | Phase 14 (built, orphaned) |
+| **21** | ✅ Re-wire Live Execution into the Distributed Strategy Service | `DONE — 2026-06-01` (see §1A + §7.2) | §22.2 #4/#8/#9/#12 | Phase 14 (re-used) |
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
 | **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting cleanly since 2026-06-01 (migrated to t3.medium, parallel subprocess architecture, log rotation applied); unblocks Phase 16 on **2026-07-01** (30 days)` | — | None (infrastructure prerequisite) |
 | **16Q** | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; Binance backfill complete; Oanda backfill in progress (127 instruments, 2020→now)` | — | Phase 16P infrastructure |
@@ -2814,10 +2829,10 @@ number. Each row links to its detailed spec above.
 
 | # | Work item | Why now / blocks | Gate to start | Effort |
 |---|---|---|---|---|
-| **1** | **Phase 21 — Re-wire live execution into the `strategy` service** | 🔴 V1 regression: deployed service only logs signals; no risk-gated execution. Everything live depends on this. | None — start immediately | 2–4 days |
-| **2** | **Data-collection hardening** (see "Hardening backlog" below) | Phase 16 verdict quality depends on clean, gapless data; current code has silent-gap + watermark-loss + crash-on-empty bugs. | Parallel with #1 | 2–3 days |
+| **1** | ✅ **Phase 21 — Re-wire live execution into the `strategy` service** | **DONE 2026-06-01.** Service is Ripple-driven + risk-gated again (OBSERVE by default). Remaining: TESTNET soak before mainnet arming (acceptance #6). | — | done |
+| **2** | **Data-collection hardening** (see "Hardening backlog" below) | Phase 16 verdict quality depends on clean, gapless data; current code has silent-gap + watermark-loss + crash-on-empty bugs. | Parallel | 2–3 days |
 | **3** | **CI / test gating** — run Python (`unittest discover`) **and** C++ (`./test_*`) on every push; add `build.sh` post-build test hook | ~1,104 C++ checks exist but are never run automatically; doc-drift like §1A went unnoticed for weeks without it. | Parallel | 1 day |
-| **4** | **Doc reconciliation** — rewrite §2.2/§2.3/§7.1/§10/§12 + `README.md` + `TESTING_GUIDE.md` to the distributed architecture; delete `ui/`/`main.py` references | Prevents the next agent from trusting stale "wired live" claims. Partially started by §1A. | After #1 lands (so docs describe the real path) | 1 day |
+| **4** | **Doc reconciliation** — rewrite §2.2/§2.3/§7.1/§10/§12 + `README.md` + `TESTING_GUIDE.md` to the distributed architecture; delete `ui/`/`main.py` references | Prevents the next agent from trusting stale "wired live" claims. Partially started by §1A. | **Unblocked** — #1 (Phase 21) landed; docs can now describe the real path | 1 day |
 | **5** | **Phase 16P/16Q → 30 days clean data** | Hard prerequisite for the Phase 16 HMM A/B verdict. | Calendar: **2026-07-01** | passive |
 | **6** | **Phase 16 — record real `CampaignVerdict`** | The hard evidence gate for Phase 17. | #5 complete | 0.5 day run |
 | **7** | **Phase 17 — HMM Wave classifier** | Only if Phase 16 `promote == True`. | #6 verdict | 3–5 days |
@@ -2872,17 +2887,32 @@ satisfied. This checklist is derived from the V1 lesson that
 
 ---
 
-### Phase 21 — Re-wire Live Execution into the Distributed Strategy Service `[NOT STARTED — 🔴 HIGHEST PRIORITY]`
+### Phase 21 — Re-wire Live Execution into the Distributed Strategy Service `[DONE — 2026-06-01]`
+
+> **2026-06-01 — Implemented.** The deployed `strategy` service is now
+> the V1-compliant live path. A new `strategy/engine/execution_bridge.py`
+> (`ExecutionBridge`) wires `set_ripple_callback` →
+> `ripple_decision_to_intent` → `intent_risk_block_reason` gate →
+> `ExecutionManager.on_intent` / `PaperEngine.on_intent`, and
+> `LiveEngine` spawns the Phase 14B layered-push thread per symbol
+> (imported from `execution/live_runner.py`, the single source) and
+> feeds `WaveEngine.on_price` + the realized-vol buffer from the Redis
+> trade stream. Execution is **opt-in** via `ARM_EXECUTION` (default
+> `false` → OBSERVE: gate + log, zero orders). REST gained
+> `GET /api/execution` + `POST /api/execution/arm`. New compliance suite
+> `tests/test_strategy_live_engine.py` (21 tests) pins the six failure
+> modes, exits-never-blocked, and observe-only safety on the service
+> path. See "Acceptance — verified" below.
 
 **Why this exists.** See §1A. The 2026 service refactor (Redis pub/sub +
 FastAPI) replaced the monolith's in-process live loop. The deployed
-`strategy` service (`strategy/engine/live_engine.py`) currently consumes
-Redis and **only logs signals** via the deprecated `set_signal_callback`.
+`strategy` service (`strategy/engine/live_engine.py`) previously consumed
+Redis and **only logged signals** via the deprecated `set_signal_callback`.
 All of Phase 14's V1-compliant execution machinery (`execution/`) still
-exists and passes its unit tests, but **nothing calls it on the deployed
-path**. This is a V1 contract regression: per `strategy.md` §22.2 the
+existed and passed its unit tests, but **nothing called it on the deployed
+path**. This was a V1 contract regression: per `strategy.md` §22.2 the
 live path must be Ripple-driven (#4/#12), enforce the ES throttle (#8),
-and enforce Wave permissions (#9). None of that runs today.
+and enforce Wave permissions (#9). None of that ran on the service.
 
 **Objective.** Make the `strategy` service the V1-compliant live path:
 Redis → C++ engine → **`set_ripple_callback`** → `intent_risk_block_reason`
@@ -2900,18 +2930,54 @@ already-tested primitives in `execution/live_runner.py` and
 | `strategy/api/rest_routes.py` | Add `GET /api/execution` (armed?, position, consumed_es, last block reason/count) and `POST /api/execution/arm` so the risk-gate diagnostics that Phase 14F built for the Qt UI are exposed over REST. |
 | `tests/test_strategy_live_engine.py` | NEW. Stub Redis + stub engine + `StubBroker`. Assert: a synthetic `RippleDecision` stream produces `on_intent` calls with correct type/side/qty/event-timestamp; the risk gate blocks under ES-exhausted / Wave-DISABLED / Tide-CRISIS / max-position; exits are never blocked; `ARM_EXECUTION=false` → zero broker orders; layered push calls `set_risk_budget`/`set_wave_snapshot`/`set_realized_vol` at the right cadence. Port the relevant assertions from `tests/test_live_execution_v1_compliance.py` + `tests/test_layered_live_wiring.py` to the new service path. |
 
-**Acceptance criteria.**
+**Acceptance — verified (2026-06-01).**
 
-1. `grep -rn "set_ripple_callback" strategy/` returns ≥ 1 production hit; `grep -rn "set_signal_callback" strategy/` returns **zero** order-routing hits (recorder/observation only, if any).
-2. `grep -rn "intent_risk_block_reason" strategy/` returns ≥ 1 production hit on the live order path.
-3. `grep -rn "set_risk_budget\|set_wave_snapshot\|set_realized_vol" strategy/` each return ≥ 1 production hit.
-4. The Phase 14C six failure modes (ES exhausted, Wave DISABLED, Tide CRISIS, max_position exceeded, two-trades concurrent, cooldown active) are re-pinned on the `strategy` service path; exits are never blocked.
-5. `ARM_EXECUTION=false` (default) → byte-identical to today's observe-only behaviour (no broker orders); a test asserts this.
-6. TESTNET soak: `docker compose up` with `ARM_EXECUTION=true BINANCE_TESTNET=true` places orders only when Ripple decides AND the risk gate allows.
-7. Either delete `execution/live_runner.py` or have the `strategy` service import its primitives — there must be exactly one live path (no second orphan).
+1. ✅ `grep -rn "set_ripple_callback" strategy/` → production hit at
+   `strategy/engine/live_engine.py:212` (+ bridge factory). The only
+   `set_signal_callback` use is observation-only logging (it never routes
+   orders; clearly commented in `_make_signal_callback`).
+2. ✅ `grep -rn "intent_risk_block_reason" strategy/` → production hit on
+   the live order path (`strategy/engine/execution_bridge.py::dispatch`).
+3. ✅ Tide/Wave/RV pushes are wired: `LiveEngine._start_layered_push`
+   spawns `execution.live_runner._run_layered_push_loop` per symbol,
+   which calls `set_risk_budget` / `set_wave_snapshot` / `set_realized_vol`
+   on the C++ ripple handle at the 60 s / 5 s / 1 s cadences.
+   **Nuance:** to honour criterion #7 (single source) the setters live in
+   `execution/live_runner._layered_push_step` rather than being copied
+   into `strategy/` — the service *imports and runs* them. A literal
+   `grep ... strategy/` therefore points at the import site; the calls
+   themselves are in `execution/live_runner.py`. `test_strategy_live_engine.py::TestLiveEngineWiring::test_layered_push_thread_spawns_and_pushes`
+   asserts the setters actually fire on the service path.
+4. ✅ Six failure modes re-pinned on the service path in
+   `tests/test_strategy_live_engine.py`: ES exhausted / Wave DISABLED /
+   Tide CRISIS / max_position (gate-level, `TestRiskGateBlocks`); cooldown
+   + two-trades-concurrent (through a real `ExecutionManager` +
+   `StubBroker`, `TestExecutionManagerIntegration`). Exits are never
+   blocked (`TestExitsNeverBlocked`).
+5. ✅ `ARM_EXECUTION=false` (default) → OBSERVE: decisions are gated and
+   logged but never forwarded to a target, even when one is wired
+   (`TestObserveMode`). Zero broker orders.
+6. ☐ TESTNET soak (`docker compose up` with `ARM_EXECUTION=true
+   BINANCE_TESTNET=true`) — **manual deploy step**, not unit-testable in
+   CI (requires `python-binance` + live testnet creds). Wiring is in
+   place; run before any mainnet arming.
+7. ✅ Exactly one live path: `execution/live_runner.py` is retained as the
+   in-process WS transport (dev / Bookmap) and its primitives
+   (`ripple_decision_to_intent`, `intent_risk_block_reason`,
+   `_layered_push_step`, `_run_layered_push_loop`) are imported by the
+   service — no forked gate logic. Documented in the `live_runner.py`
+   module docstring ("single live path, two transports").
+
+**Configuration (env).** `ARM_EXECUTION` (default `false`),
+`EXECUTION_BROKER` (`paper`|`binance`, default `paper`),
+`MAX_POSITION_USD`, `SIZING_VALUE`, `MAX_POSITION_QTY`,
+`EXECUTION_COOLDOWN_S`, `ENABLE_LAYERED_STRATEGY` (default `true`).
+A failed broker connect or target construction degrades that symbol to
+OBSERVE rather than crashing the service.
 
 **Out of scope.** New strategy behaviour, multi-symbol portfolio risk
-(V3), LIMIT/OCO routing already shipped in Phase 15 (re-use it).
+(V3), LIMIT/OCO routing already shipped in Phase 15 (re-used). PAPER-mode
+fills depend on trade ticks (wired via `PaperEngine.on_trade`).
 
 ---
 

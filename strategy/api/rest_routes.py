@@ -9,6 +9,10 @@ Endpoints:
 * ``POST   /api/optimise``     – kick off an NSGA-II optimisation; returns
                                   a job id.  Status is polled via
                                   ``GET /api/optimise/{job_id}``.
+* ``GET    /api/execution``    – live-execution diagnostics (Phase 21):
+                                  mode, armed state, position, risk budget,
+                                  and risk-gate block reasons/counts.
+* ``POST   /api/execution/arm``– arm / disarm live order routing.
 
 Long-running operations (backtest, optimise) are dispatched to a thread
 pool so the FastAPI event loop stays responsive.
@@ -116,6 +120,12 @@ class OptimiseRequest(BacktestRequest):
     generations: int = 20
 
 
+class ArmRequest(BaseModel):
+    """Phase 21 — arm / disarm live order routing."""
+
+    armed: bool = Field(..., description="True to arm live execution, False to disarm")
+
+
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
@@ -126,6 +136,8 @@ def make_router(
     engine_status_fn,
     set_engine_params_fn,
     get_engine_params_fn,
+    execution_status_fn=None,
+    set_armed_fn=None,
 ) -> APIRouter:
     """Construct the API router.
 
@@ -135,6 +147,13 @@ def make_router(
     set_engine_params_fn : callable(StrategyParamsUpdate) -> dict
         Applies the update and returns the resulting params dict.
     get_engine_params_fn : callable() -> dict
+    execution_status_fn : Optional[callable() -> dict]
+        Phase 21 — returns live-execution diagnostics. When ``None`` the
+        ``GET /api/execution`` endpoint reports the feature as disabled.
+    set_armed_fn : Optional[callable(bool) -> dict]
+        Phase 21 — arms / disarms live order routing and returns the
+        resulting execution status. When ``None`` the
+        ``POST /api/execution/arm`` endpoint returns HTTP 503.
     """
     router = APIRouter(prefix="/api")
     jobs = JobRegistry()
@@ -182,6 +201,20 @@ def make_router(
             "result": job.result,
             "error": job.error,
         }
+
+    @router.get("/execution")
+    async def get_execution() -> dict:
+        if execution_status_fn is None:
+            return {"enabled": False}
+        return execution_status_fn()
+
+    @router.post("/execution/arm")
+    async def post_execution_arm(req: ArmRequest = Body(...)) -> dict:
+        if set_armed_fn is None:
+            raise HTTPException(
+                status_code=503, detail="Execution control not available"
+            )
+        return set_armed_fn(req.armed)
 
     return router
 
