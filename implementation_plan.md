@@ -2719,10 +2719,10 @@ evaluated before Phase 17 work begins.
 | Phase | Name | Status | strategy.md ref | Dependency |
 |---|---|---|---|---|
 | **15** | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | Phase 14A (DONE) |
-| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting since 2026-05-13; unblocks Phase 16 on ~2026-06-13 (30 days)` | — | None (infrastructure prerequisite) |
-| **16Q** | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; backfill 2020→now running` | — | Phase 16P infrastructure |
+| **16P** | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting cleanly since 2026-06-01 (migrated to t3.medium, parallel subprocess architecture, log rotation applied); unblocks Phase 16 on **2026-07-01** (30 days)` | — | None (infrastructure prerequisite) |
+| **16Q** | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; Binance backfill complete; Oanda backfill in progress (127 instruments, 2020→now)` | — | Phase 16P infrastructure |
 | **16R** | Feed Health Monitor & Data Quality Report | `DONE` | — | Phase 16P (collecting) |
-| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked ~2026-06-13 when 30 days of data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
+| **16** | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked **2026-07-01** when 30 days of clean data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
 | **17** | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | Phase 16 `CampaignVerdict.promote is True` |
 | **18** | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | Phase 8 (DONE) |
 | **19** | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | Phase 4 (DONE) |
@@ -2839,15 +2839,31 @@ test case to `test_replay_determinism.py` verifying this.
 
 ---
 
-### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — COLLECTING since 2026-05-13]`
+### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — COLLECTING since 2026-06-01]`
 
-**EC2 collector live as of 2026-05-13 22:47 AEST. BTCUSDT + ETHUSDT collecting continuously.**
+**Clean collection start: 2026-06-01 (AEST).** Earlier collection (from 2026-05-13) was
+interrupted by infrastructure issues (HDF5 corruption, OOM on t3.small, disk exhaustion
+from unrotated Docker logs). The instance was migrated to a **t3.medium** on 2026-06-01
+and the following fixes were applied before restarting clean collection:
 
-**Phase 16 unblock date: ~2026-06-13** (30 days of data required for HMM A/B campaign windows).
-Hourly S3 sync to `s3://trading-data-centheos/ticks/` is active. Verify at any time:
+- Parallel subprocess architecture (BTCUSDT + ETHUSDT collected simultaneously)
+- Docker daemon-level log rotation (50 MB / 3 files per container)
+- `aiobotocore` credential log spam silenced (was the primary cause of disk exhaustion)
+- `tick_parquet_store.py` Parquet mirror active (15-minute flush, max 15 min data loss)
+- Hourly `s3_sync.sh` cron active
+
+**Phase 16 unblock date: 2026-07-01** (30 days of continuous, clean data required for
+HMM A/B campaign windows).
+
+Verify collection is healthy at any time:
 ```bash
+# On EC2
+docker compose logs --tail 20 data
+docker compose --profile ohlcv logs --tail 10 ohlcv-collector | grep -v credentials
+
+# Check S3 (from local Mac or EC2)
 aws s3 ls s3://trading-data-centheos/ticks/
-docker compose -f ~/app/trading/docker-compose.yml logs --tail 20 collector   # on EC2
+aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive | tail -5
 ```
 
 **Evidence (delivered 2026-05-13).**

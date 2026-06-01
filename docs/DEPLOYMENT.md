@@ -7,6 +7,37 @@ to EC2. Follow the steps in order on a fresh instance.
 
 ---
 
+## What to do next — HMM Implementation Gate
+
+| Milestone | Date | Action |
+|-----------|------|--------|
+| Clean collection started | **2026-06-01** | BTCUSDT + ETHUSDT collecting in parallel on t3.medium |
+| **HMM A/B Campaign unblocked** | **2026-07-01** | 30 days of clean tick data reached — start Phase 16 |
+| Phase 17 (Wave HMM) | After Phase 16 verdict | Only if `CampaignVerdict.promote is True` |
+
+**On 2026-07-01**, return here and run the Phase 16 campaign procedure from
+`implementation_plan.md §7.2 Phase 16`:
+
+```bash
+# 1. Download 30 days of tick data from S3
+python notebooks/utils.py  # or use load_ticks_parquet() in a notebook
+
+# 2. Run the HMM A/B campaign
+python tools/hmm_abtest.py --symbols BTCUSDT ETHUSDT --windows 14 30
+
+# 3. Record the CampaignVerdict in implementation_plan.md Phase 16
+#    then flip Phase 16 status to [DONE — 2026-07-01]
+#    If promote: true → Phase 17 is unblocked
+```
+
+Before starting: verify 30 days of data is in S3:
+```bash
+aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive | wc -l
+# Expect ~30 date-partitioned .parquet files
+```
+
+---
+
 ## Emergency Recovery (EC2 hung / can't SSH)
 
 Use this section whenever the instance is unresponsive. **Do not panic — tick data
