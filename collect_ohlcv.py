@@ -41,6 +41,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from itertools import zip_longest
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ohlcv_store import OhlcvStore, get_ohlcv_store
@@ -528,10 +529,25 @@ def _run_pass(
     Returns total rows written this pass.
     """
     to_ts = _now_ms()
-    jobs: List[Tuple[ExchangeAdapter, str]] = []
-    for adapter in adapters:
-        for sym in symbols_by_adapter.get(adapter.name, []):
-            jobs.append((adapter, sym))
+
+    # Interleave jobs round-robin across adapters rather than queuing every
+    # symbol of one exchange before the next. The thread pool dispatches jobs
+    # in submission order, so a naive "all Binance, then all Oanda" ordering
+    # means the ~300 Binance perpetual backfills (many hours) drain entirely
+    # before a single Oanda fetch starts — and if the process restarts before
+    # then (OOM, redeploy, reboot) Oanda is never reached at all. Round-robin
+    # guarantees every exchange makes progress concurrently, so Oanda data
+    # starts landing in S3 from the first pass.
+    per_adapter_jobs: List[List[Tuple[ExchangeAdapter, str]]] = [
+        [(adapter, sym) for sym in symbols_by_adapter.get(adapter.name, [])]
+        for adapter in adapters
+    ]
+    jobs: List[Tuple[ExchangeAdapter, str]] = [
+        job
+        for tier in zip_longest(*per_adapter_jobs)
+        for job in tier
+        if job is not None
+    ]
 
     if not jobs:
         return 0

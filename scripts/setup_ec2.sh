@@ -121,7 +121,10 @@ fi
 # 5. Build the Docker image
 # ---------------------------------------------------------------------------
 log "Building Docker image (this takes ~5 minutes on first run)..."
-docker compose build
+# --profile ohlcv ensures the ohlcv-collector image (Binance + Oanda OHLCV)
+# is built too — it is gated behind the "ohlcv" profile and is otherwise
+# skipped by a plain `docker compose build`.
+docker compose --profile ohlcv build
 
 # Remove dangling build cache and old image layers immediately after build.
 # On a 30 GB root volume, accumulated build layers are the #1 cause of
@@ -145,8 +148,13 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${APP_DIR}
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
+# --profile ohlcv is REQUIRED: the ohlcv-collector service (the only source
+# of Oanda + historical OHLCV data) is gated behind the "ohlcv" compose
+# profile. Without it, `docker compose up -d` silently starts only redis,
+# data (Binance ticks) and strategy — so on every boot/reboot the OHLCV
+# collector stays down and NO Oanda data is ever written to S3.
+ExecStart=/usr/bin/docker compose --profile ohlcv up -d
+ExecStop=/usr/bin/docker compose --profile ohlcv down
 TimeoutStartSec=300
 
 [Install]
