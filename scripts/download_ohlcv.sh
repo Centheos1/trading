@@ -49,26 +49,36 @@ done
 
 mkdir -p data/ohlcv
 
+# Two on-disk layouts are supported:
+#   yearly (current):  ohlcv/{exchange}/{symbol}/{timeframe}/{year}.parquet
+#   legacy  (old):     ohlcv/{exchange}/{symbol}/{timeframe}.parquet
+# Both include filters are passed so a sync pulls whichever exist.
 if [ -n "${EXCHANGE}" ] && [ -n "${SYMBOL}" ]; then
-    KEY="ohlcv/${EXCHANGE}/${SYMBOL}/${TIMEFRAME}.parquet"
-    LOCAL="data/${KEY}"
-    mkdir -p "$(dirname "${LOCAL}")"
-    echo "Downloading s3://${S3_BUCKET}/${KEY} → ${LOCAL}"
-    aws s3 cp "s3://${S3_BUCKET}/${KEY}" "${LOCAL}"
+    echo "Downloading ${EXCHANGE}/${SYMBOL} ${TIMEFRAME} parquet files…"
+    aws s3 sync \
+        "s3://${S3_BUCKET}/ohlcv/${EXCHANGE}/${SYMBOL}" \
+        "data/ohlcv/${EXCHANGE}/${SYMBOL}" \
+        --exclude "*" \
+        --include "${TIMEFRAME}/*.parquet" \
+        --include "${TIMEFRAME}.parquet"
 elif [ -n "${EXCHANGE}" ]; then
     echo "Downloading all ${EXCHANGE} ${TIMEFRAME} parquet files…"
     aws s3 sync \
         "s3://${S3_BUCKET}/ohlcv/${EXCHANGE}" \
         "data/ohlcv/${EXCHANGE}" \
-        --exclude "*" --include "*/${TIMEFRAME}.parquet"
+        --exclude "*" \
+        --include "*/${TIMEFRAME}/*.parquet" \
+        --include "*/${TIMEFRAME}.parquet"
 else
     echo "Downloading all OHLCV ${TIMEFRAME} parquet files (this may be large)…"
     aws s3 sync \
         "s3://${S3_BUCKET}/ohlcv" \
         "data/ohlcv" \
-        --exclude "*" --include "*/${TIMEFRAME}.parquet"
+        --exclude "*" \
+        --include "*/${TIMEFRAME}/*.parquet" \
+        --include "*/${TIMEFRAME}.parquet"
 fi
 
 echo ""
-echo "Verify with:"
-echo "  python -c \"import pandas as pd; df=pd.read_parquet('data/ohlcv/binance/BTCUSDT/1m.parquet'); print(df.tail())\""
+echo "Verify with (reads the yearly dir or legacy single file transparently):"
+echo "  python -c \"import pandas as pd; df=pd.read_parquet('data/ohlcv/binance/BTCUSDT/1m'); print(df.tail())\""

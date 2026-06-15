@@ -63,10 +63,13 @@ def _build_tick_h5(path: str, symbol: str = "BTCUSDT") -> None:
 
 
 def _build_ohlcv_parquet(directory: str, exchange: str, symbol: str, timestamps_ms: list) -> str:
-    """Write a minimal OHLCV Parquet file for testing."""
-    sym_dir = os.path.join(directory, "ohlcv", exchange, symbol)
-    os.makedirs(sym_dir, exist_ok=True)
-    path = os.path.join(sym_dir, "1m.parquet")
+    """Write minimal yearly-partitioned OHLCV Parquet files for testing.
+
+    Mirrors the production layout: ohlcv/{exchange}/{symbol}/1m/{year}.parquet.
+    Returns the timeframe directory.
+    """
+    tf_dir = os.path.join(directory, "ohlcv", exchange, symbol, "1m")
+    os.makedirs(tf_dir, exist_ok=True)
     df = pd.DataFrame({
         "timestamp": timestamps_ms,
         "open": [100.0] * len(timestamps_ms),
@@ -75,8 +78,11 @@ def _build_ohlcv_parquet(directory: str, exchange: str, symbol: str, timestamps_
         "close": [100.5] * len(timestamps_ms),
         "volume": [10.0] * len(timestamps_ms),
     })
-    df.to_parquet(path, index=False)
-    return path
+    years = pd.DatetimeIndex(pd.to_datetime(df["timestamp"], unit="ms")).year
+    for year in sorted(set(int(y) for y in years)):
+        sub = df[years == year]
+        sub.to_parquet(os.path.join(tf_dir, f"{year}.parquet"), index=False)
+    return tf_dir
 
 
 def _continuous_ts(start_str: str, count: int) -> list:

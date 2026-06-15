@@ -13,12 +13,14 @@ Two-phase, long-lived process:
         for each (exchange, symbol) in parallel (--workers N):
             fetch candles since last_ts, append, update last_ts
 
-The Parquet store is configurable:
-  DATA_STORE=local_parquet   (default)  →  data/ohlcv/{exchange}/{symbol}/1m.parquet
-  DATA_STORE=s3                          →  s3://{S3_BUCKET}/ohlcv/{exchange}/{symbol}/1m.parquet
+The Parquet store is configurable and yearly-partitioned:
+  DATA_STORE=local_parquet (default) →  data/ohlcv/{exchange}/{symbol}/1m/{year}.parquet
+  DATA_STORE=s3                       →  s3://{S3_BUCKET}/ohlcv/{exchange}/{symbol}/1m/{year}.parquet
 
-The process is fully restartable: on restart the read of ``last_ts`` from the
-Parquet store guarantees backfill resumes from the right point.
+The process is fully restartable: backfill runs year-by-year and flushes each
+year before moving on, and on restart the read of ``last_ts`` from the Parquet
+store guarantees it resumes from the right point (losing at most the current
+in-progress year, which is re-fetched and de-duplicated on append).
 
 Usage:
     # Local dev — backfill BTCUSDT from Binance to local Parquet, then exit
@@ -125,6 +127,16 @@ _TF_MS = {
     "4h": 4 * 60 * 60_000,
     "1d": 24 * 60 * 60_000,
 }
+
+
+def _year_of_ms(ts_ms: int) -> int:
+    """UTC calendar year for an epoch-millisecond timestamp."""
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).year
+
+
+def _year_start_ms(year: int) -> int:
+    """Epoch-millisecond timestamp of Jan 1 00:00:00 UTC for ``year``."""
+    return int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
 
 _BINANCE_INTERVAL = {
     "1m": "1m", "5m": "5m", "15m": "15m",
@@ -334,8 +346,28 @@ class OandaAdapter(ExchangeAdapter):
                 rv = self._client.client.request(r)
             except V20Error as exc:
                 msg = str(exc)
-                if "invalid value" in msg.lower() or "future" in msg.lower():
+                low = msg.lower()
+                if "invalid value" in low or "future" in low:
                     break
+                # A dense window can exceed Oanda's 5000-candle response cap.
+                # Shrink the batch and retry the SAME cursor instead of looping
+                # forever on an identical over-sized request.
+                if "maximum value for 'count'" in low or "maximum value for count" in low:
+                    if batch_ms > tf_ms:
+                        batch_ms = max(tf_ms, batch_ms // 2)
+                        logger.warning(
+                            "Oanda count exceeded %s @ %s; shrinking batch to %d ms and retrying",
+                            symbol, cursor, batch_ms,
+                        )
+                        continue
+                    # Already at the minimum window — skip ahead one candle so
+                    # we can never wedge on a single timestamp.
+                    logger.error(
+                        "Oanda count exceeded %s @ %s at minimum batch; skipping ahead",
+                        symbol, cursor,
+                    )
+                    cursor = batch_end + tf_ms
+                    continue
                 logger.warning(
                     "Oanda V20Error %s @ %s: %s; sleeping 10s",
                     symbol,
@@ -406,6 +438,44 @@ def _resolve_from_ts(
     return int(last_ts) + _TF_MS[timeframe]
 
 
+def _fetch_with_retries(
+    adapter: ExchangeAdapter,
+    symbol: str,
+    timeframe: str,
+    from_ts: int,
+    to_ts: int,
+) -> Optional[List[Sequence[float]]]:
+    """Fetch one ``[from_ts, to_ts]`` window with bounded retries.
+
+    Returns the rows on success (possibly empty), or ``None`` if every attempt
+    failed — the caller then leaves a visible gap and resumes from the same
+    point on the next pass.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _FETCH_MAX_ATTEMPTS + 1):
+        if _shutdown.is_set():
+            return None
+        try:
+            return adapter.fetch_candles(symbol, timeframe, from_ts, to_ts)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < _FETCH_MAX_ATTEMPTS:
+                backoff = _FETCH_BACKOFF_BASE_S * (2 ** (attempt - 1))
+                logger.warning(
+                    "[%s/%s/%s] fetch failed (attempt %d/%d, retrying in %.1fs): %s",
+                    adapter.name, symbol, timeframe,
+                    attempt, _FETCH_MAX_ATTEMPTS, backoff, exc,
+                )
+                _shutdown.wait(backoff)
+    # Exhausted retries. Logged at ERROR so the gap is visible to the
+    # feed-health monitor / log scrapers rather than silently swallowed.
+    logger.error(
+        "[%s/%s/%s] fetch failed after %d attempts in [%d, %d]: %s",
+        adapter.name, symbol, timeframe, _FETCH_MAX_ATTEMPTS, from_ts, to_ts, last_exc,
+    )
+    return None
+
+
 def _collect_one(
     adapter: ExchangeAdapter,
     store: OhlcvStore,
@@ -414,6 +484,16 @@ def _collect_one(
     default_from_ts: int,
     to_ts: int,
 ) -> int:
+    """Fetch + persist a symbol **year-by-year** from its resume point to ``to_ts``.
+
+    Iterating one calendar year at a time bounds a worker's peak memory to
+    roughly a single year of candles and flushes progress to the store after
+    each year.  A restart (or an OOM-kill of this hard-capped container) then
+    loses at most the current in-progress year — it is re-fetched and
+    de-duplicated on ``append`` — instead of discarding the whole multi-year
+    backfill.  This is what makes the collector survive unattended for weeks
+    and lets the slow Oanda feed actually land data between restarts.
+    """
     if _shutdown.is_set():
         return 0
     from_ts = _resolve_from_ts(
@@ -426,66 +506,56 @@ def _collect_one(
         )
         return 0
 
-    t0 = time.monotonic()
-    rows = None
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, _FETCH_MAX_ATTEMPTS + 1):
+    tf_ms = _TF_MS[timeframe]
+    total_new = 0
+    start_year = _year_of_ms(from_ts)
+    end_year = _year_of_ms(to_ts)
+
+    for year in range(start_year, end_year + 1):
         if _shutdown.is_set():
-            return 0
-        try:
-            rows = adapter.fetch_candles(symbol, timeframe, from_ts, to_ts)
             break
+        # Clamp this year's window to the overall [from_ts, to_ts] range.
+        y_from = max(from_ts, _year_start_ms(year))
+        y_to = min(to_ts, _year_start_ms(year + 1) - tf_ms)
+        if y_from > y_to:
+            continue
+
+        t0 = time.monotonic()
+        rows = _fetch_with_retries(adapter, symbol, timeframe, y_from, y_to)
+        if rows is None:
+            # Gap left for this year; continue so later years still persist and
+            # the next pass retries this window from the same resume point.
+            continue
+        if not rows:
+            logger.debug(
+                "[%s/%s/%s] %d: no new rows", adapter.name, symbol, timeframe, year,
+            )
+            continue
+
+        try:
+            n = store.append(adapter.name, symbol, rows, timeframe)
         except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < _FETCH_MAX_ATTEMPTS:
-                backoff = _FETCH_BACKOFF_BASE_S * (2 ** (attempt - 1))
-                logger.warning(
-                    "[%s/%s/%s] fetch failed (attempt %d/%d, retrying in %.1fs): %s",
-                    adapter.name, symbol, timeframe,
-                    attempt, _FETCH_MAX_ATTEMPTS, backoff, exc,
-                )
-                _shutdown.wait(backoff)
-    if rows is None:
-        # Exhausted retries. Logged at ERROR so the gap is visible to the
-        # feed-health monitor / log scrapers rather than silently swallowed.
-        logger.error(
-            "[%s/%s/%s] fetch failed after %d attempts — leaving gap from %d: %s",
-            adapter.name, symbol, timeframe, _FETCH_MAX_ATTEMPTS, from_ts, last_exc,
-        )
-        return 0
+            logger.error(
+                "[%s/%s/%s] store.append failed for %d: %s",
+                adapter.name, symbol, timeframe, year, exc,
+            )
+            continue
 
-    if not rows:
-        logger.debug(
-            "[%s/%s/%s] no new rows from %d",
-            adapter.name, symbol, timeframe, from_ts,
+        total_new += n
+        dt = time.monotonic() - t0
+        logger.info(
+            "[%s/%s/%s] %d: %s → %s — %d new rows (%.1fs)",
+            adapter.name, symbol, timeframe, year,
+            datetime.fromtimestamp(y_from / 1000, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M"
+            ),
+            datetime.fromtimestamp(rows[-1][0] / 1000, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M"
+            ),
+            n, dt,
         )
-        return 0
 
-    try:
-        n = store.append(adapter.name, symbol, rows, timeframe)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "[%s/%s/%s] store.append failed: %s",
-            adapter.name, symbol, timeframe, exc,
-        )
-        return 0
-
-    dt = time.monotonic() - t0
-    logger.info(
-        "[%s/%s/%s] %s → %s — %d new rows (%.1fs)",
-        adapter.name,
-        symbol,
-        timeframe,
-        datetime.fromtimestamp(from_ts / 1000, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M"
-        ),
-        datetime.fromtimestamp(rows[-1][0] / 1000, tz=timezone.utc).strftime(
-            "%Y-%m-%d %H:%M"
-        ),
-        n,
-        dt,
-    )
-    return n
+    return total_new
 
 
 # ---------------------------------------------------------------------------

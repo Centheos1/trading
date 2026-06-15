@@ -51,6 +51,11 @@ services:
     # Allow 120 s for each child collector to flush Parquet + upload HDF5
     # to S3 before Docker force-kills the container.
     stop_grace_period: 120s
+    # Tick data is the protected priority — it cannot be re-fetched from any
+    # API, so the scheduler must keep this container's working set resident.
+    # The ohlcv-collector is hard-capped (see below) so it can never starve
+    # this service of memory on the shared host.
+    mem_reservation: 1g
     env_file: .env
     environment:
       PYTHONUNBUFFERED: "1"
@@ -129,6 +134,15 @@ services:
       dockerfile: data/Dockerfile
     container_name: trading-ohlcv-collector
     restart: unless-stopped
+    # Hard memory cap (cgroup limit). OHLCV is re-fetchable from the venue
+    # APIs, so it is the expendable workload here: if it ever overshoots, the
+    # cgroup OOM-killer reaps ONLY this container's process (which then resumes
+    # from the last persisted year), and the tick collector is never touched.
+    # memswap_limit == mem_limit disables swap for this container so it cannot
+    # drag the whole host into swap-thrashing (the original failure mode).
+    mem_limit: 1.25g
+    memswap_limit: 1.25g
+    cpus: "1.5"
     env_file: .env
     environment:
       PYTHONUNBUFFERED: "1"
@@ -140,7 +154,7 @@ services:
         --from-date ${OHLCV_FROM_DATE:-2020-01-01}
         --mode ${OHLCV_MODE:-continuous}
         --poll-interval ${OHLCV_POLL_INTERVAL:-3600}
-        --workers ${OHLCV_WORKERS:-4}
+        --workers ${OHLCV_WORKERS:-2}
         --data-store ${DATA_STORE:-s3}
         --s3-bucket ${S3_BUCKET:-}
         --log-level ${LOG_LEVEL:-INFO}

@@ -355,28 +355,24 @@ def collect_ohlcv_report(
         symbols = store.list_symbols(exchange, timeframe)
         for symbol in symbols:
             try:
-                # Read only the timestamp column for efficiency
-                path = store.path_for(exchange, symbol, timeframe)
-                if backend_root:
-                    df_ts = pd.read_parquet(path, columns=["timestamp"])
-                    file_size: Optional[int] = os.path.getsize(path) if os.path.exists(path) else None
-                else:
-                    df_ts = pd.read_parquet(
-                        path, columns=["timestamp"],
-                        storage_options={"anon": False}
-                    )
-                    file_size = None
+                # Go through the store API so this works regardless of layout
+                # (yearly-partitioned files, legacy single file, or a mix).
+                # ``read`` unions all year/legacy files and returns a sorted
+                # DatetimeIndex (UTC, tz-naive).
+                df = store.read(exchange, symbol, timeframe)
 
-                if df_ts.empty:
+                if df.empty:
                     results.append(OhlcvSymbolHealth(
                         exchange=exchange, symbol=symbol, timeframe=timeframe,
                         row_count=0, first_ts_ms=None, last_ts_ms=None,
-                        file_size_bytes=file_size, gap_count=0,
+                        file_size_bytes=None, gap_count=0,
                         largest_gap_minutes=0.0, ok=True,
                     ))
                     continue
 
-                ts_sorted = sorted(df_ts["timestamp"].tolist())
+                ts_sorted = sorted(
+                    int(t) for t in (df.index.values.astype("int64") // 1_000_000)
+                )
                 row_count = len(ts_sorted)
                 first_ts = int(ts_sorted[0])
                 last_ts = int(ts_sorted[-1])
@@ -388,7 +384,7 @@ def collect_ohlcv_report(
                     exchange=exchange, symbol=symbol, timeframe=timeframe,
                     row_count=row_count,
                     first_ts_ms=first_ts, last_ts_ms=last_ts,
-                    file_size_bytes=file_size,
+                    file_size_bytes=None,
                     gap_count=len(gaps),
                     largest_gap_minutes=largest,
                     unexpected_gaps=gaps[:5],  # top 5 for display
