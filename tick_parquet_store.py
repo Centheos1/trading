@@ -84,6 +84,18 @@ _DEPTH_COLS = ["timestamp", "side", "price", "quantity"]
 # genuinely unreadable range.
 _MAX_READ_FAILURES: int = 5
 
+# Maximum HDF5 rows to materialise in one read. A normal 15-minute flush moves
+# far fewer rows than this, so steady-state behaviour is unchanged — but if the
+# mirror has fallen far behind (a stalled flusher, or a manual --backfill-parquet
+# over many days) the unflushed range can be hundreds of millions of rows.
+# Reading that in a single np.asarray() call tried to allocate 22.8 GiB during
+# the 2026-06 recovery and crashed with MemoryError. Draining in bounded chunks
+# keeps peak read memory at ~CHUNK × ncols × 8 bytes (≈64 MB for trades), so the
+# backfill makes steady forward progress on a small instance. The watermark is
+# advanced and persisted after each chunk so a crash mid-backfill resumes from
+# the last completed chunk rather than restarting.
+_FLUSH_CHUNK_ROWS: int = 2_000_000
+
 
 def _columns_for(dataset: str) -> List[str]:
     return _TRADES_COLS if dataset == "trades" else _DEPTH_COLS
@@ -397,53 +409,69 @@ class TickParquetStore:
         if start >= end:
             return 0
 
+        # Drain [start, end) in bounded chunks. Reading the whole range at once
+        # is fine for a steady-state flush (a few thousand rows) but blows up
+        # memory when the mirror has fallen days behind — see _FLUSH_CHUNK_ROWS.
         fail_key = f"{exchange}.{symbol.upper()}.{dataset}"
-        try:
-            arr = np.asarray(dataset_obj[start:end])
-        except OSError as exc:
-            fails = self._read_failures.get(fail_key, 0) + 1
-            self._read_failures[fail_key] = fails
-            if fails < _MAX_READ_FAILURES:
-                # Treat as transient: do NOT advance the watermark, so the
-                # next flush retries the same range. Losing rows from the
-                # durable mirror on a momentary error would defeat its
-                # purpose.
-                logger.warning(
-                    "%s/%s/%s rows %d:%d HDF5 read failed (attempt %d/%d, "
-                    "will retry next flush): %s",
-                    exchange, symbol, dataset, start, end,
-                    fails, _MAX_READ_FAILURES, exc,
+        written = 0
+        chunk_start = start
+        while chunk_start < end:
+            chunk_end = min(chunk_start + _FLUSH_CHUNK_ROWS, end)
+            try:
+                arr = np.asarray(dataset_obj[chunk_start:chunk_end])
+            except (OSError, MemoryError) as exc:
+                fails = self._read_failures.get(fail_key, 0) + 1
+                self._read_failures[fail_key] = fails
+                if fails < _MAX_READ_FAILURES:
+                    # Treat as transient: do NOT advance the watermark past this
+                    # chunk and stop here so the next flush retries the same
+                    # range. Losing rows from the durable mirror on a momentary
+                    # error would defeat its purpose.
+                    logger.warning(
+                        "%s/%s/%s rows %d:%d HDF5 read failed (attempt %d/%d, "
+                        "will retry next flush): %s",
+                        exchange, symbol, dataset, chunk_start, chunk_end,
+                        fails, _MAX_READ_FAILURES, exc,
+                    )
+                    return written
+                # Persistent failure: skip past the poisoned chunk as a last
+                # resort so the flusher makes forward progress, then continue
+                # with the next chunk (later rows may still be readable). Logged
+                # at ERROR because these rows are dropped from Parquet (the HDF5
+                # may still hold them for offline recovery).
+                logger.error(
+                    "%s/%s/%s rows %d:%d unreadable after %d attempts — "
+                    "SKIPPING (data lost from Parquet mirror; HDF5 may still "
+                    "hold it): %s",
+                    exchange, symbol, dataset, chunk_start, chunk_end,
+                    fails, exc,
                 )
-                return 0
-            # Persistent failure: skip past the poisoned range as a last
-            # resort so the flusher makes forward progress. Logged at ERROR
-            # because these rows are dropped from Parquet (the HDF5 may still
-            # hold them for offline recovery).
-            logger.error(
-                "%s/%s/%s rows %d:%d unreadable after %d attempts — SKIPPING "
-                "(data lost from Parquet mirror; HDF5 may still hold it): %s",
-                exchange, symbol, dataset, start, end, fails, exc,
-            )
-            self._read_failures[fail_key] = 0
-            self._watermarks.set(exchange, symbol, dataset, end)
-            return 0
+                self._read_failures[fail_key] = 0
+                self._advance_watermark(exchange, symbol, dataset, chunk_end)
+                chunk_start = chunk_end
+                continue
 
-        # Successful read — clear any prior transient-failure streak.
-        if self._read_failures.get(fail_key):
-            self._read_failures[fail_key] = 0
+            # Successful read — clear any prior transient-failure streak.
+            if self._read_failures.get(fail_key):
+                self._read_failures[fail_key] = 0
 
-        if arr.size == 0:
-            self._watermarks.set(exchange, symbol, dataset, end)
-            return 0
+            if arr.size:
+                df = self._array_to_df(arr, dataset)
+                if not df.empty:
+                    written += self._append_by_day(df, exchange, symbol, dataset)
 
-        df = self._array_to_df(arr, dataset)
-        if df.empty:
-            self._watermarks.set(exchange, symbol, dataset, end)
-            return 0
+            # Persist progress after every chunk so a crash mid-backfill resumes
+            # from here; per-day de-duplication keeps any re-read idempotent.
+            self._advance_watermark(exchange, symbol, dataset, chunk_end)
+            chunk_start = chunk_end
 
-        written = self._append_by_day(df, exchange, symbol, dataset)
-        self._watermarks.set(exchange, symbol, dataset, end)
         return written
+
+    def _advance_watermark(
+        self, exchange: str, symbol: str, dataset: str, row: int
+    ) -> None:
+        self._watermarks.set(exchange, symbol, dataset, row)
+        self._watermarks.flush()
 
     @staticmethod
     def _array_to_df(arr: np.ndarray, dataset: str) -> pd.DataFrame:

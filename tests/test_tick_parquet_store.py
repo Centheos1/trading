@@ -219,6 +219,51 @@ class TestRotationResetsWatermark(unittest.TestCase):
             self.assertEqual(len(df), 70)  # 100 - 30, not re-read from 0
 
 
+class TestChunkedFlush(unittest.TestCase):
+    """A large unflushed range must drain in bounded chunks, never in one
+    giant np.asarray() (the 2026-06 22.8 GiB MemoryError)."""
+
+    def test_large_range_drains_in_bounded_chunks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TickParquetStore(root=os.path.join(tmp, "ticks"))
+            margin = tps._SAFETY_MARGIN["trades"]
+            unflushed = 50
+            n = margin + unflushed
+            max_width_seen = {"w": 0}
+
+            class _BigDataset:
+                shape = (n, 4)
+
+                def __getitem__(self, slc):
+                    start = slc.start or 0
+                    stop = slc.stop if slc.stop is not None else n
+                    k = max(0, stop - start)
+                    max_width_seen["w"] = max(max_width_seen["w"], k)
+                    return np.array(
+                        [_trade_row(_DAY0 + (start + i) * 1000) for i in range(k)],
+                        dtype="float64",
+                    )
+
+            original = tps._FLUSH_CHUNK_ROWS
+            tps._FLUSH_CHUNK_ROWS = 7
+            try:
+                written = store._flush_dataset(
+                    _BigDataset(), "binance", "BTCUSDT", "trades"
+                )
+            finally:
+                tps._FLUSH_CHUNK_ROWS = original
+
+            # All unflushed rows landed, watermark reached the end, and no single
+            # read ever exceeded the chunk cap.
+            self.assertEqual(written, unflushed)
+            self.assertEqual(
+                store._watermarks.get("binance", "BTCUSDT", "trades"), n - margin
+            )
+            self.assertLessEqual(max_width_seen["w"], 7)
+            df = store.read("BTCUSDT", "trades", exchange="binance")
+            self.assertEqual(len(df), unflushed)
+
+
 class TestCorruptParquetQuarantine(unittest.TestCase):
 
     def test_corrupt_daily_file_is_quarantined_not_overwritten(self):
