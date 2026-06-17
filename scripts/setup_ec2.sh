@@ -176,6 +176,19 @@ if [ -f scripts/s3_sync.sh ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 8. Install hourly pipeline-health alarm (runs AFTER s3_sync)
+# ---------------------------------------------------------------------------
+# run-parts executes /etc/cron.hourly/* in lexical order, so the "zz_" prefix
+# ensures the health check runs after s3_sync each hour. It asserts the Parquet
+# mirror is producing RECENT data (the guardrail for the 2026-06 freeze) and
+# alerts on failure — see scripts/pipeline_health.sh and docs/DEPLOYMENT.md.
+if [ -f scripts/pipeline_health.sh ]; then
+    sudo cp scripts/pipeline_health.sh /etc/cron.hourly/zz_pipeline_health
+    sudo chmod +x /etc/cron.hourly/zz_pipeline_health
+    log "Hourly pipeline-health alarm installed at /etc/cron.hourly/zz_pipeline_health."
+fi
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 log "Setup complete."

@@ -484,9 +484,14 @@ def load_ticks(
             )
         grp = f[symbol]
 
-        trades_arr = grp["trades"][:] if "trades" in grp else np.zeros((0, 4))
-        if max_trades is not None:
-            trades_arr = trades_arr[:max_trades]
+        # Read chunk-by-chunk so a single corrupt/truncated chunk (the
+        # collector uploads to S3 mid-write) is skipped rather than aborting
+        # the whole read — matches the depth datasets below.
+        trades_arr = (
+            _safe_read_2d(grp["trades"], max_trades)
+            if "trades" in grp
+            else np.zeros((0, 4))
+        )
         trades = pd.DataFrame(
             trades_arr, columns=["timestamp", "price", "quantity", "is_buyer_maker"]
         )
@@ -881,6 +886,7 @@ __all__ = [
     "load_ohlcv",
     "list_ohlcv",
     "load_ticks",
+    "load_ticks_parquet",
     "latest_book",
     "plot_ohlcv",
     "plot_equity_curve",

@@ -13,12 +13,15 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/app
 EnvironmentFile=/app/.env
+# --max-h5-gb is intentionally omitted: collect_ticks.py defaults it from
+# $MAX_H5_GB (set via EnvironmentFile=/app/.env), else 8 GB — so the rotation
+# cap is tuned from .env alone, consistent with docker-compose. See
+# _default_max_h5_gb() in collect_ticks.py and docs/DEPLOYMENT.md.
 ExecStart=/app/.venv/bin/python /app/collect_ticks.py \
     --symbol %i \
     --s3-bucket ${S3_BUCKET} \
     --data-dir data \
     --parquet-flush-interval 900 \
-    --max-h5-gb 8 \
     --log-level INFO
 # Restart on any non-zero exit — including EXIT_ROTATE (75) which is
 # emitted by collect_ticks.py after archiving a full HDF5 file.

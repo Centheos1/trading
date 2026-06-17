@@ -1,0 +1,34 @@
+---
+description: Core engineering quality bar for this repo (data-pipeline reliability + general code quality)
+alwaysApply: true
+---
+
+# Coding Standards (read `docs/CODING_STANDARDS.md` for the full version)
+
+Non-negotiables on every change:
+
+1. **Fail loud, never silent.** No `except: pass`. No success-shaped return on
+   failure. Log at WARNING/ERROR with enough context to diagnose without a debugger.
+2. **No silent data loss.** Any skip/drop/dedupe/truncate must be counted and
+   logged; quarantine bad input rather than discard it.
+3. **Persistent state must self-heal.** Watermarks/offsets/caches must detect when
+   their assumption broke (file rotated, schema changed, counter reset) and
+   recover idempotently — never freeze. (See the rotation fix in
+   `tick_parquet_store._flush_dataset`.)
+4. **Treat external files as possibly corrupt/mid-write.** Read defensively
+   (chunk-by-chunk, per-chunk error handling); quarantine, don't overwrite.
+5. **Every behaviour change ships with a test — including the failure path you
+   fixed.** A bug fix without a regression test is not done.
+6. **Verify pipelines produce *recent* data, not just *some* data.** "Files exist
+   in S3" ≠ "it works."
+7. **Keep changes narrow; leave the tree green; update docs you invalidate**
+   (especially `docs/DEPLOYMENT.md` for any operational change).
+
+Source-of-truth order: `strategy.md` → `implementation_plan.md` → tests →
+`docs/AGENT_STRATEGY_RULES.md` (strategy/hot-path) + `docs/CODING_STANDARDS.md`
+(general + data/infra) → `docs/TESTING_GUIDE.md`.
+
+Definition of Done and the stub policy: `docs/AGENT_STRATEGY_RULES.md` §12 / §3.3b.
+
+When unsure, ask — a wrong assumption in data-collection code can lose days of
+unrecoverable market data.

@@ -136,6 +136,9 @@ docker compose --profile ohlcv logs --tail=20 ohlcv-collector | grep -v credenti
 | Docker build cache accumulates (4–8 GB per build) | `docker system prune` runs after every `docker compose build` |
 | No daemon-level log cap | `/etc/docker/daemon.json` sets 50m/3-file default for all containers |
 | Compose log rotation only applies on container recreate | Daemon config applies immediately system-wide |
+| **Parquet mirror silently froze after HDF5 rotation (2026-06)** — a rotated/replaced HDF5 stranded the flush watermark above the new file's row count, so `flush_from_h5` became a permanent no-op while the container stayed *healthy* and the HDF5 kept uploading | `tick_parquet_store._flush_dataset` now self-heals: a watermark above the current row count is treated as a rotation and re-flushes from row 0 (regression test: `tests/test_tick_parquet_store.py::TestRotationResetsWatermark`). Plus the mandatory **Data pipeline health checks** below |
+| `s3fs`/`aiobotocore` vs `botocore` version skew broke S3 Parquet listing | Keep the AWS dependency matrix compatible; verify after any bump (see `docs/CODING_STANDARDS.md` §5) |
+| "Files exist in S3" was mistaken for "pipeline works" while data was 2 weeks stale | Health checks below assert the **latest day is current** and **row counts advance**, not merely that files exist |
 
 ---
 
@@ -551,6 +554,12 @@ docker compose ps
 
 ### Update after a code push
 
+> Code is baked into the Docker image (the `data` service mounts only `./data`
+> and `./logs`, not the source). A bare `docker restart` re-runs the **old**
+> image — you must `build` then `up -d` to recreate the container. (The systemd
+> path in `scripts/collector@.service` runs source directly from `/app`, so there
+> a `git pull` + `systemctl restart collector@<SYMBOL>` is enough.)
+
 ```bash
 cd ~/app/trading
 git pull
@@ -561,6 +570,89 @@ docker compose --profile ohlcv build ohlcv-collector
 docker system prune -f --filter "until=1h"
 docker compose --profile ohlcv up -d --no-deps --force-recreate ohlcv-collector
 ```
+
+**Then run the Data pipeline health checks below.** A deploy is not complete
+until they pass — "containers are up" is not "the pipeline works."
+
+### Data pipeline health checks (MANDATORY after every deploy and rotation)
+
+These assert the pipeline is producing **recent** data and is **advancing** —
+the checks that would have caught the 2026-06 freeze on day one. Run all four.
+
+```bash
+cd ~/app/trading
+TODAY=$(date -u +%Y-%m-%d); YDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
+
+# 1. Latest Parquet day is current (today or yesterday), per dataset.
+for ds in trades depth_snapshots depth_updates; do
+  echo "== $ds =="
+  aws s3 ls "s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/$ds/" | tail -3
+done
+# FAIL if the newest file is older than $YDAY → flush or sync is stalled.
+
+# 2. The flush watermark is sane (not stranded above the live row count).
+docker compose exec data python3 -c "
+import json, h5py
+wm = json.load(open('/app/data/ticks/.watermarks.json'))
+f = h5py.File('/app/data/ticks/BTCUSDT_ticks.h5','r',locking=False)
+for k,v in wm.items():
+    ds = k.split('.')[-1]
+    n = f['BTCUSDT'][ds].shape[0] if ('BTCUSDT' in f and ds in f['BTCUSDT']) else 0
+    flag = 'STALE>rows!' if v > n else 'ok'
+    print(f'{k}: watermark={v} rows={n} {flag}')
+"
+# FAIL if any line shows STALE>rows! (self-heal should clear it on next flush;
+# if it persists, the deployed code predates the rotation fix).
+
+# 3. The flush thread is actually doing work (not a silent no-op).
+docker compose logs data --since 30m | grep -E 'Parquet flush|re-flushing from row 0' | tail
+# Expect periodic "Parquet flush ..." lines (every --parquet-flush-interval, 15m).
+
+# 4. The hourly S3 sync cron is alive and succeeding.
+tail -n 20 ~/app/trading/logs/s3_sync.log
+# Expect a recent "[OK] ticks-parquet/ tree synced" line within the last hour.
+ls -l /etc/cron.hourly/s3_sync
+```
+
+If any check fails, see "Recover a stalled / gapped Parquet mirror" in
+Troubleshooting before assuming the deploy succeeded.
+
+### Automated staleness alarm (runs hourly — no manual action needed)
+
+`scripts/pipeline_health.sh` automates checks #1–#4 and runs **every hour**
+(installed by `setup_ec2.sh` at `/etc/cron.hourly/zz_pipeline_health`, after
+`s3_sync`). It runs the in-container check
+(`collect_ticks.py --health-check`), confirms the S3 sync cron is alive, and on
+any problem logs at ERROR, optionally fires an alert, and exits non-zero (so
+cron mail surfaces it). This is the standing guardrail against the freeze — you
+should never again learn about a stalled mirror two weeks late.
+
+Install / refresh it on a running instance after a code pull:
+
+```bash
+cd ~/app/trading
+sudo cp scripts/pipeline_health.sh /etc/cron.hourly/zz_pipeline_health
+sudo chmod +x /etc/cron.hourly/zz_pipeline_health
+
+# Run it once now to confirm it works; tail the result.
+sudo bash /etc/cron.hourly/zz_pipeline_health; echo "exit=$?"
+tail -n 30 ~/app/trading/logs/pipeline_health.log
+```
+
+Optional alerting (set in `.env`; otherwise failures surface via cron mail and
+`logs/pipeline_health.log` only):
+
+| `.env` variable | Effect |
+|---|---|
+| `ALERT_WEBHOOK_URL` | POST `{"text": "..."}` to a Slack/Discord-style webhook on failure |
+| `ALERT_SNS_TOPIC_ARN` | `aws sns publish` on failure (add `sns:Publish` to `TradingCollectorRole`) |
+| `HEALTH_MAX_STALENESS_HOURS` | Grace after 00:00 UTC before yesterday's day-file is stale (default 2) |
+| `S3_SYNC_MAX_AGE_MIN` | Max age of a successful `s3_sync` run before its cron is flagged dead (default 120) |
+
+> The alarm runs the check inside the collector container, so "container not
+> running" is itself reported as a CRITICAL issue — the most important signal of
+> all. A transient HDF5 open contention could in rare cases cause a one-off
+> false alarm; a real freeze stays failing every hour.
 
 ### Check logs after a restart
 
@@ -765,6 +857,54 @@ docker compose logs data --tail 50 | grep -E 'rotation|archive'
 aws s3 ls s3://trading-data-centheos/ticks/archive/binance/ | tail
 ```
 
+> **Rotation is NOT automatically safe for the Parquet mirror — this is the
+> 2026-06 freeze.** The flush watermark is an absolute HDF5 row index. When the
+> file rotates to a fresh empty one (row 0), a stale watermark above the new row
+> count used to make the flush a permanent no-op: the container stayed *healthy*,
+> the HDF5 kept growing and uploading, but the Parquet mirror silently stopped
+> for two weeks. `tick_parquet_store._flush_dataset` now self-heals (watermark >
+> current rows ⇒ re-flush from row 0), but you **must still run the Data pipeline
+> health checks below after every rotation and every deploy** — the
+> self-heal recovers the *current* file forward; gap days live in the archives
+> and need a manual backfill (see "Recover a stalled / gapped Parquet mirror").
+
+### Recover a stalled / gapped Parquet mirror
+
+Symptoms: health check #1 shows the newest Parquet day is old; #2 shows a
+`STALE>rows!` watermark; or the mirror simply has gaps (the 2026-06 incident).
+
+1. **Make sure the deployed code has the rotation self-heal.** Pull latest and
+   redeploy (see "Update after a code push"). On the next flush, a stranded
+   watermark logs `... re-flushing from row 0` and the mirror resumes for the
+   **current** live HDF5.
+
+2. **Backfill the current live file immediately** (don't wait for the timer):
+
+```bash
+docker compose exec data python collect_ticks.py --backfill-parquet \
+    --symbol BTCUSDT --data-dir /app/data
+# then push to S3 (or wait for the hourly cron):
+sudo bash /etc/cron.hourly/s3_sync
+```
+
+3. **Backfill gap days from the rotated archives.** Days between the freeze and
+   the start of the current file live in `ticks/archive/`. Download each and
+   flush into an *isolated* root so the live watermark is untouched, then sync:
+
+```bash
+aws s3 ls s3://trading-data-centheos/ticks/archive/binance/         # list archives
+aws s3 cp s3://trading-data-centheos/ticks/archive/binance/<file>.h5 /tmp/arch.h5
+docker compose exec data python collect_ticks.py --backfill-parquet \
+    --symbol BTCUSDT --h5-path /tmp/arch.h5 --parquet-root /tmp/backfill
+aws s3 sync /tmp/backfill/binance/BTCUSDT \
+    s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT
+```
+
+> A mid-write HDF5 *snapshot* may have an unreadable chunk index for some
+> datasets; `flush_from_h5` skips unreadable ranges and logs them at ERROR
+> rather than failing. The archived/closed files are self-consistent and recover
+> fully. Re-running any backfill is safe — daily Parquet writes de-duplicate.
+
 ### EC2 disk usage budget
 
 With the rotation + Parquet-cleanup design, expected steady-state local
@@ -778,3 +918,26 @@ disk usage per symbol:
 
 For 2 symbols (BTCUSDT + ETHUSDT) peak local usage is ~16 GB HDF5 +
 ~1–2 GB Parquet. A 30–50 GB EC2 root volume leaves comfortable headroom.
+
+### HDF5 rotation cadence (`MAX_H5_GB`)
+
+Rotation exists to keep local disk bounded. With the watermark self-heal in
+place, rotation is safe for the Parquet mirror — but the cap still needs to fit
+the disk, because the *opposite* mistake (setting it too high) fills the volume
+and corrupts the live HDF5, the exact failure rotation is meant to prevent.
+
+- **One knob, both deploy paths.** `MAX_H5_GB` in `.env` drives the cap for
+  both `docker compose` (`--max-h5-gb ${MAX_H5_GB:-8}`) and the direct/systemd
+  invocation (`collect_ticks.py` defaults `--max-h5-gb` from `$MAX_H5_GB`, else
+  8). Don't hardcode it in the systemd unit.
+- **Sizing rule.** Keep `n_symbols × MAX_H5_GB × 1.3` below the data volume's
+  free space (the ×1.3 covers the Parquet mirror + the snapshot/archive temp
+  copy made during rotation). The collector logs this budget at startup and
+  emits a WARNING if it would not fit — check `docker compose logs data | grep
+  "Disk budget"` after a deploy.
+- **Default is 8 GB** on a 30 GB root with 2 symbols (tested). Lower it (e.g. 5)
+  to rotate more often on a small disk; raise it (e.g. 16) only after growing
+  the EBS volume, to rotate less often and reduce gap-day backfills.
+- **More frequent rotation = more archive files = more gap-day backfills** if a
+  freeze ever recurs; less frequent rotation = larger live files and longer S3
+  snapshot uploads. The hourly health alarm covers either choice.

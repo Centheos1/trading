@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -86,6 +87,131 @@ _MAX_READ_FAILURES: int = 5
 
 def _columns_for(dataset: str) -> List[str]:
     return _TRADES_COLS if dataset == "trades" else _DEPTH_COLS
+
+
+# ---------------------------------------------------------------------------
+# Pipeline health evaluation
+# ---------------------------------------------------------------------------
+#
+# The 2026-06 freeze was invisible because nothing asserted the mirror was
+# *advancing* — the container was "healthy", the HDF5 grew, and S3 had files,
+# yet no new Parquet day had been written for two weeks. This pure function is
+# the guardrail: given the current HDF5 row counts, the stored watermarks, and
+# the newest Parquet day on disk, it decides whether the pipeline is producing
+# RECENT data. It does no I/O so it is trivially unit-testable; the collector
+# and the host cron wrapper feed it real measurements.
+
+
+@dataclass(frozen=True)
+class PipelineHealth:
+    """Result of :func:`evaluate_pipeline_health`.
+
+    ``ok`` is True only when there are zero issues. ``issues`` are
+    operator-actionable problem strings (logged at ERROR / alerted on);
+    ``summary`` are per-dataset status lines for the INFO log.
+    """
+
+    ok: bool
+    issues: List[str] = field(default_factory=list)
+    summary: List[str] = field(default_factory=list)
+
+
+def evaluate_pipeline_health(
+    symbol: str,
+    *,
+    exchange: str = "binance",
+    n_rows: Dict[str, Optional[int]],
+    watermarks: Dict[str, int],
+    latest_parquet_day: Dict[str, Optional[str]],
+    now: datetime,
+    max_staleness_hours: float = 2.0,
+    datasets: Iterable[str] = DATASETS,
+) -> PipelineHealth:
+    """Decide whether the HDF5 → Parquet mirror is healthy and current.
+
+    Parameters
+    ----------
+    n_rows
+        ``dataset -> current HDF5 row count`` (``None`` if the HDF5 file or the
+        dataset within it is absent — e.g. collector not yet writing it).
+    watermarks
+        ``dataset -> last-flushed HDF5 row index`` from ``.watermarks.json``.
+    latest_parquet_day
+        ``dataset -> "YYYY-MM-DD"`` of the newest local Parquet day-file, or
+        ``None`` if the mirror has never written that dataset.
+    now
+        Current UTC time (injected so the check is deterministic / testable).
+    max_staleness_hours
+        Grace period just after 00:00 UTC during which yesterday's day-file is
+        still acceptable (today's file appears on the first flush of the day).
+
+    Detects the failure modes that have actually occurred:
+      * stranded watermark above the live row count (rotation not yet healed);
+      * no Parquet day-file at all (mirror never flushed);
+      * newest Parquet day older than today (flush or S3 sync stalled — the
+        2026-06 freeze).
+    """
+    sym = symbol.upper()
+    issues: List[str] = []
+    summary: List[str] = []
+
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    hours_into_day = (now - midnight).total_seconds() / 3600.0
+    today = now.date()
+
+    for d in datasets:
+        nr = n_rows.get(d)
+        wm = int(watermarks.get(d, 0))
+        day = latest_parquet_day.get(d)
+        summary.append(
+            f"{exchange}/{sym}/{d}: rows="
+            f"{'?' if nr is None else nr} watermark={wm} "
+            f"latest_parquet={day or 'none'}"
+        )
+
+        if nr is None:
+            issues.append(
+                f"{exchange}/{sym}/{d}: HDF5 dataset absent — collector not "
+                f"writing {d} (or the HDF5 file is missing/unreadable)"
+            )
+            continue
+
+        if wm > nr:
+            issues.append(
+                f"{exchange}/{sym}/{d}: watermark {wm} exceeds HDF5 row count "
+                f"{nr} — rotation/reset not yet healed (the next flush should "
+                f"reset it to 0; if it persists, the deployed code predates the "
+                f"rotation self-heal)"
+            )
+
+        if day is None:
+            issues.append(
+                f"{exchange}/{sym}/{d}: no Parquet day-files on disk — the "
+                f"mirror has never flushed this dataset"
+            )
+            continue
+
+        try:
+            day_date = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError:
+            issues.append(
+                f"{exchange}/{sym}/{d}: unparseable Parquet day-file name "
+                f"{day!r}"
+            )
+            continue
+
+        age_days = (today - day_date).days
+        stale = age_days >= 2 or (
+            age_days == 1 and hours_into_day > max_staleness_hours
+        )
+        if stale:
+            issues.append(
+                f"{exchange}/{sym}/{d}: newest Parquet day {day} is stale "
+                f"(age {age_days}d, {hours_into_day:.1f}h into the UTC day) — "
+                f"the flush thread or the S3 sync has stalled"
+            )
+
+    return PipelineHealth(ok=not issues, issues=issues, summary=summary)
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +285,32 @@ class TickParquetStore:
     ) -> Path:
         return self._dataset_dir(exchange, symbol, dataset) / f"{day}.parquet"
 
+    # -- introspection (for health checks / monitoring) -----------------
+
+    def watermark(self, exchange: str, symbol: str, dataset: str) -> int:
+        """Last-flushed HDF5 row index for this dataset (0 if never flushed)."""
+        return self._watermarks.get(exchange, symbol, dataset)
+
+    def latest_parquet_date(
+        self, exchange: str, symbol: str, dataset: str
+    ) -> Optional[str]:
+        """Newest ``YYYY-MM-DD`` day-file on disk, or ``None`` if none exist.
+
+        Reflects only the local mirror (what the flush thread has written),
+        independent of whether the S3 sync has run.
+        """
+        ddir = self._dataset_dir(exchange, symbol, dataset)
+        if not ddir.is_dir():
+            return None
+        days: List[str] = []
+        for p in ddir.glob("*.parquet"):
+            try:
+                datetime.strptime(p.stem, "%Y-%m-%d")
+            except ValueError:
+                continue
+            days.append(p.stem)
+        return max(days) if days else None
+
     # -- flush ----------------------------------------------------------
 
     def flush_from_h5(
@@ -223,6 +375,25 @@ class TickParquetStore:
         margin = _SAFETY_MARGIN.get(dataset, 0)
         end = max(0, n_rows - margin)
         start = self._watermarks.get(exchange, symbol, dataset)
+
+        # Rotation / replacement detection. Within the lifetime of one HDF5
+        # file the row count only ever grows (the C++ TickStore appends), so a
+        # stored watermark beyond the current row count means the live file was
+        # replaced with a fresh one starting at row 0 — e.g. the --max-h5-gb
+        # rotation in collect_ticks (archive + delete + restart), a redeploy,
+        # or a fresh data volume. Without this reset the watermark stays pinned
+        # at the pre-rotation row index, `start >= end` holds forever, and the
+        # Parquet mirror silently freezes (the 2026-06-01 stall). Re-flush from
+        # row 0; per-day de-duplication keeps the re-read idempotent.
+        if start > n_rows:
+            logger.warning(
+                "%s/%s/%s watermark %d exceeds current row count %d — HDF5 "
+                "rotated/reset; re-flushing from row 0",
+                exchange, symbol, dataset, start, n_rows,
+            )
+            start = 0
+            self._watermarks.set(exchange, symbol, dataset, 0)
+
         if start >= end:
             return 0
 

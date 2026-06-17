@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -26,7 +27,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import tick_parquet_store as tps
-from tick_parquet_store import TickParquetStore
+from tick_parquet_store import TickParquetStore, evaluate_pipeline_health
 
 
 def _write_h5_trades(path: str, symbol: str, rows: np.ndarray) -> None:
@@ -155,6 +156,69 @@ class TestReadFailureWatermark(unittest.TestCase):
             )
 
 
+class TestRotationResetsWatermark(unittest.TestCase):
+    """A rotated/replaced HDF5 (row count below the watermark) must reset the
+    watermark and re-flush, not freeze the mirror."""
+
+    def test_watermark_reset_when_file_rotated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TickParquetStore(root=os.path.join(tmp, "ticks"))
+            # Stale pre-rotation watermark far beyond the fresh file's rows.
+            store._watermarks.set("binance", "BTCUSDT", "trades", 45_000_000)
+
+            n = tps._SAFETY_MARGIN["trades"] + 20  # fresh, small file
+
+            class _FreshDataset:
+                shape = (n, 4)
+
+                def __getitem__(self, slc):
+                    start = slc.start or 0
+                    stop = slc.stop if slc.stop is not None else n
+                    k = max(0, stop - start)
+                    return np.array(
+                        [_trade_row(_DAY0 + (start + i) * 1000) for i in range(k)],
+                        dtype="float64",
+                    )
+
+            written = store._flush_dataset(
+                _FreshDataset(), "binance", "BTCUSDT", "trades"
+            )
+            # Re-flushed from row 0 (would be 0 if the stale watermark stuck).
+            self.assertEqual(written, 20)
+            self.assertEqual(
+                store._watermarks.get("binance", "BTCUSDT", "trades"),
+                n - tps._SAFETY_MARGIN["trades"],
+            )
+
+    def test_growing_file_does_not_reset(self):
+        """A normally growing file (watermark below row count) is untouched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TickParquetStore(root=os.path.join(tmp, "ticks"))
+            n = tps._SAFETY_MARGIN["trades"] + 100
+            store._watermarks.set("binance", "BTCUSDT", "trades", 30)
+
+            class _GrowingDataset:
+                shape = (n, 4)
+
+                def __getitem__(self, slc):
+                    start = slc.start or 0
+                    stop = slc.stop if slc.stop is not None else n
+                    k = max(0, stop - start)
+                    return np.array(
+                        [_trade_row(_DAY0 + (start + i) * 1000) for i in range(k)],
+                        dtype="float64",
+                    )
+
+            store._flush_dataset(_GrowingDataset(), "binance", "BTCUSDT", "trades")
+            # Flushed only rows 30..(n-margin), i.e. resumed from the watermark.
+            self.assertEqual(
+                store._watermarks.get("binance", "BTCUSDT", "trades"),
+                n - tps._SAFETY_MARGIN["trades"],
+            )
+            df = store.read("BTCUSDT", "trades", exchange="binance")
+            self.assertEqual(len(df), 70)  # 100 - 30, not re-read from 0
+
+
 class TestCorruptParquetQuarantine(unittest.TestCase):
 
     def test_corrupt_daily_file_is_quarantined_not_overwritten(self):
@@ -194,6 +258,96 @@ class TestCorruptParquetQuarantine(unittest.TestCase):
             # And the live file is now readable again with the fresh rows.
             df = store.read("BTCUSDT", "trades", exchange="binance")
             self.assertEqual(len(df), 40)
+
+
+class TestLatestParquetDate(unittest.TestCase):
+
+    def test_none_when_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TickParquetStore(root=os.path.join(tmp, "ticks"))
+            self.assertIsNone(
+                store.latest_parquet_date("binance", "BTCUSDT", "trades")
+            )
+
+    def test_returns_max_day_ignoring_junk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TickParquetStore(root=os.path.join(tmp, "ticks"))
+            ddir = store._dataset_dir("binance", "BTCUSDT", "trades")
+            ddir.mkdir(parents=True)
+            for name in ("2026-06-01.parquet", "2026-06-03.parquet",
+                         "2026-05-30.parquet", "not-a-date.parquet"):
+                (ddir / name).write_bytes(b"")
+            self.assertEqual(
+                store.latest_parquet_date("binance", "BTCUSDT", "trades"),
+                "2026-06-03",
+            )
+
+
+class TestEvaluatePipelineHealth(unittest.TestCase):
+    """Pure health-evaluation logic — the 2026-06 freeze guardrail."""
+
+    NOW = datetime(2026, 6, 17, 5, 0, tzinfo=timezone.utc)  # 5h into the UTC day
+
+    def _eval(self, *, n_rows=None, watermarks=None, latest=None, now=None,
+              max_staleness_hours=2.0):
+        ds = tps.DATASETS
+        return evaluate_pipeline_health(
+            "BTCUSDT",
+            exchange="binance",
+            n_rows=n_rows if n_rows is not None else {d: 1000 for d in ds},
+            watermarks=watermarks if watermarks is not None else {d: 990 for d in ds},
+            latest_parquet_day=(
+                latest if latest is not None else {d: "2026-06-17" for d in ds}
+            ),
+            now=now or self.NOW,
+            max_staleness_hours=max_staleness_hours,
+        )
+
+    def test_healthy_today(self):
+        report = self._eval()
+        self.assertTrue(report.ok, report.issues)
+        self.assertEqual(report.issues, [])
+
+    def test_stale_parquet_flags_issue(self):
+        report = self._eval(
+            latest={d: "2026-06-01" for d in tps.DATASETS}
+        )
+        self.assertFalse(report.ok)
+        self.assertTrue(any("stale" in i for i in report.issues))
+
+    def test_stranded_watermark_flags_issue(self):
+        # watermark above the current row count = rotation not yet healed.
+        report = self._eval(
+            n_rows={d: 100 for d in tps.DATASETS},
+            watermarks={d: 5000 for d in tps.DATASETS},
+        )
+        self.assertFalse(report.ok)
+        self.assertTrue(any("exceeds HDF5 row count" in i for i in report.issues))
+
+    def test_missing_hdf5_dataset_flags_issue(self):
+        report = self._eval(n_rows={d: None for d in tps.DATASETS})
+        self.assertFalse(report.ok)
+        self.assertTrue(any("HDF5 dataset absent" in i for i in report.issues))
+
+    def test_no_parquet_flags_issue(self):
+        report = self._eval(latest={d: None for d in tps.DATASETS})
+        self.assertFalse(report.ok)
+        self.assertTrue(any("never flushed" in i for i in report.issues))
+
+    def test_yesterday_within_grace_is_ok(self):
+        # 1h into the UTC day, yesterday's file, 2h grace → still fresh.
+        now = datetime(2026, 6, 17, 1, 0, tzinfo=timezone.utc)
+        report = self._eval(
+            latest={d: "2026-06-16" for d in tps.DATASETS},
+            now=now,
+        )
+        self.assertTrue(report.ok, report.issues)
+
+    def test_yesterday_past_grace_is_stale(self):
+        # 5h into the UTC day, yesterday's file, 2h grace → stale.
+        report = self._eval(latest={d: "2026-06-16" for d in tps.DATASETS})
+        self.assertFalse(report.ok)
+        self.assertTrue(any("stale" in i for i in report.issues))
 
 
 if __name__ == "__main__":
