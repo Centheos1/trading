@@ -320,8 +320,19 @@ def _rotation_reason(h5_path: str, max_h5_bytes: int) -> str | None:
     if max_h5_bytes > 0:
         try:
             size = os.path.getsize(h5_path)
-        except OSError:
-            size = 0
+        except OSError as exc:
+            # The file exists (guarded above) but cannot be stat'd. Do NOT fall
+            # back to size=0 — that is a success-shaped value that suppresses
+            # size-based rotation and lets a large, unreadable HDF5 accumulate
+            # until the disk fills (the 2026-06 failure mode). HDF5 is only a
+            # disposable secondary artifact, so the safe, loud action is to
+            # force rotation: archive + delete + restart clean.
+            logger.error(
+                "Cannot stat live HDF5 %s (%s) — forcing rotation to recover",
+                h5_path,
+                exc,
+            )
+            return f"HDF5 file {h5_path} could not be stat'd ({exc}) — forcing rotation"
         if size >= max_h5_bytes:
             return (
                 f"HDF5 file {h5_path} reached {size / 1024**3:.2f} GB "
@@ -332,7 +343,14 @@ def _rotation_reason(h5_path: str, max_h5_bytes: int) -> str | None:
     if floor_gb > 0:
         try:
             free_gb = shutil.disk_usage(os.path.dirname(h5_path) or ".").free / 1024**3
-        except OSError:
+        except OSError as exc:
+            # Deliberate skip-and-log: without a free-space reading we cannot
+            # assert the floor, but we must not do so silently.
+            logger.warning(
+                "Cannot read free disk for %s (%s) — skipping disk-floor check this cycle",
+                os.path.dirname(h5_path) or ".",
+                exc,
+            )
             free_gb = None
         if free_gb is not None and free_gb < floor_gb:
             return (

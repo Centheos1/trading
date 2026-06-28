@@ -63,6 +63,9 @@ class TestArgParsing(unittest.TestCase):
     def test_default_s3_key_per_symbol(self):
         self.assertEqual(self.ct._default_s3_key("BTCUSDT"),
                          "ticks/BTCUSDT_ticks.h5")
+        # Symbol is upper-cased so the key is stable regardless of input case.
+        self.assertEqual(self.ct._default_s3_key("ethusdt"),
+                         "ticks/ETHUSDT_ticks.h5")
 
 
 class TestRotationReason(unittest.TestCase):
@@ -104,8 +107,36 @@ class TestRotationReason(unittest.TestCase):
                 reason = self.ct._rotation_reason(p, 0)
             self.assertIsNotNone(reason)
             self.assertIn("Free disk", reason)
-        self.assertEqual(self.ct._default_s3_key("ethusdt"),
-                         "ticks/ETHUSDT_ticks.h5")
+
+    def test_stat_failure_forces_rotation(self):
+        # An existing-but-unstattable HDF5 must NOT be coerced to size=0 (a
+        # success-shaped value that would suppress size-based rotation and let
+        # a large, unreadable file accumulate until the disk fills). It must
+        # instead force rotation. Disk floor disabled to isolate the size path.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "x.h5")
+            with open(p, "wb") as f:
+                f.write(b"\0" * 2048)
+            with patch.dict(os.environ, {"MIN_FREE_DISK_GB": "0"}), \
+                    patch("os.path.getsize", side_effect=OSError("boom")):
+                reason = self.ct._rotation_reason(p, 1024)
+            self.assertIsNotNone(reason)
+            self.assertIn("forcing rotation", reason)
+
+    def test_disk_usage_failure_logs_and_skips_floor(self):
+        # If free space cannot be read we cannot assert the floor, so the check
+        # is skipped — but loudly (logged), never silently. Size cap disabled
+        # (max_h5_bytes=0) to isolate the disk-floor path.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "x.h5")
+            with open(p, "wb") as f:
+                f.write(b"\0" * 100)
+            with patch.dict(os.environ, {"MIN_FREE_DISK_GB": "1000000"}), \
+                    patch("shutil.disk_usage", side_effect=OSError("boom")):
+                with self.assertLogs(self.ct.logger, level="WARNING") as cm:
+                    reason = self.ct._rotation_reason(p, 0)
+            self.assertIsNone(reason)
+            self.assertTrue(any("Cannot read free disk" in m for m in cm.output))
 
     def test_ticks_h5_path_uses_ticks_subdir(self):
         with tempfile.TemporaryDirectory() as tmp:
