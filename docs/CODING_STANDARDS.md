@@ -166,10 +166,17 @@ schema bumped) the state becomes a landmine.
   doesn't abort the whole read (`notebooks/utils._safe_read_2d`). Quarantine
   corrupt inputs, don't overwrite them (`tick_parquet_store._append_parquet`).
 
-### 4.3 An immutable, queryable mirror is the durable store
+### 4.3 An immutable, queryable mirror is the durable store — and it must not depend on a fragile source
 - The canonical fast store (HDF5) is fragile; the per-day Parquet mirror is the
   durable one. New analysis reads Parquet by date window, not multi-GB HDF5
   (`notebooks/utils.load_ticks_parquet`).
+- **The durable store must not depend on reading a concurrently-written, mutable,
+  corruption-prone file.** The 2026-06 freeze happened because durability flowed
+  `HDF5 → separate reader → Parquet`; one corrupt HDF5 silently froze the mirror
+  for 10 days. The mirror is now fed **directly from the live feed**
+  (`LiveParquetMirror`); HDF5 is disposable. Full post-mortem:
+  `docs/INCIDENT_2026-06_tick_pipeline.md`. Do not reintroduce a
+  read-from-fragile-source durability path.
 - Anything that maintains the mirror must guarantee forward progress and be
   monitored for staleness (see §3.5 and `DEPLOYMENT.md` pipeline-health checks).
 
@@ -178,6 +185,19 @@ schema bumped) the state becomes a landmine.
   eviction/rotation policy with a documented "what happens at the limit"
   (`AGENT_STRATEGY_RULES.md` §9.1.1). HDF5 rotation, local Parquet retention, and
   Docker log caps are existing examples — match that discipline for anything new.
+
+### 4.4b Bound per-operation cost, and measure it under realistic full load
+- A unit test with 5 rows proves correctness, not viability. Any code on a hot
+  path (per-event, per-flush, per-tick) must have a cost — CPU **and memory** —
+  that does **not** grow with the total accumulated data. Re-reading,
+  re-sorting, or re-deduplicating a whole day on every flush is an O(day)
+  operation masquerading as O(batch); it scales into an OOM as volume grows.
+- Profile against a realistic *full-day / peak-load* profile before shipping.
+  Concretely: the live mirror writer was measured over a simulated 6 M-row day —
+  a pandas read-modify-write accumulator peaked at **2.6 GB** RSS; the chunked
+  pyarrow accumulator that shipped peaks at **~0.35 GB**. That difference is the
+  line between "stable on a 4 GB box" and "nightly OOM." Record the numbers in
+  the relevant doc.
 
 ### 4.5 Idempotency and recovery are features, not afterthoughts
 - Re-running a sync, flush, or backfill must not duplicate or corrupt data.

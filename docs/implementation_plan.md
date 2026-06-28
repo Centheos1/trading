@@ -1195,7 +1195,7 @@ Tests: **8** Python tests (`test_replay_determinism.py`) + benchmark (`benchmark
 
 Deferred test requirements (from Phase 6 scope):
 - **UI integration test**: `StrategyDiagnosticsPanel` is not automatically tested — PySide6 widgets require a display server, making headless CI impractical. Manual verification required.
-- **Optimization convergence test** ⬜ **OPEN TASK**: Requires ≥ 500 collected ticks and a full NSGA-II loop. **Task**: once Phase 16P/16Q data is available (2026-07-01), run `python optimiser.py --strategy orderflow --symbol BTCUSDT --generations 20 --population 40` and assert Pareto front size ≥ 3 and best Sharpe improvement > 0 vs. defaults. Effort ~0.5 day.
+- **Optimization convergence test** ⬜ **OPEN TASK**: Requires ≥ 500 collected ticks and a full NSGA-II loop. **Task**: once Phase 16P/16Q data is available (≈ 2026-07-29 — revised after the 2026-06 data-durability incident; redeploy + 30 days), run `python optimiser.py --strategy orderflow --symbol BTCUSDT --generations 20 --population 40` and assert Pareto front size ≥ 3 and best Sharpe improvement > 0 vs. defaults. Effort ~0.5 day.
 - **Paper-trade soak test**: 24-hour manual validation — not automatable in CI.
 
 Known limitations:
@@ -1288,7 +1288,7 @@ Test counts: 59 C++ checks + 11 Python trainer tests + 8 Python binding tests = 
 Deferred for later:
 - **Wave HMM** ⬜ **OPEN TASK (Phase 17, gated on Phase 16)**: Not warranted until Phase 16 `CampaignVerdict` is recorded (unblocked 2026-07-01). If `promote == True` for HMM, Phase 17 implements HMM-based regime classification in `WaveEngine`. See `§12 Milestones → Phase 17`.
 - **Live model retraining pipeline** ⬜ **V3 SCOPE**: Online Baum-Welch / incremental EM after V2 GA. Not yet scoped.
-- ~~Actual HMM vs. rule-based backtest comparison (requires labeled V1 backtest data — the comparison infrastructure is in place via `set_hmm_backend` / `set_score_backend`).~~ ✅ **DONE (Phase 7V, 2026-05-12)** — `tools/hmm_abtest.py` harness built and validated; 2-day BTCUSDT smoke run complete. Real 30-day campaign recording starts 2026-06-01 (Phase 16P/16Q).
+- ~~Actual HMM vs. rule-based backtest comparison (requires labeled V1 backtest data — the comparison infrastructure is in place via `set_hmm_backend` / `set_score_backend`).~~ ✅ **DONE (Phase 7V, 2026-05-12)** — `tools/hmm_abtest.py` harness built and validated; 2-day BTCUSDT smoke run complete. Real 30-day campaign recording was to start 2026-06-01 but the 2026-06 data-durability incident voided that window; it restarts on the 2026-06-28 re-architected redeploy (≈ 2026-07-29 ready).
 
 Known limitations:
 - **Single-sequence Baum-Welch** ⬜ **OPEN TASK (V2 scope)**: The HMM trainer (`hmm/trainer.py`) uses a single-sequence Baum-Welch. Multi-sequence EM (train on multiple independent backtest runs) would improve emission robustness. Effort ~1 day. Blocked on accumulating ≥ 3 independent campaign windows (earliest: 2026-08-01).
@@ -2869,10 +2869,10 @@ evaluated before Phase 17 work begins.
 |---|---|---|---|---|
 | [**21**](#phase21) | ✅ Re-wire Live Execution into the Distributed Strategy Service | `DONE — 2026-06-01` (see [§1A](#s1a) + [§7.2](#s72)) | §22.2 #4/#8/#9/#12 | [Phase 14](#s71) (re-used) |
 | [**15**](#phase15) | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | [Phase 14A](#phase14a) (DONE) |
-| [**16P**](#phase16p) | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — BTCUSDT + ETHUSDT collecting cleanly since 2026-06-01 (migrated to t3.medium, parallel subprocess architecture, log rotation applied); unblocks Phase 16 on **2026-07-01** (30 days)` | — | None (infrastructure prerequisite) |
+| [**16P**](#phase16p) | EC2 / S3 Tick Data Collection Infrastructure | `IN PROGRESS — 2026-06 data-durability incident voided the 2026-06-01 window (mirror froze 2026-06-17, unnoticed ~10d); RE-ARCHITECTED 2026-06-28 (durability decoupled from HDF5, disk floor, CloudWatch alarm); clean 30-day clock restarts on redeploy → unblocks Phase 16 ≈ **2026-07-29** (redeploy + 30 days)` | — | None (infrastructure prerequisite) |
 | [**16Q**](#phase16q) | Cross-Asset OHLCV Historical Data Collection | `IN PROGRESS — collector deployed 2026-05-13; Binance backfill complete; Oanda backfill in progress (127 instruments, 2020→now)` | — | [Phase 16P](#phase16p) infrastructure |
 | [**16R**](#phase16r) | Feed Health Monitor & Data Quality Report | `DONE` | — | [Phase 16P](#phase16p) (collecting) |
-| [**16**](#phase16) | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked **2026-07-01** when 30 days of clean data available)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
+| [**16**](#phase16) | HMM A/B Campaign at Scale | `HARNESS DELIVERED 2026-05-12 — campaign recording PENDING (unblocked ≈ **2026-07-29** — revised after the 2026-06 incident; redeploy + 30 days of clean data)` | §9.10, §23 | Phase 7V (DONE) + Phase 16P (IN PROGRESS) |
 | [**17**](#phase17) | HMM-based Wave Regime Classifier | `NOT STARTED` | §8.6, §23 | [Phase 16](#phase16) `CampaignVerdict.promote is True` |
 | [**18**](#phase18) | Cross-Venue Features in C++ Ripple | `NOT STARTED` | §8.4, §23 | [Phase 8](#phase8) (DONE) |
 | [**19**](#phase19) | Hierarchical ES / Euler Decomposition | `NOT STARTED` | §7.4.5, §23 | [Phase 4](#phase4) (DONE) |
@@ -2894,8 +2894,8 @@ number. Each row links to its detailed spec above.
 | **2** | ✅ **Data-collection hardening** (backlog below) | All critical bugs fixed; only OOM deferred (non-critical). | Parallel | done | ✅ DONE 2026-06-01 |
 | **3** | ☐ **CI / test gating** — run Python (`unittest discover`) **and** C++ (`./test_*`) on every push; add `build.sh` post-build test hook ([§8](#s8) test plan) | ~1,104 C++ checks exist but are never run automatically; doc-drift like §1A went unnoticed for weeks without it. | Parallel | 1 day | ⬜ NOT STARTED |
 | **4** | ✅ **Doc reconciliation** — §2.2/§2.3/§7.1/§10/§12 + `README.md` + `TESTING_GUIDE.md` rewritten to distributed architecture; `ui/`/root `main.py` references removed | **DONE 2026-06-01.** All “wired live” claims now describe the deployed service. `TESTING_GUIDE.md` phase tables updated through Phase 21. | — | done | ✅ DONE 2026-06-01 |
-| **5** | **[Phase 16P](#phase16p)/[16Q](#phase16q) → 30 days clean data** | Hard prerequisite for the Phase 16 HMM A/B verdict. | Calendar: **2026-07-01** | passive | 🔷 IN PROGRESS |
-| **6** | **[Phase 16](#phase16) — record real `CampaignVerdict`** | The hard evidence gate for Phase 17. | #5 complete (2026-07-01) | 0.5 day | 🟡 HARNESS READY |
+| **5** | **[Phase 16P](#phase16p)/[16Q](#phase16q) → 30 days clean data** | Hard prerequisite for the Phase 16 HMM A/B verdict. **2026-06 incident reset this clock** (see Phase 16P). | Calendar: ≈ **2026-07-29** (redeploy + 30d) | passive | 🔷 IN PROGRESS |
+| **6** | **[Phase 16](#phase16) — record real `CampaignVerdict`** | The hard evidence gate for Phase 17. | #5 complete (≈ 2026-07-29) | 0.5 day | 🟡 HARNESS READY |
 | **7** | **[Phase 17](#phase17) — HMM Wave classifier** | Only if Phase 16 `promote == True`. | #6 verdict | 3–5 days | ⬜ NOT STARTED |
 | **8** | **[Phase 18](#phase18) — Cross-venue features in C++ Ripple** | Independent of HMM; can run parallel with 17. | Phase 8 DONE | 3–4 days | ⬜ NOT STARTED |
 | **9** | **[Phase 19](#phase19) — Hierarchical ES / Euler decomposition** | Independent; sharpens risk budgeting. | Phase 4 DONE | 3–4 days | ⬜ NOT STARTED |
@@ -2929,8 +2929,8 @@ Cross-referenced to their detail sections.
 
 | # | Task | Phase / Scope | Effort | Blocked until |
 |---|---|---|---|---|
-| [T-1](#open-tasks) | **Wave params wired to backtest** — integrate `WaveEngine` into `backtester.py` so `eta_mr_threshold` / `eta_bo_threshold` / `eta_neutral_threshold` / `reduced_size_fraction` participate in NSGA-II optimisation | V2 (post Phase 16) | 1–2 days | Phase 16P data (2026-07-01) |
-| T-2 | **Optimization convergence test** — run a real NSGA-II loop on collected data; assert Pareto front ≥ 3 and Sharpe improvement > 0 vs. defaults | Phase 6 polish | 0.5 day | Phase 16P data (2026-07-01) |
+| [T-1](#open-tasks) | **Wave params wired to backtest** — integrate `WaveEngine` into `backtester.py` so `eta_mr_threshold` / `eta_bo_threshold` / `eta_neutral_threshold` / `reduced_size_fraction` participate in NSGA-II optimisation | V2 (post Phase 16) | 1–2 days | Phase 16P data (≈ 2026-07-29) |
+| T-2 | **Optimization convergence test** — run a real NSGA-II loop on collected data; assert Pareto front ≥ 3 and Sharpe improvement > 0 vs. defaults | Phase 6 polish | 0.5 day | Phase 16P data (≈ 2026-07-29) |
 | T-3 | **Paper-fill PnL fees** — add `fee_bps` to `PaperEngine`; add fee-inclusive optimisation mode | V2 polish | 0.5 day | Anytime |
 | T-4 | **Dynamic Tide vol regime** — ATR/realised-vol-percentile → `VolRegime` mapping; macro LSI from on-chain/funding-rate data | [Phase 19](#phase19) | 3–4 days | Phase 16 verdict |
 | T-5 | **Wave HMM** — HMM-based regime classification in `WaveEngine` | [Phase 17](#phase17) | 3–5 days | Phase 16 verdict (2026-07-01) |
@@ -3176,21 +3176,40 @@ test case to `test_replay_determinism.py` verifying this.
 
 <a id="phase16p"></a>
 
-### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — COLLECTING since 2026-06-01]`
+### Phase 16P — EC2 / S3 Tick Data Collection Infrastructure `[IN PROGRESS — RE-ARCHITECTED 2026-06-28 after a data-durability incident; clean 30-day clock restarts on redeploy]`
 
-**Clean collection start: 2026-06-01 (AEST).** Earlier collection (from 2026-05-13) was
-interrupted by infrastructure issues (HDF5 corruption, OOM on t3.small, disk exhaustion
-from unrotated Docker logs). The instance was migrated to a **t3.medium** on 2026-06-01
-and the following fixes were applied before restarting clean collection:
+> **⚠️ 2026-06 data-durability incident — the previous "clean since 2026-06-01"
+> claim was false.** The Parquet mirror froze silently on **2026-06-17** and was
+> not noticed for ~10 days. Root cause: durability depended on a *separate
+> reader* tailing one ever-growing, corruption-prone live HDF5 file; when the
+> HDF5 corrupted under append load the reader returned empty/garbage, the
+> watermark advanced without writing, and the mirror stopped — while the
+> container stayed "healthy" and the HDF5 kept uploading. The disk also reached
+> 96 % and the staleness alerts were never wired. **No usable continuous 30-day
+> window exists from the 2026-06-01 attempt.** Full write-up:
+> [`docs/INCIDENT_2026-06_tick_pipeline.md`](INCIDENT_2026-06_tick_pipeline.md).
 
-- Parallel subprocess architecture (BTCUSDT + ETHUSDT collected simultaneously)
-- Docker daemon-level log rotation (50 MB / 3 files per container)
-- `aiobotocore` credential log spam silenced (was the primary cause of disk exhaustion)
-- `tick_parquet_store.py` Parquet mirror active (15-minute flush, max 15 min data loss)
-- Hourly `s3_sync.sh` cron active
+**Re-architecture (2026-06-28) — durability decoupled from HDF5.** The durable
+store is now the per-day Parquet mirror, written **directly from the live feed**
+(`tick_parquet_store.LiveParquetMirror`, fed in `data_service.py`); HDF5 is a
+secondary, disposable artifact. Hardening applied and verified:
 
-**Phase 16 unblock date: 2026-07-01** (30 days of continuous, clean data required for
-HMM A/B campaign windows).
+- `LiveParquetMirror`: chunked-pyarrow per-day accumulator, atomic day-file
+  overwrite, no HDF5 read on the durability path. Bounded cost measured under a
+  full simulated busy day (6 M depth rows/symbol): worst flush 257 ms, peak
+  ~0.35 GB RSS/symbol (a pandas RMW accumulator was 2.6 GB — rejected).
+- Free-disk floor (`MIN_FREE_DISK_GB`, default 2 GB) forces early HDF5 rotation;
+  default `MAX_H5_GB` lowered 8 → 3.
+- Hourly `pipeline_health.sh` emits a `PipelineHealthy` CloudWatch metric;
+  `scripts/create_cloudwatch_alarm.sh` pages on `0` **and on missing data**.
+- 60 s mirror flush (≤ 60 s crash-loss window).
+
+**Phase 16 unblock date: ≈ 2026-07-29** — 30 days of continuous, clean data is
+required for the HMM A/B campaign windows, and the clean clock only starts when
+the re-architected collector is redeployed (pending deploy authorisation). The
+date slips day-for-day with the redeploy date (redeploy + 30 days). It will be
+confirmed once the post-deploy health checks pass and S3 shows the mirror
+advancing daily.
 
 Verify collection is healthy at any time:
 ```bash
@@ -3225,7 +3244,7 @@ aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive 
 
 **Regression:** 862/862 tests pass (2026-05-13).
 
-**EC2 is live.** `t3.medium` (`i-0f92a7647e330d9d6`, `ap-southeast-2`) running Docker Compose with BTCUSDT and ETHUSDT tick collectors + `ohlcv-collector` (Parquet/S3). Instance **migrated from t3.small to t3.medium on 2026-06-01** after OOM/disk-exhaustion events on the earlier t3.small instance; clean collection restarted 2026-06-01. See `docs/DEPLOYMENT.md` for the full runbook.
+**EC2 is live.** `t3.medium` (`i-0f92a7647e330d9d6`, `ap-southeast-2`) running Docker Compose with BTCUSDT and ETHUSDT tick collectors + `ohlcv-collector` (Parquet/S3). Instance **migrated from t3.small to t3.medium on 2026-06-01** after OOM/disk-exhaustion events on the earlier t3.small instance. ⚠️ The 2026-06-01 "clean restart" did **not** hold — the Parquet mirror froze on 2026-06-17 (see the incident note at the top of this phase); the durability re-architecture (2026-06-28) is the permanent fix and resets the clean 30-day clock on redeploy. See `docs/DEPLOYMENT.md` for the full runbook.
 
 **Objective.** The Phase 16 HMM A/B campaign requires ≥ 30 days of continuous tick data (trades + L2 depth) per symbol. Running `main.py` in `data` mode on a developer laptop for 30+ days is not viable. Phase 16P makes the data collection path deployment-ready for a headless Linux EC2 instance with data persisted to AWS S3.
 
@@ -4009,7 +4028,7 @@ config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 
 **Delivered (V1 pre-req + V2 execution infrastructure):**
 - LIMIT / OCO order routing faithful to `strategy.md` §13.3 (Phase 15, 2026-05-12).
-- EC2 / S3 tick data collection infrastructure (Phase 16P — **collecting since 2026-06-01**, BTCUSDT + ETHUSDT on t3.medium).
+- EC2 / S3 tick data collection infrastructure (Phase 16P — **re-architected 2026-06-28** after the 2026-06 data-durability incident; durable Parquet mirror decoupled from HDF5; clean 30-day clock restarts on redeploy, BTCUSDT + ETHUSDT on t3.medium).
 - Cross-asset OHLCV historical collection (Phase 16Q — deployed 2026-05-13; Binance backfill complete; Oanda in progress).
 - Feed Health Monitor (Phase 16R, 2026-05-14).
 - Live execution re-wired into distributed `strategy` service (Phase 21, 2026-06-01).

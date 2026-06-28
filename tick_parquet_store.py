@@ -43,6 +43,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,6 +101,25 @@ _FLUSH_CHUNK_ROWS: int = 2_000_000
 
 def _columns_for(dataset: str) -> List[str]:
     return _TRADES_COLS if dataset == "trades" else _DEPTH_COLS
+
+
+def _arrow_schema(dataset: str):
+    """Canonical pyarrow schema for a dataset (matches the Parquet columns)."""
+    import pyarrow as pa
+
+    if dataset == "trades":
+        return pa.schema([
+            ("timestamp", pa.int64()),
+            ("price", pa.float64()),
+            ("quantity", pa.float64()),
+            ("is_buyer_maker", pa.bool_()),
+        ])
+    return pa.schema([
+        ("timestamp", pa.int64()),
+        ("side", pa.int8()),
+        ("price", pa.float64()),
+        ("quantity", pa.float64()),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +518,68 @@ class TickParquetStore:
             df["quantity"] = df["quantity"].astype("float64")
         return df.reset_index(drop=True)
 
+    def read_day_table(self, exchange: str, symbol: str, dataset: str, day: str):
+        """Read one day's Parquet file as a pyarrow ``Table`` (empty if absent).
+
+        A corrupt file is **quarantined** (renamed aside) rather than raising,
+        so the live mirror can recover by starting that day fresh instead of
+        crash-looping. Used by :class:`LiveParquetMirror` to reload the
+        in-memory day accumulator once after a restart. Arrow-native to avoid a
+        pandas round-trip on the hot path.
+        """
+        if dataset not in DATASETS:
+            raise ValueError(f"Unknown dataset {dataset!r}; expected one of {DATASETS}")
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        schema = _arrow_schema(dataset)
+        path = self._day_file(exchange, symbol, dataset, day)
+        if not path.exists():
+            return schema.empty_table()
+        try:
+            return pq.read_table(str(path))
+        except Exception as exc:
+            quarantine = path.with_suffix(
+                path.suffix
+                + f".corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            )
+            try:
+                os.replace(path, quarantine)
+                logger.error(
+                    "Corrupt Parquet %s (%s) — quarantined to %s; the mirror "
+                    "will start this day fresh", path, exc, quarantine,
+                )
+            except OSError as mv_exc:
+                logger.error(
+                    "Corrupt Parquet %s (%s) and quarantine move failed (%s)",
+                    path, exc, mv_exc,
+                )
+            return schema.empty_table()
+
+    def write_day_table(
+        self, exchange: str, symbol: str, dataset: str, day: str, table
+    ) -> int:
+        """Atomically (over)write one day's Parquet file from a pyarrow ``Table``.
+
+        The durable-mirror hot path. The caller (:class:`LiveParquetMirror`)
+        holds the full day as a chunked Arrow table, so this is a bounded write
+        — **no read, no RMW** — unlike the backfill path (:meth:`flush_from_h5`
+        → :meth:`_append_by_day`). Written via temp-file + ``os.replace`` so a
+        crash mid-write can never leave a torn day file (a reader sees either
+        the old or the new complete file). Rows need not be
+        pre-sorted/de-duplicated; :meth:`read` does both.
+        """
+        if dataset not in DATASETS:
+            raise ValueError(f"Unknown dataset {dataset!r}; expected one of {DATASETS}")
+        import pyarrow.parquet as pq
+
+        path = self._day_file(exchange, symbol, dataset, day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".parquet.tmp-{os.getpid()}")
+        pq.write_table(table, str(tmp), compression="snappy")
+        os.replace(tmp, path)
+        return table.num_rows
+
     def _append_by_day(
         self, df: pd.DataFrame, exchange: str, symbol: str, dataset: str
     ) -> int:
@@ -607,6 +690,12 @@ class TickParquetStore:
         if not frames:
             return pd.DataFrame(columns=cols)
         df = pd.concat(frames, ignore_index=True)
+        # De-duplicate at the read boundary. The live mirror's writer is
+        # append-only (no per-flush dedup, for bounded cost), and forward-only
+        # feeds don't normally repeat — but a WS reconnect or an overlapping
+        # backfill could, so collapse exact duplicates here so consumers always
+        # see clean, sorted data regardless of how it was written.
+        df = df.drop_duplicates(subset=cols, keep="last")
         df = df.sort_values("timestamp").reset_index(drop=True)
         return df
 
@@ -643,4 +732,256 @@ class TickParquetStore:
         return sorted(p.stem for p in directory.glob("*.parquet"))
 
 
-__all__ = ["TickParquetStore", "DATASETS"]
+# ---------------------------------------------------------------------------
+# Live mirror — fed directly from the feed (no HDF5 on the durability path)
+# ---------------------------------------------------------------------------
+
+
+class LiveParquetMirror:
+    """Durable Parquet mirror fed DIRECTLY from the live tick feed.
+
+    Why this exists
+    ---------------
+    The original mirror tailed the C++ ``TickStore`` HDF5 file with a
+    separate reader (:meth:`TickParquetStore.flush_from_h5`). That coupled
+    durability to a single, ever-growing, corruption-prone file: when the
+    HDF5 superblock/B-tree corrupted (EOA overflow under sustained append
+    load) the reader silently returned empty/garbage, the watermark advanced
+    without writing, and the Parquet mirror froze for days with no alert
+    (the 2026-06 freezes — see docs/DEPLOYMENT.md).
+
+    This class removes that dependency. The collector hands every trade and
+    depth message to :meth:`add_trade` / :meth:`add_depth` as it arrives off
+    the WebSocket. A periodic :meth:`flush` (driven by the collector's flush
+    thread) moves the buffered rows into an in-memory **per-day accumulator**
+    and atomically (over)writes that day's single Parquet file. HDF5 is no
+    longer on the durability path — it can corrupt, rotate, or be deleted
+    without affecting the mirror.
+
+    Write-cost design (the second 2026-06 hardening)
+    ------------------------------------------------
+    The naive approach — read-modify-write the day file every flush — re-reads,
+    re-dedups and re-sorts the *entire* day on every flush, so its cost grows
+    through the day. At a 60 s cadence on a busy ``depth_updates`` stream that
+    is a recurring multi-hundred-MB memory spike, an OOM risk on a small box.
+    Instead we keep the current day resident as a **chunked pyarrow table** and
+    overwrite the file from it each flush: appending is ``pa.concat_tables``
+    (adds a chunk, no full copy) and writing is a bounded snappy serialise with
+    **no per-flush read, dedup or sort**. (A pandas accumulator was measured at
+    ~2.6 GB peak RSS for a 6 M-row day from ``pd.concat`` reallocation; the Arrow
+    accumulator holds the same day at ~0.3 GB.) The reader
+    (:meth:`TickParquetStore.read`) sorts and de-duplicates, so the writer stays
+    append-only. Past-day accumulators are evicted once the UTC day rolls over.
+
+    Durability / crash semantics
+    ----------------------------
+    * A hard crash loses at most the in-memory rows since the last flush
+      (``--parquet-flush-interval`` seconds, default 60).
+    * On restart the accumulator for a day is reloaded once from its file
+      (:meth:`TickParquetStore.read_day_table`), so overwriting never truncates
+      a day that already has rows on disk.
+    * A failed write keeps the rows in the accumulator and is retried on the
+      next flush — data is never dropped on a transient error.
+
+    Memory is bounded: the incoming buffer is capped at ``max_buffer_rows``
+    (oldest dropped with a loud ERROR if flushing stalls), and only the
+    current (plus briefly the just-rolled) UTC day is held per dataset.
+
+    Thread-safety: ``add_*`` runs on the asyncio feed thread and ``flush`` on
+    the collector's flush thread. The shared inbound buffer is lock-guarded;
+    the accumulators are touched only inside ``flush`` (single thread).
+    """
+
+    def __init__(
+        self,
+        root: str = "data/ticks",
+        *,
+        exchange: str = "binance",
+        max_buffer_rows: int = 2_000_000,
+        warn_day_rows: int = 15_000_000,
+    ) -> None:
+        self._store = TickParquetStore(root=root)
+        self.exchange = exchange
+        self._max_buffer_rows = max_buffer_rows
+        self._warn_day_rows = warn_day_rows
+        self._lock = threading.Lock()
+        # Inbound buffer (producer = feed thread, consumer = flush thread).
+        self._buffers: Dict[Tuple[str, str], List[List[float]]] = defaultdict(list)
+        self._dropped = 0
+        # In-memory per-day accumulators (chunked pyarrow tables), touched only
+        # inside flush().
+        self._acc: Dict[Tuple[str, str, str], object] = {}
+        self._dirty: set = set()      # accumulators with unwritten changes
+        self._loaded: set = set()     # accumulators reloaded from disk already
+        self._warned_big: set = set()
+        self._max_day: Optional[str] = None
+
+    # -- ingest ---------------------------------------------------------
+
+    def add_trade(
+        self, symbol: str, ts_ms: int, price: float, quantity: float,
+        is_buyer_maker: bool,
+    ) -> None:
+        self._extend(
+            symbol, "trades",
+            [[float(ts_ms), float(price), float(quantity),
+              1.0 if is_buyer_maker else 0.0]],
+        )
+
+    def add_depth(
+        self, symbol: str, ts_ms: int, bids: Iterable, asks: Iterable,
+        *, is_snapshot: bool = False,
+    ) -> None:
+        dataset = "depth_snapshots" if is_snapshot else "depth_updates"
+        rows: List[List[float]] = []
+        for level in bids:
+            rows.append([float(ts_ms), 0.0, float(level[0]), float(level[1])])
+        for level in asks:
+            rows.append([float(ts_ms), 1.0, float(level[0]), float(level[1])])
+        if rows:
+            self._extend(symbol, dataset, rows)
+
+    def _extend(self, symbol: str, dataset: str, rows: List[List[float]]) -> None:
+        key = (symbol.upper(), dataset)
+        with self._lock:
+            buf = self._buffers[key]
+            buf.extend(rows)
+            overflow = len(buf) - self._max_buffer_rows
+            if overflow > 0:
+                del buf[:overflow]
+                self._dropped += overflow
+
+    # -- flush ----------------------------------------------------------
+
+    @staticmethod
+    def _table_for_day(dataset: str, ts: np.ndarray, arr: np.ndarray):
+        """Build a single-chunk pyarrow table for one day's rows."""
+        import pyarrow as pa
+
+        if dataset == "trades":
+            return pa.table(
+                {
+                    "timestamp": pa.array(ts, type=pa.int64()),
+                    "price": pa.array(arr[:, 1], type=pa.float64()),
+                    "quantity": pa.array(arr[:, 2], type=pa.float64()),
+                    "is_buyer_maker": pa.array(arr[:, 3] != 0.0, type=pa.bool_()),
+                },
+                schema=_arrow_schema(dataset),
+            )
+        return pa.table(
+            {
+                "timestamp": pa.array(ts, type=pa.int64()),
+                "side": pa.array(arr[:, 1].astype("int8"), type=pa.int8()),
+                "price": pa.array(arr[:, 2], type=pa.float64()),
+                "quantity": pa.array(arr[:, 3], type=pa.float64()),
+            },
+            schema=_arrow_schema(dataset),
+        )
+
+    def flush(self) -> Dict[str, int]:
+        """Persist buffered rows to per-day Parquet files.
+
+        Returns ``{f"{SYMBOL}.{dataset}.{day}": rows_added_this_flush}`` for
+        the datasets that were written. A write failure keeps the rows in the
+        accumulator (retried next flush), so data is never dropped.
+        """
+        import pyarrow as pa
+
+        with self._lock:
+            if self._dropped:
+                logger.error(
+                    "LiveParquetMirror dropped %d buffered rows (cap %d) — "
+                    "flush has been failing; investigate disk/permissions",
+                    self._dropped, self._max_buffer_rows,
+                )
+                self._dropped = 0
+            snapshot = {k: v for k, v in self._buffers.items() if v}
+            self._buffers.clear()
+
+        # 1. Merge new rows into per-day accumulators (chunked Arrow tables).
+        added: Dict[Tuple[str, str, str], int] = defaultdict(int)
+        for (symbol, dataset), rows in snapshot.items():
+            arr = np.asarray(rows, dtype="float64")
+            ts = arr[:, 0].astype("int64")
+            valid = ts > 0
+            if not valid.any():
+                continue
+            arr, ts = arr[valid], ts[valid]
+            day_idx = ts // 86_400_000  # whole UTC days since epoch
+            for d in np.unique(day_idx):
+                m = day_idx == d
+                day = datetime.fromtimestamp(
+                    int(d) * 86_400, tz=timezone.utc
+                ).strftime("%Y-%m-%d")
+                key = (symbol, dataset, day)
+                table = self._table_for_day(dataset, ts[m], arr[m])
+                self._ensure_loaded(key)
+                self._acc[key] = (
+                    table
+                    if self._acc[key].num_rows == 0
+                    else pa.concat_tables([self._acc[key], table])
+                )
+                self._dirty.add(key)
+                added[key] += table.num_rows
+                self._max_day = day if self._max_day is None else max(self._max_day, day)
+
+        # 2. Write every dirty accumulator (includes earlier failed writes,
+        #    even if they received no new rows this flush).
+        written: Dict[str, int] = {}
+        for key in sorted(self._dirty):
+            symbol, dataset, day = key
+            acc = self._acc[key]
+            if acc.num_rows > self._warn_day_rows and key not in self._warned_big:
+                logger.warning(
+                    "Parquet day accumulator %s holds %d rows (> %d) — high "
+                    "memory; review symbols-per-instance sizing",
+                    key, acc.num_rows, self._warn_day_rows,
+                )
+                self._warned_big.add(key)
+            try:
+                self._store.write_day_table(self.exchange, symbol, dataset, day, acc)
+                self._dirty.discard(key)
+                if added[key]:
+                    written[f"{symbol}.{dataset}.{day}"] = added[key]
+            except Exception as exc:
+                logger.warning(
+                    "LiveParquetMirror write failed for %s (%d rows kept in "
+                    "memory, retried next flush): %s", key, acc.num_rows, exc,
+                )
+
+        # 3. Evict fully-written accumulators for past UTC days.
+        self._evict_past_days()
+
+        if written:
+            logger.info(
+                "Parquet mirror flush: %s",
+                ", ".join(f"{k}=+{v}" for k, v in written.items()),
+            )
+        return written
+
+    def _ensure_loaded(self, key: Tuple[str, str, str]) -> None:
+        """Load a day's accumulator from disk once (restart recovery)."""
+        if key in self._loaded:
+            return
+        symbol, dataset, day = key
+        self._acc[key] = self._store.read_day_table(
+            self.exchange, symbol, dataset, day
+        )
+        self._loaded.add(key)
+
+    def _evict_past_days(self) -> None:
+        if self._max_day is None:
+            return
+        for key in list(self._acc):
+            if key[2] < self._max_day and key not in self._dirty:
+                del self._acc[key]
+                self._loaded.discard(key)
+                self._warned_big.discard(key)
+
+    def latest_parquet_date(
+        self, symbol: str, dataset: str = "trades"
+    ) -> Optional[str]:
+        return self._store.latest_parquet_date(self.exchange, symbol, dataset)
+
+
+__all__ = ["TickParquetStore", "LiveParquetMirror", "DATASETS"]

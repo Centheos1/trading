@@ -18,6 +18,10 @@
 #   S3_SYNC_MAX_AGE_MIN        max age of a successful s3_sync run (default: 120)
 #   ALERT_WEBHOOK_URL          optional; POSTed a JSON {"text": "..."} on failure
 #   ALERT_SNS_TOPIC_ARN        optional; aws sns publish on failure
+#   CLOUDWATCH_NAMESPACE       optional; if set, emit a PipelineHealthy 1/0
+#                              metric each run so a CloudWatch alarm can page
+#                              (and "missing data" = box down also pages).
+#                              Pair with scripts/create_cloudwatch_alarm.sh.
 
 set -euo pipefail
 
@@ -41,6 +45,24 @@ S3_SYNC_MAX_AGE_MIN="${S3_SYNC_MAX_AGE_MIN:-120}"
 
 log() {
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "${LOG_FILE}"
+}
+
+# Best-effort CloudWatch heartbeat: emit PipelineHealthy=1 (healthy) or 0
+# (unhealthy) so an alarm can page on 0 AND on missing data (a dead box stops
+# emitting, which CloudWatch treats as breaching — see create_cloudwatch_alarm.sh).
+# Never let a metric failure crash the health check.
+emit_metric() {
+    [ -n "${CLOUDWATCH_NAMESPACE:-}" ] || return 0
+    command -v aws >/dev/null 2>&1 || { log "[WARN] aws CLI missing; skip metric"; return 0; }
+    if aws cloudwatch put-metric-data \
+            --namespace "${CLOUDWATCH_NAMESPACE}" \
+            --metric-name PipelineHealthy \
+            --dimensions "Host=$(hostname)" \
+            --value "$1" >> "${LOG_FILE}" 2>&1; then
+        log "[OK] emitted PipelineHealthy=$1 to ${CLOUDWATCH_NAMESPACE}"
+    else
+        log "[WARN] put-metric-data failed"
+    fi
 }
 
 is_running() {
@@ -114,8 +136,11 @@ fi
 # ---------------------------------------------------------------------------
 if [ "${#ISSUES[@]}" -eq 0 ]; then
     log "[DONE] pipeline healthy"
+    emit_metric 1
     exit 0
 fi
+
+emit_metric 0
 
 MSG="Tick pipeline ALARM on $(hostname) — ${#ISSUES[@]} issue(s):"
 for i in "${ISSUES[@]}"; do

@@ -57,12 +57,53 @@ class TestArgParsing(unittest.TestCase):
         # by _default_s3_key(symbol) at upload time.
         self.assertIsNone(args.s3_key)
         self.assertEqual(args.log_level, "INFO")
-        self.assertEqual(args.parquet_flush_interval, 900)
+        self.assertEqual(args.parquet_flush_interval, 60)
         self.assertEqual(args.max_h5_gb, 8.0)
 
     def test_default_s3_key_per_symbol(self):
         self.assertEqual(self.ct._default_s3_key("BTCUSDT"),
                          "ticks/BTCUSDT_ticks.h5")
+
+
+class TestRotationReason(unittest.TestCase):
+    """Rotation fires on EITHER the size cap or the free-disk floor — the
+    disk floor is the guard against the 2026-06 disk-full incident."""
+
+    def setUp(self):
+        self.ct = _load_module()
+
+    def test_no_file_no_rotation(self):
+        self.assertIsNone(self.ct._rotation_reason("/no/such/file.h5", 1))
+
+    def test_size_cap_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "x.h5")
+            with open(p, "wb") as f:
+                f.write(b"\0" * 2048)
+            with patch.dict(os.environ, {"MIN_FREE_DISK_GB": "0"}):
+                reason = self.ct._rotation_reason(p, 1024)
+            self.assertIsNotNone(reason)
+            self.assertIn("reached", reason)
+
+    def test_under_size_cap_no_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "x.h5")
+            with open(p, "wb") as f:
+                f.write(b"\0" * 100)
+            # Disable disk floor so only the size cap is in play.
+            with patch.dict(os.environ, {"MIN_FREE_DISK_GB": "0"}):
+                self.assertIsNone(self.ct._rotation_reason(p, 1024**3))
+
+    def test_disk_floor_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "x.h5")
+            with open(p, "wb") as f:
+                f.write(b"\0" * 100)
+            # Floor far above any real free space → must trigger.
+            with patch.dict(os.environ, {"MIN_FREE_DISK_GB": "1000000"}):
+                reason = self.ct._rotation_reason(p, 0)
+            self.assertIsNotNone(reason)
+            self.assertIn("Free disk", reason)
         self.assertEqual(self.ct._default_s3_key("ethusdt"),
                          "ticks/ETHUSDT_ticks.h5")
 

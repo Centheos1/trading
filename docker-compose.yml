@@ -61,12 +61,14 @@ services:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://redis:6379"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      # Free-disk floor for early HDF5 rotation (read by collect_ticks).
+      MIN_FREE_DISK_GB: "${MIN_FREE_DISK_GB:-2}"
     command: >
       python collect_ticks.py
         --symbols ${SYMBOLS:-BTCUSDT,ETHUSDT}
         --s3-bucket ${S3_BUCKET:-}
-        --parquet-flush-interval ${PARQUET_FLUSH_INTERVAL:-900}
-        --max-h5-gb ${MAX_H5_GB:-8}
+        --parquet-flush-interval ${PARQUET_FLUSH_INTERVAL:-60}
+        --max-h5-gb ${MAX_H5_GB:-3}
         --log-level ${LOG_LEVEL:-INFO}
     depends_on:
       redis:

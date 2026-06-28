@@ -395,5 +395,170 @@ class TestEvaluatePipelineHealth(unittest.TestCase):
         self.assertTrue(any("stale" in i for i in report.issues))
 
 
+class TestLiveParquetMirror(unittest.TestCase):
+    """The decoupled mirror writes Parquet straight from the feed — no HDF5
+    on the durability path (the fix for the recurring 2026-06 freezes). The
+    writer is append-only with an in-memory per-day accumulator (bounded
+    per-flush cost); the reader sorts + de-duplicates."""
+
+    def test_add_trade_then_flush_writes_parquet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(
+                root=os.path.join(tmp, "ticks"), exchange="binance"
+            )
+            for i in range(5):
+                mirror.add_trade(
+                    "btcusdt", _DAY0 + i * 1000, 100.0 + i, 1.5, i % 2 == 0
+                )
+            written = mirror.flush()
+
+            self.assertEqual(written.get("BTCUSDT.trades.2021-01-01"), 5)
+            df = mirror._store.read("BTCUSDT", "trades", exchange="binance")
+            self.assertEqual(len(df), 5)
+            self.assertListEqual(
+                list(df.columns),
+                ["timestamp", "price", "quantity", "is_buyer_maker"],
+            )
+            self.assertEqual(df["timestamp"].dtype, np.dtype("int64"))
+            self.assertEqual(df["is_buyer_maker"].dtype, np.dtype("bool"))
+
+    def test_add_depth_expands_bids_and_asks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(root=os.path.join(tmp, "ticks"))
+            mirror.add_depth(
+                "BTCUSDT", _DAY0,
+                bids=[["100.0", "2.0"], ["99.5", "1.0"]],
+                asks=[["100.5", "3.0"]],
+                is_snapshot=False,
+            )
+            written = mirror.flush()
+
+            self.assertEqual(written.get("BTCUSDT.depth_updates.2021-01-01"), 3)
+            df = mirror._store.read(
+                "BTCUSDT", "depth_updates", exchange="binance"
+            )
+            self.assertEqual(len(df), 3)
+            self.assertEqual(set(df["side"]), {0, 1})
+            self.assertEqual(int((df["side"] == 0).sum()), 2)  # two bids
+            self.assertEqual(int((df["side"] == 1).sum()), 1)  # one ask
+
+    def test_incremental_flushes_accumulate_into_one_day_file(self):
+        # Successive flushes must extend the same day file, not overwrite it
+        # with only the latest batch (the truncation foot-gun of an
+        # overwrite-from-memory writer).
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(root=os.path.join(tmp, "ticks"))
+            for i in range(3):
+                mirror.add_trade("BTCUSDT", _DAY0 + i * 1000, 100.0 + i, 1.0, True)
+            mirror.flush()
+            for i in range(3, 7):
+                mirror.add_trade("BTCUSDT", _DAY0 + i * 1000, 100.0 + i, 1.0, True)
+            mirror.flush()
+
+            df = mirror._store.read("BTCUSDT", "trades", exchange="binance")
+            self.assertEqual(len(df), 7)
+            self.assertEqual(len(mirror._store.list_days("BTCUSDT", "trades")), 1)
+
+    def test_read_dedups_exact_duplicates(self):
+        # The append-only writer may persist a duplicate (e.g. a WS reconnect
+        # redelivery); the read boundary must collapse exact duplicates.
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(root=os.path.join(tmp, "ticks"))
+            for _ in range(2):
+                mirror.add_trade("BTCUSDT", _DAY0, 100.0, 1.0, True)
+            mirror.flush()
+            df = mirror._store.read("BTCUSDT", "trades", exchange="binance")
+            self.assertEqual(len(df), 1)
+
+    def test_restart_reloads_day_and_does_not_truncate(self):
+        # A fresh mirror (simulating a process restart) must reload the
+        # existing day file before overwriting, so a flush of new rows appends
+        # rather than wiping the morning's data.
+        root = None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "ticks")
+            m1 = tps.LiveParquetMirror(root=root)
+            for i in range(4):
+                m1.add_trade("BTCUSDT", _DAY0 + i * 1000, 100.0, 1.0, True)
+            m1.flush()
+
+            # New instance, same root — the previous day's rows are on disk.
+            m2 = tps.LiveParquetMirror(root=root)
+            for i in range(4, 6):
+                m2.add_trade("BTCUSDT", _DAY0 + i * 1000, 101.0, 1.0, True)
+            m2.flush()
+
+            df = m2._store.read("BTCUSDT", "trades", exchange="binance")
+            self.assertEqual(len(df), 6)
+
+    def test_empty_flush_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(root=os.path.join(tmp, "ticks"))
+            self.assertEqual(mirror.flush(), {})
+
+    def test_rows_span_two_days(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(root=os.path.join(tmp, "ticks"))
+            mirror.add_trade("BTCUSDT", _DAY0, 100.0, 1.0, True)
+            mirror.add_trade("BTCUSDT", _DAY0 + 86_400_000, 101.0, 1.0, False)
+            mirror.flush()
+            days = mirror._store.list_days("BTCUSDT", "trades")
+            self.assertEqual(len(days), 2)
+            self.assertEqual(mirror.latest_parquet_date("BTCUSDT"), max(days))
+
+    def test_past_day_accumulator_is_evicted(self):
+        # After the UTC day rolls over, the prior day's accumulator must be
+        # dropped from memory (bounded footprint), but its file stays intact.
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(root=os.path.join(tmp, "ticks"))
+            mirror.add_trade("BTCUSDT", _DAY0, 100.0, 1.0, True)         # day 0
+            mirror.flush()
+            mirror.add_trade("BTCUSDT", _DAY0 + 86_400_000, 101.0, 1.0, True)  # day 1
+            mirror.flush()
+
+            keys = [k for k in mirror._acc if k[1] == "trades"]
+            self.assertEqual(keys, [("BTCUSDT", "trades", "2021-01-02")])
+            # Day 0's file survives eviction.
+            df = mirror._store.read(
+                "BTCUSDT", "trades", exchange="binance",
+                from_date="2021-01-01", to_date="2021-01-01",
+            )
+            self.assertEqual(len(df), 1)
+
+    def test_failed_write_keeps_rows_and_retries(self):
+        # A transient write failure must NOT drop rows: they stay in the
+        # accumulator and land on the next successful flush.
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(root=os.path.join(tmp, "ticks"))
+            for i in range(4):
+                mirror.add_trade("BTCUSDT", _DAY0 + i * 1000, 100.0, 1.0, True)
+
+            calls = {"n": 0}
+            real_write = mirror._store.write_day_table
+
+            def flaky(exchange, symbol, dataset, day, table):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise OSError("disk hiccup")
+                return real_write(exchange, symbol, dataset, day, table)
+
+            mirror._store.write_day_table = flaky  # type: ignore[assignment]
+            self.assertEqual(mirror.flush(), {})        # write failed
+            mirror.flush()                              # retried (no new rows)
+            df = mirror._store.read("BTCUSDT", "trades", exchange="binance")
+            self.assertEqual(len(df), 4)
+
+    def test_buffer_cap_drops_oldest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mirror = tps.LiveParquetMirror(
+                root=os.path.join(tmp, "ticks"), max_buffer_rows=10
+            )
+            for i in range(25):
+                mirror.add_trade("BTCUSDT", _DAY0 + i * 1000, 100.0, 1.0, True)
+            written = mirror.flush()
+            # Only the cap survives; oldest were dropped to bound memory.
+            self.assertEqual(written.get("BTCUSDT.trades.2021-01-01"), 10)
+
+
 if __name__ == "__main__":
     unittest.main()

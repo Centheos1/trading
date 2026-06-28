@@ -44,6 +44,7 @@ except ImportError:
 from data_service import TickDataCollector  # noqa: E402 — after sys.path patch
 from tick_parquet_store import (  # noqa: E402
     DATASETS,
+    LiveParquetMirror,
     TickParquetStore,
     evaluate_pipeline_health,
 )
@@ -283,6 +284,84 @@ def _default_max_h5_gb() -> float:
         return 8.0
 
 
+def _min_free_disk_gb() -> float:
+    """Free-disk floor (GB) below which the live HDF5 is rotated early.
+
+    A hard guard against the 2026-06 disk-full incident (root volume hit 96%
+    with two multi-GB HDF5 files). Independent of ``--max-h5-gb``: even if the
+    size cap is large or disabled, the collector archives + deletes the live
+    HDF5 and restarts clean once free space drops below this floor, so the box
+    can never wedge itself full. Default 2.0 GB; tune via ``$MIN_FREE_DISK_GB``.
+    """
+    raw = os.environ.get("MIN_FREE_DISK_GB")
+    if raw is None or raw.strip() == "":
+        return 2.0
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid MIN_FREE_DISK_GB=%r — falling back to 2.0", raw)
+        return 2.0
+
+
+def _rotation_reason(h5_path: str, max_h5_bytes: int) -> str | None:
+    """Return a human-readable reason to rotate the live HDF5, or ``None``.
+
+    Two independent triggers, either of which forces an archive+delete+restart:
+
+      * **Size cap** — the file grew past ``max_h5_bytes`` (``--max-h5-gb``).
+      * **Disk floor** — free space on the data volume fell below
+        :func:`_min_free_disk_gb`, regardless of file size. HDF5 is only a
+        secondary artifact now (the Parquet mirror is the durable store), so
+        shedding it to reclaim space is always safe.
+    """
+    if not os.path.exists(h5_path):
+        return None
+
+    if max_h5_bytes > 0:
+        try:
+            size = os.path.getsize(h5_path)
+        except OSError:
+            size = 0
+        if size >= max_h5_bytes:
+            return (
+                f"HDF5 file {h5_path} reached {size / 1024**3:.2f} GB "
+                f"(limit {max_h5_bytes / 1024**3:.2f} GB)"
+            )
+
+    floor_gb = _min_free_disk_gb()
+    if floor_gb > 0:
+        try:
+            free_gb = shutil.disk_usage(os.path.dirname(h5_path) or ".").free / 1024**3
+        except OSError:
+            free_gb = None
+        if free_gb is not None and free_gb < floor_gb:
+            return (
+                f"Free disk on data volume fell to {free_gb:.2f} GB "
+                f"(floor {floor_gb:.2f} GB)"
+            )
+    return None
+
+
+def _default_parquet_flush_interval() -> int:
+    """Default mirror flush cadence: ``$PARQUET_FLUSH_INTERVAL`` if set, else 60.
+
+    The live mirror buffers ticks in memory between flushes, so a shorter
+    interval means a smaller peak buffer and a tighter worst-case data-loss
+    window if the collector is killed. 60s keeps per-process buffers to a few
+    tens of MB on the busiest symbols.
+    """
+    raw = os.environ.get("PARQUET_FLUSH_INTERVAL")
+    if raw is None or raw.strip() == "":
+        return 60
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid PARQUET_FLUSH_INTERVAL=%r — falling back to 60", raw
+        )
+        return 60
+
+
 def _check_disk_headroom(data_dir: str, max_h5_gb: float, n_symbols: int) -> None:
     """Log the rotation/disk budget and warn if headroom is thin.
 
@@ -330,61 +409,53 @@ def _check_disk_headroom(data_dir: str, max_h5_gb: float, n_symbols: int) -> Non
 # ---------------------------------------------------------------------------
 
 def _parquet_flush_worker(
+    mirror: LiveParquetMirror,
     h5_path: str,
-    symbol: str,
-    exchange: str,
-    parquet_root: str,
     interval_sec: int,
     stop_event: threading.Event,
     max_h5_bytes: int,
 ) -> None:
-    """Drain new HDF5 rows into Parquet on a fixed interval.
+    """Flush the live Parquet mirror on a fixed interval and enforce rotation.
 
-    Also enforces the size cap on the live HDF5 file by raising SIGINT
-    (which collect() handles as KeyboardInterrupt) when the file grows
-    past ``max_h5_bytes``.  The main thread then archives + deletes the
-    file and exits so the container is restarted clean.
+    The durable mirror (:class:`LiveParquetMirror`) is fed DIRECTLY off the
+    WebSocket feed by :class:`TickDataCollector`, so this worker no longer
+    reads the HDF5 file to produce Parquet — that read path was the cause of
+    the 2026-06 freezes (a corrupt HDF5 silently froze the mirror). It now
+    only:
+
+      1. flushes the in-memory mirror buffers to per-day Parquet, and
+      2. enforces the HDF5 size cap by requesting rotation (SIGINT) when the
+         file grows past ``max_h5_bytes`` — HDF5 is still written by the C++
+         engine as a secondary artifact, just no longer on the durability
+         path.
     """
-    store = TickParquetStore(root=parquet_root)
     logger.info(
-        "Parquet flush thread started for %s/%s (every %ds, rotation @ %s)",
-        exchange,
-        symbol,
+        "Parquet mirror flush thread started (every %ds, HDF5 rotation @ %s)",
         interval_sec,
         f"{max_h5_bytes / 1024**3:.1f} GB" if max_h5_bytes > 0 else "disabled",
     )
     while not stop_event.wait(interval_sec):
         try:
-            store.flush_from_h5(h5_path, symbol, exchange)
+            mirror.flush()
         except Exception as exc:
-            logger.warning("Parquet flush failed: %s", exc)
+            logger.warning("Parquet mirror flush failed: %s", exc)
 
-        if max_h5_bytes > 0 and os.path.exists(h5_path):
+        rotate_reason = _rotation_reason(h5_path, max_h5_bytes)
+        if rotate_reason:
+            logger.warning("%s — requesting rotation", rotate_reason)
+            _rotation_requested.set()
             try:
-                size = os.path.getsize(h5_path)
+                os.kill(os.getpid(), signal.SIGINT)
             except OSError:
-                continue
-            if size >= max_h5_bytes:
-                logger.warning(
-                    "HDF5 file %s reached %.2f GB (limit %.2f GB) — "
-                    "requesting rotation",
-                    h5_path,
-                    size / 1024**3,
-                    max_h5_bytes / 1024**3,
-                )
-                _rotation_requested.set()
-                try:
-                    os.kill(os.getpid(), signal.SIGINT)
-                except OSError:
-                    pass
-                return
+                pass
+            return
 
-    # Final flush on clean shutdown so we capture rows the main thread is
-    # about to flush + close.
+    # Final flush on clean shutdown so we capture rows buffered since the
+    # last interval tick.
     try:
-        store.flush_from_h5(h5_path, symbol, exchange)
+        mirror.flush()
     except Exception as exc:
-        logger.warning("Final Parquet flush failed: %s", exc)
+        logger.warning("Final Parquet mirror flush failed: %s", exc)
 
 
 def _archive_and_remove_h5(
@@ -474,8 +545,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--parquet-flush-interval",
         type=int,
-        default=900,
-        help="Seconds between HDF5 → Parquet flushes (0 = disable mirror).",
+        default=_default_parquet_flush_interval(),
+        help="Seconds between live Parquet mirror flushes (0 = disable "
+             "mirror). The mirror buffers ticks in memory between flushes, so "
+             "this also bounds peak buffer size and the worst-case data-loss "
+             "window on a crash. Default 60 (from $PARQUET_FLUSH_INTERVAL).",
     )
     p.add_argument(
         "--max-h5-gb",
@@ -507,10 +581,15 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
 
     _rotation_requested.clear()
 
+    # Durable Parquet mirror fed straight off the feed (decoupled from the
+    # corruption-prone live HDF5 read — see LiveParquetMirror).
+    mirror = LiveParquetMirror(root=parquet_root, exchange=exchange)
+
     collector = TickDataCollector(
         exchange=exchange,
         futures=args.futures,
         store_path=store_path,
+        parquet_mirror=mirror,
     )
 
     flush_stop = threading.Event()
@@ -519,7 +598,7 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
         flush_thread = threading.Thread(
             target=_parquet_flush_worker,
             args=(
-                store_path, symbol, exchange, parquet_root,
+                mirror, store_path,
                 args.parquet_flush_interval, flush_stop, max_h5_bytes,
             ),
             name=f"parquet-flush-{symbol}",
@@ -544,22 +623,20 @@ def _collect_one(args: argparse.Namespace, symbol: str) -> int:
         exit_code = 1
     finally:
         # At this point data_service.collect() has already called
-        # store.flush() + store.close().  The HDF5 file is closed and
-        # self-consistent on disk — safe to read with locking=False.
+        # store.flush() + store.close().  The HDF5 file is closed.
 
         # 1. Stop the Parquet flush thread and wait for it to drain.
         flush_stop.set()
         if flush_thread is not None:
             flush_thread.join(timeout=30)
 
-        # 2. Final Parquet flush: captures any rows the background thread
-        #    missed between its last wake-up and store.close().
+        # 2. Final mirror flush: captures any rows buffered between the
+        #    background thread's last wake-up and shutdown. Fed off the
+        #    live feed, so this is independent of the HDF5 file's state.
         try:
-            TickParquetStore(root=parquet_root).flush_from_h5(
-                store_path, symbol, exchange
-            )
+            mirror.flush()
         except Exception as exc:
-            logger.warning("Final Parquet flush failed: %s", exc)
+            logger.warning("Final Parquet mirror flush failed: %s", exc)
 
         # 3. Either archive+rotate or upload the closed HDF5 to S3.
         if _rotation_requested.is_set():

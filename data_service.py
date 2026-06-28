@@ -236,6 +236,7 @@ class TickDataCollector:
         futures: bool = True,
         store_path: str | None = None,
         redis_url: str | None = None,
+        parquet_mirror=None,
     ):
         if ofe is None:
             raise RuntimeError(
@@ -245,6 +246,13 @@ class TickDataCollector:
 
         self.exchange = exchange
         self.futures = futures
+
+        # Durable Parquet mirror fed directly off the feed (decoupled from
+        # HDF5). When set, every trade/depth message is also buffered here
+        # and periodically flushed to per-day Parquet — so HDF5 corruption
+        # or rotation can no longer freeze the mirror. See
+        # tick_parquet_store.LiveParquetMirror.
+        self._mirror = parquet_mirror
 
         if store_path is None:
             os.makedirs("data", exist_ok=True)
@@ -372,6 +380,12 @@ class TickDataCollector:
                             trade.quantity = qty
                             trade.is_buyer_maker = is_buyer_maker
                             self.engine.process_trade(trade)
+                            # Durable mirror, straight off the feed.
+                            if self._mirror is not None:
+                                self._mirror.add_trade(
+                                    symbol_upper, ts_ms, price, qty,
+                                    is_buyer_maker,
+                                )
                             # Publish to Redis for the strategy service.
                             self._publish_trade(
                                 symbol_upper, ts_ms, price, qty,
@@ -413,6 +427,12 @@ class TickDataCollector:
                             update.bids = bids
                             update.asks = asks
                             self.engine.process_depth(update)
+                            # Durable mirror, straight off the feed.
+                            if self._mirror is not None:
+                                self._mirror.add_depth(
+                                    symbol_upper, ts_ms, raw_bids, raw_asks,
+                                    is_snapshot=False,
+                                )
                             # Publish to Redis for the strategy service.
                             self._publish_depth(
                                 symbol_upper, ts_ms, raw_bids, raw_asks,
@@ -480,14 +500,17 @@ class TickDataCollector:
                 len(snapshot.bids),
                 len(snapshot.asks),
             )
+            snap_bids = [(lv.price, lv.quantity) for lv in snapshot.bids]
+            snap_asks = [(lv.price, lv.quantity) for lv in snapshot.asks]
+            # Durable mirror, straight off the feed.
+            if self._mirror is not None:
+                self._mirror.add_depth(
+                    symbol, ts_ms, snap_bids, snap_asks, is_snapshot=True,
+                )
             # Publish the initial snapshot so a freshly-started strategy
             # service has a full book before the diff stream starts.
             self._publish_depth(
-                symbol,
-                ts_ms,
-                [(lv.price, lv.quantity) for lv in snapshot.bids],
-                [(lv.price, lv.quantity) for lv in snapshot.asks],
-                is_snapshot=True,
+                symbol, ts_ms, snap_bids, snap_asks, is_snapshot=True,
             )
         except Exception as e:
             logger.error("Failed to fetch depth snapshot: %s", e)
