@@ -25,6 +25,13 @@
 
 set -euo pipefail
 
+# run-parts/cron runs with a minimal PATH that can omit /usr/local/bin, where
+# the AWS CLI v2 installs (/usr/local/bin/aws -> /usr/local/aws-cli/...). If aws
+# is not found, emit_metric silently skips and the CloudWatch heartbeat goes
+# missing — which the alarm treats as breaching, masking the very failures it
+# exists to catch. Prepend the standard locations so aws/docker always resolve.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 APP_DIR="${APP_DIR:-/home/ubuntu/app/trading}"
 LOG_FILE="${APP_DIR}/logs/pipeline_health.log"
 

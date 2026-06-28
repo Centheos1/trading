@@ -507,17 +507,34 @@ Expected OHLCV collector log line during backfill:
 
 ### 5.1 Install / refresh the hourly cron
 
-`setup_ec2.sh` installs the cron automatically on first setup.  After any
-update to `scripts/s3_sync.sh`, refresh it on the running instance:
+`setup_ec2.sh` installs both hourly crons as **symlinks** into `/etc/cron.hourly`
+pointing at the repo scripts, so a `git pull` keeps them current automatically:
 
 ```bash
 cd ~/app/trading
-sudo cp scripts/s3_sync.sh /etc/cron.hourly/s3_sync
-sudo chmod +x /etc/cron.hourly/s3_sync
-
-# Verify it's there and executable
-ls -l /etc/cron.hourly/s3_sync
+sudo chmod +x scripts/s3_sync.sh scripts/pipeline_health.sh
+sudo ln -sf "$PWD/scripts/s3_sync.sh"        /etc/cron.hourly/s3_sync
+sudo ln -sf "$PWD/scripts/pipeline_health.sh" /etc/cron.hourly/zz_pipeline_health
+ls -l /etc/cron.hourly/            # both should be symlinks -> ~/app/trading/scripts/...
 ```
+
+> **Why symlinks, not `cp` (2026-06 follow-up).** The crons used to be one-time
+> copies. A later `git pull` then left `/etc/cron.hourly/zz_pipeline_health`
+> running a **stale** script from before the CloudWatch heartbeat existed: it
+> ran green every hour but never emitted `PipelineHealthy`, so the alarm sat
+> permanently in `ALARM` on missing data and could never page on a real outage.
+> Symlinks make the installed cron *be* the repo file. If you ever `cp` again,
+> re-run a deploy or the `ln -sf` above. Confirm the heartbeat is actually
+> flowing (not just that the cron is green):
+>
+> ```bash
+> grep -c emit_metric /etc/cron.hourly/zz_pipeline_health      # must be > 0
+> aws cloudwatch get-metric-statistics --namespace Trading/Pipeline \
+>   --metric-name PipelineHealthy --dimensions Name=Host,Value=$(hostname) \
+>   --start-time "$(date -u -d '6 hours ago' +%FT%TZ)" \
+>   --end-time "$(date -u +%FT%TZ)" --period 3600 --statistics Minimum
+> # Expect ~1 datapoint per hour, all = 1.0
+> ```
 
 Trigger an immediate sync to confirm it works:
 

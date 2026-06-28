@@ -181,10 +181,16 @@ log "docker-compose@trading.service enabled (starts on boot)."
 # ---------------------------------------------------------------------------
 # 7. Install hourly S3 sync cron (runs on the host, not in the container)
 # ---------------------------------------------------------------------------
+# SYMLINK, not copy: /etc/cron.hourly was previously a one-time `cp`, so a later
+# `git pull` left the cron running a STALE script (the 2026-06 follow-up: the
+# installed health check predated the CloudWatch heartbeat and silently never
+# emitted, leaving the alarm permanently breaching). A symlink to the repo file
+# means every `git pull` updates the cron job too. run-parts follows symlinks
+# and accepts these names (no dot/extension).
 if [ -f scripts/s3_sync.sh ]; then
-    sudo cp scripts/s3_sync.sh /etc/cron.hourly/s3_sync
-    sudo chmod +x /etc/cron.hourly/s3_sync
-    log "Hourly S3 sync cron installed at /etc/cron.hourly/s3_sync."
+    sudo chmod +x scripts/s3_sync.sh
+    sudo ln -sf "${APP_DIR}/scripts/s3_sync.sh" /etc/cron.hourly/s3_sync
+    log "Hourly S3 sync cron linked → ${APP_DIR}/scripts/s3_sync.sh."
 fi
 
 # ---------------------------------------------------------------------------
@@ -195,9 +201,9 @@ fi
 # mirror is producing RECENT data (the guardrail for the 2026-06 freeze) and
 # alerts on failure — see scripts/pipeline_health.sh and docs/DEPLOYMENT.md.
 if [ -f scripts/pipeline_health.sh ]; then
-    sudo cp scripts/pipeline_health.sh /etc/cron.hourly/zz_pipeline_health
-    sudo chmod +x /etc/cron.hourly/zz_pipeline_health
-    log "Hourly pipeline-health alarm installed at /etc/cron.hourly/zz_pipeline_health."
+    sudo chmod +x scripts/pipeline_health.sh
+    sudo ln -sf "${APP_DIR}/scripts/pipeline_health.sh" /etc/cron.hourly/zz_pipeline_health
+    log "Hourly pipeline-health alarm linked → ${APP_DIR}/scripts/pipeline_health.sh."
 fi
 
 # ---------------------------------------------------------------------------
