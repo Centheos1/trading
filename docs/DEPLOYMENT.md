@@ -417,6 +417,29 @@ OANDA_ACCOUNT_TYPE=practice
 
 Save: `Ctrl+O` → Enter. Exit: `Ctrl+X`.
 
+> **`.env` is gitignored — reconcile it on every deploy.** Because `.env`
+> persists per-box, a stale file silently masks new shipped defaults. This was
+> the root cause of the 2026-06 freeze: after a redeploy the mirror kept running
+> the old `PARQUET_FLUSH_INTERVAL=900` / `MAX_H5_GB=8` settings even though the
+> rearchitecture had lowered them to `60` / `3`. `setup_ec2.sh` now runs
+> `scripts/reconcile_env.sh` automatically, but run it by hand after any
+> `git pull` that changes `.env.template`:
+>
+> ```bash
+> cd ~/app/trading
+> DRY_RUN=1 bash scripts/reconcile_env.sh   # preview: [update]/[add]/[drift]
+> bash scripts/reconcile_env.sh             # apply (backs up .env first)
+> docker compose --profile ohlcv up -d      # recreate to pick up new values
+> ```
+>
+> It **forces** the managed reliability tunables (`MAX_H5_GB`,
+> `MIN_FREE_DISK_GB`, `PARQUET_FLUSH_INTERVAL`, `HEALTH_MAX_STALENESS_HOURS`,
+> `S3_SYNC_MAX_AGE_MIN`, `CLOUDWATCH_NAMESPACE`, `DATA_STORE`) to the template
+> value, **adds** any missing keys, and **reports** other drift without touching
+> operator secrets (`S3_BUCKET`, `OANDA_*`, `BINANCE_*`, `ALERT_*`). Verify the
+> live values inside the container with
+> `docker compose exec data env | grep -E 'PARQUET_FLUSH|MAX_H5|MIN_FREE'`.
+
 ---
 
 ## Part 4 — Start data collection

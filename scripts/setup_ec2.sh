@@ -114,7 +114,19 @@ if [ ! -f .env ]; then
     fi
     log ".env created — review with: nano ${APP_DIR}/.env"
 else
-    log ".env already exists — skipping."
+    log ".env already exists — reconciling against template."
+fi
+
+# Reconcile .env against the template on EVERY deploy. .env is gitignored, so a
+# box otherwise keeps whatever values it was first created with — a stale .env
+# then SILENTLY masks new shipped defaults (root cause of the 2026-06 freeze,
+# which kept running the old 900s/8 GB settings after a redeploy). reconcile_env
+# adds missing keys, forces the managed reliability tunables to the template
+# value, and reports any other drift. Operator secrets (blank in the template)
+# are never touched.
+if [ -f scripts/reconcile_env.sh ]; then
+    bash scripts/reconcile_env.sh .env .env.template \
+        || log "WARN: .env reconcile reported issues (see output above)."
 fi
 
 # ---------------------------------------------------------------------------
