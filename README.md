@@ -1,5 +1,11 @@
 # Trading App — Backtesting & Optimisation Platform
 
+Hello, this is a project I have been chipping away at. 
+
+The goal is to implement this [Strategy][stategy.md]
+
+It is a work in progress.
+
 ### Activate the virtual environment
 
 ```bash
