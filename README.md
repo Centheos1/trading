@@ -2,7 +2,7 @@
 
 Hello, this is a project I have been chipping away at. 
 
-The goal is to implement this [Strategy][stategy.md]
+The goal is to implement this [Strategy](strategy.md)
 
 It is a work in progress.
 
@@ -15,13 +15,12 @@ source ./.venv/bin/activate
 ### Run the distributed stack (local development)
 
 ```bash
-docker compose up
-```
+# Collector host (Parquet-only ticks + optional bundled Redis for laptop)
+docker compose --profile bundled-redis up -d data-btc data-eth
 
-This brings up three services: `redis`, `data`, and `strategy`. The
-strategy service exposes its REST control plane on
-<http://localhost:8000>. Live market visualisation is provided
-externally via the Bookmap API.
+# Strategy lives on a separate host / profile — not on the collector EC2
+docker compose --profile strategy --profile bundled-redis up -d strategy
+```
 
 A multi-layer crypto trading strategy research platform implementing the
 **Tide / Wave / Ripple** hierarchy with event-time backtesting, multi-objective
@@ -29,18 +28,14 @@ parameter optimisation (NSGA-II), and a C++ order flow engine.
 
 ---
 
-## Architecture — distributed service stack (current)
-
-The previous monolith (`main.py` CLI + Qt desktop UI) was replaced in 2026
-by a distributed Docker Compose stack. The table below describes the current
-deployed architecture.
+## Architecture — greenfield collector + separate strategy host
 
 | Service | Role |
 |---|---|
-| `data` (`collect_ticks.py` / `data_service.py`) | Binance WebSocket → HDF5 / Parquet; publishes to Redis |
-| `ohlcv-collector` (`collect_ohlcv.py`) | Binance / Oanda OHLCV → Parquet / S3 |
-| `strategy` (`strategy/main.py`) | FastAPI: backtest (`POST /api/backtest`), optimise (`POST /api/optimise`), live execution, health |
-| `redis` | Pub/sub bus between `data` and `strategy` services |
+| `data-btc` / `data-eth` | Binance WS → immutable Parquet shards; Redis Streams `md:{venue}:*` |
+| `ohlcv-collector` | Binance / Oanda OHLCV → yearly Parquet / S3 (`workers=2`, mem-capped) |
+| `strategy` (separate host) | FastAPI backtest / optimise / live; subscribes to ElastiCache Streams |
+| ElastiCache Redis | Live MD bus only (not durable). Laptop: `--profile bundled-redis` |
 
 **Live execution** is controlled via `ARM_EXECUTION` env var and the REST API:
 
@@ -102,7 +97,7 @@ strategy/engine/execution_bridge.py  Per-symbol gate + dispatch (OBSERVE / PAPER
 strategy/api/rest_routes.py      REST control plane: /api/backtest, /api/optimise,
                                    /api/execution, /api/execution/arm
 
-collect_ticks.py / data_service.py  Data service: Binance WS → HDF5/Parquet → Redis
+collect_ticks.py / data_service.py  Collector: Binance WS → Parquet shards → Redis Streams
 collect_ohlcv.py / ohlcv_store.py   OHLCV collector: Binance/Oanda → Parquet/S3
 
 ── Execution Layer ───────────────────────────────────────────────────────────

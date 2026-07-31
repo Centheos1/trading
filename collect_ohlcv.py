@@ -107,6 +107,10 @@ _shutdown = threading.Event()
 # pass. The next pass re-reads ``last_ts`` and resumes from the same point.
 _FETCH_MAX_ATTEMPTS: int = 3
 _FETCH_BACKOFF_BASE_S: float = 2.0
+# Inner adapter loops must not retry forever (SSL wedges OOM'd the host).
+# After this many consecutive failures at one cursor, raise so
+# ``_fetch_with_retries`` can bound the outer attempts and skip the symbol.
+_ADAPTER_MAX_RETRIES: int = 5
 
 
 def _handle_signal(signum, frame):  # noqa: ANN001
@@ -244,6 +248,7 @@ class BinanceAdapter(ExchangeAdapter):
         interval = _BINANCE_INTERVAL[timeframe]
         rows: List[Tuple] = []
         cursor = from_ts
+        fail_streak = 0
         while cursor <= to_ts and not _shutdown.is_set():
             self._rl.acquire()
             params = {
@@ -258,19 +263,39 @@ class BinanceAdapter(ExchangeAdapter):
                     f"{self.BASE}/fapi/v1/klines", params=params, timeout=20
                 )
                 if resp.status_code == 429:
+                    fail_streak += 1
+                    if fail_streak > _ADAPTER_MAX_RETRIES:
+                        raise RuntimeError(
+                            f"Binance 429 exceeded {_ADAPTER_MAX_RETRIES} retries "
+                            f"for {symbol} @ {cursor}"
+                        )
                     logger.warning(
-                        "Binance 429 rate-limit for %s — sleeping 60s", symbol
+                        "Binance 429 rate-limit for %s — sleeping 60s "
+                        "(%d/%d)",
+                        symbol, fail_streak, _ADAPTER_MAX_RETRIES,
                     )
                     time.sleep(60)
                     continue
                 resp.raise_for_status()
+                fail_streak = 0
+            except RuntimeError:
+                raise
             except Exception as exc:  # noqa: BLE001
+                fail_streak += 1
+                if fail_streak > _ADAPTER_MAX_RETRIES:
+                    raise RuntimeError(
+                        f"Binance fetch failed after {_ADAPTER_MAX_RETRIES} "
+                        f"retries for {symbol} @ {cursor}: {exc}"
+                    ) from exc
                 logger.warning(
-                    "Binance error %s for %s @ %s: %s; retrying in 10s",
+                    "Binance error %s for %s @ %s: %s; retrying in 10s "
+                    "(%d/%d)",
                     exc.__class__.__name__,
                     symbol,
                     cursor,
                     exc,
+                    fail_streak,
+                    _ADAPTER_MAX_RETRIES,
                 )
                 time.sleep(10)
                 continue
@@ -330,6 +355,7 @@ class OandaAdapter(ExchangeAdapter):
         from oandapyV20.exceptions import V20Error
         import oandapyV20.endpoints.instruments as instruments
 
+        fail_streak = 0
         while cursor <= to_ts and not _shutdown.is_set():
             batch_end = min(cursor + batch_ms, to_ts)
             self._rl.acquire()
@@ -344,6 +370,7 @@ class OandaAdapter(ExchangeAdapter):
                     instrument=symbol, params=params
                 )
                 rv = self._client.client.request(r)
+                fail_streak = 0
             except V20Error as exc:
                 msg = str(exc)
                 low = msg.lower()
@@ -368,20 +395,36 @@ class OandaAdapter(ExchangeAdapter):
                     )
                     cursor = batch_end + tf_ms
                     continue
+                fail_streak += 1
+                if fail_streak > _ADAPTER_MAX_RETRIES:
+                    raise RuntimeError(
+                        f"Oanda V20Error after {_ADAPTER_MAX_RETRIES} retries "
+                        f"for {symbol} @ {cursor}: {exc}"
+                    ) from exc
                 logger.warning(
-                    "Oanda V20Error %s @ %s: %s; sleeping 10s",
+                    "Oanda V20Error %s @ %s: %s; sleeping 10s (%d/%d)",
                     symbol,
                     cursor,
                     exc,
+                    fail_streak,
+                    _ADAPTER_MAX_RETRIES,
                 )
                 time.sleep(10)
                 continue
             except Exception as exc:  # noqa: BLE001
+                fail_streak += 1
+                if fail_streak > _ADAPTER_MAX_RETRIES:
+                    raise RuntimeError(
+                        f"Oanda fetch failed after {_ADAPTER_MAX_RETRIES} "
+                        f"retries for {symbol} @ {cursor}: {exc}"
+                    ) from exc
                 logger.warning(
-                    "Oanda error %s @ %s: %s; sleeping 10s",
+                    "Oanda error %s @ %s: %s; sleeping 10s (%d/%d)",
                     symbol,
                     cursor,
                     exc,
+                    fail_streak,
+                    _ADAPTER_MAX_RETRIES,
                 )
                 time.sleep(10)
                 continue
@@ -697,8 +740,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Parallel symbol fetches.",
+        default=int(os.environ.get("OHLCV_WORKERS", "2")),
+        help="Parallel symbol fetches (default 2 — keep tick collector safe).",
     )
     p.add_argument(
         "--data-store",

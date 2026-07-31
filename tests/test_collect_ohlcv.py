@@ -340,8 +340,7 @@ def _binance_candle(ts_ms: int, c=100.0):
 
 
 class TestYearlyPartitionedStore(unittest.TestCase):
-    """LocalParquetStore must split/read/resume across yearly files and keep
-    reading legacy single-file parquets."""
+    """LocalParquetStore must split/read/resume across yearly files only."""
 
     def _year_file(self, root, exchange, symbol, year, tf="1m"):
         return os.path.join(root, "ohlcv", exchange, symbol, tf, f"{year}.parquet")
@@ -424,7 +423,7 @@ class TestYearlyPartitionedStore(unittest.TestCase):
             symbols = store.list_symbols("binance", "1m")
         self.assertEqual(symbols, ["BTCUSDT", "ETHUSDT"])
 
-    # -- legacy single-file fallback ----------------------------------------
+    # -- legacy single-file ignored (greenfield) ----------------------------
     def _write_legacy(self, root, exchange, symbol, tss, tf="1m"):
         path = self._legacy_file(root, exchange, symbol, tf)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -433,32 +432,30 @@ class TestYearlyPartitionedStore(unittest.TestCase):
         ).to_parquet(path, index=False)
         return path
 
-    def test_legacy_file_is_readable(self):
+    def test_legacy_file_is_ignored(self):
+        """Greenfield: single-file layout is not read or listed."""
         with tempfile.TemporaryDirectory() as tmp:
             store = LocalParquetStore(root=tmp)
             self._write_legacy(tmp, "binance", "LEG", [_TS_2021, _TS_2021 + 60_000])
             df = store.read("binance", "LEG", "1m")
             last = store.get_last_timestamp("binance", "LEG", "1m")
             symbols = store.list_symbols("binance", "1m")
-        self.assertEqual(len(df), 2)
-        self.assertEqual(last, _TS_2021 + 60_000)
-        self.assertIn("LEG", symbols)
+        self.assertEqual(len(df), 0)
+        self.assertIsNone(last)
+        self.assertNotIn("LEG", symbols)
 
-    def test_legacy_and_yearly_union_with_resume(self):
-        """Legacy history + new yearly writes union on read, and resume picks
-        up past the legacy max (the Binance back-compat path)."""
+    def test_legacy_does_not_affect_yearly_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LocalParquetStore(root=tmp)
             self._write_legacy(tmp, "binance", "BTCUSDT", [_TS_2021, _TS_2022])
-            # Resume should be past the legacy max → new data lands in yearly file.
             last = store.get_last_timestamp("binance", "BTCUSDT", "1m")
-            self.assertEqual(last, _TS_2022)
+            self.assertIsNone(last)
             store.append("binance", "BTCUSDT", [_binance_candle(_TS_2023)], "1m")
             df = store.read("binance", "BTCUSDT", "1m")
             self.assertTrue(
                 os.path.isfile(self._year_file(tmp, "binance", "BTCUSDT", 2023))
             )
-        self.assertEqual(len(df), 3)
+        self.assertEqual(len(df), 1)
 
     # -- corrupt-file quarantine --------------------------------------------
     def test_corrupt_year_file_is_quarantined_on_append(self):

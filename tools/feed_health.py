@@ -380,6 +380,14 @@ def collect_ohlcv_report(
                 gaps = _detect_gaps(ts_sorted, tf_ms, threshold_ms, exchange)
                 largest = max((g.gap_minutes for g in gaps), default=0.0)
 
+                # Trailing staleness: last candle vs wall clock (not just
+                # internal gaps). A feed that stopped mid-day has age >> tf.
+                now_ms = int(time.time() * 1000)
+                trailing_age_ms = now_ms - last_ts
+                # Allow 3× timeframe + 10m slack for continuous 1m collectors.
+                trailing_limit_ms = max(threshold_ms, tf_ms * 3) + 10 * 60_000
+                trailing_stale = trailing_age_ms > trailing_limit_ms
+
                 results.append(OhlcvSymbolHealth(
                     exchange=exchange, symbol=symbol, timeframe=timeframe,
                     row_count=row_count,
@@ -388,7 +396,13 @@ def collect_ohlcv_report(
                     gap_count=len(gaps),
                     largest_gap_minutes=largest,
                     unexpected_gaps=gaps[:5],  # top 5 for display
-                    ok=True,
+                    ok=not trailing_stale,
+                    error=(
+                        f"trailing stale: last candle age "
+                        f"{trailing_age_ms / 60_000:.1f}m"
+                        if trailing_stale
+                        else None
+                    ),
                 ))
             except Exception as exc:  # noqa: BLE001
                 results.append(OhlcvSymbolHealth(

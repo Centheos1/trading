@@ -1,65 +1,39 @@
-"""Headless tick data collector for EC2 deployment.
+"""Headless Parquet-only tick collector for EC2 (greenfield).
 
-Wraps TickDataCollector from data_service.py with:
-  - CLI argument parsing (no interactive prompts)
-  - Per-symbol HDF5 store at ``data/ticks/{SYMBOL}_ticks.h5``
-  - Background Parquet flush thread (durable, queryable mirror in
-    ``data/ticks/{exchange}/{SYMBOL}/{dataset}/YYYY-MM-DD.parquet``)
-  - Optional S3 upload on clean exit
-  - HDF5 size-based rotation: archives the old file to S3 and starts
-    fresh so the local disk never fills indefinitely
-  - SIGTERM → graceful shutdown (flush → close → upload)
-  - Structured logging to stdout + rotating file
+One process per ``(venue, symbol)``. Writes immutable Parquet shards under
+``data/ticks/{venue}/{SYMBOL}/{dataset}/date=.../hour=.../`` and publishes
+best-effort to Redis Streams ``md:{venue}:{kind}``.
 
 Usage:
     python collect_ticks.py --symbol BTCUSDT
-    python collect_ticks.py --symbol BTCUSDT --duration 3600 --s3-bucket my-bucket
-    python collect_ticks.py --symbols BTCUSDT,ETHUSDT --log-level DEBUG
+    python collect_ticks.py --symbols BTCUSDT,ETHUSDT   # forks one child each
+    python collect_ticks.py --symbol BTCUSDT --health-check
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
 import logging.handlers
 import os
-import shutil
 import signal
 import sys
-import threading
+import time
 from datetime import datetime, timezone
+from typing import List, Optional
 
-# Ensure the C++ module in the build directory is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__),
-                                "backtestingCpp", "orderflow", "build"))
-
-try:
-    import orderflow_engine as ofe  # noqa: F401 — import validates build
-except ImportError:
-    print(
-        "ERROR: orderflow_engine C++ module not found.\n"
-        "Build it first: cd backtestingCpp/orderflow && bash build.sh",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-from data_service import TickDataCollector  # noqa: E402 — after sys.path patch
-from tick_parquet_store import (  # noqa: E402
+from data_service import TickDataCollector
+from tick_parquet_store import (
     DATASETS,
-    LiveParquetMirror,
+    ImmutableShardWriter,
     TickParquetStore,
     evaluate_pipeline_health,
 )
 
-# Exit code that signals "rotation requested — please restart me".
-# Docker ``restart: unless-stopped`` and systemd ``Restart=on-failure``
-# both restart on any non-zero exit, which is exactly what we want.
-EXIT_ROTATE = 75
+logger = logging.getLogger("collect_ticks")
 
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
-
-def _setup_logging(level: str, log_dir: str = "logs") -> None:
+def _setup_logging(level: str, log_dir: str = "logs", symbol: str = "") -> None:
     os.makedirs(log_dir, exist_ok=True)
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s :: %(message)s",
@@ -67,920 +41,227 @@ def _setup_logging(level: str, log_dir: str = "logs") -> None:
     )
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    root.handlers.clear()
 
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
-    sh.setLevel(logging.DEBUG)
     root.addHandler(sh)
 
+    suffix = f"_{symbol.lower()}" if symbol else ""
     fh = logging.handlers.RotatingFileHandler(
-        os.path.join(log_dir, "collector.log"),
-        maxBytes=10 * 1024 * 1024,  # 10 MB
+        os.path.join(log_dir, f"collector{suffix}.log"),
+        maxBytes=10 * 1024 * 1024,
         backupCount=5,
     )
     fh.setFormatter(fmt)
-    fh.setLevel(logging.DEBUG)
     root.addHandler(fh)
 
 
-logger = logging.getLogger("collect_ticks")
+def _parse_symbols(args: argparse.Namespace) -> List[str]:
+    if args.symbols:
+        return [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    if args.symbol:
+        return [args.symbol.strip().upper()]
+    return []
 
 
-# ---------------------------------------------------------------------------
-# S3 upload helper
-# ---------------------------------------------------------------------------
-
-def _create_h5_snapshot(src_path: str, dst_path: str) -> bool:
-    """Copy an open HDF5 tick file to a clean, self-consistent snapshot.
-
-    When the C++ TickStore has ``src_path`` open for writing, the HDF5
-    root-group navigation metadata (object header, symbol table nodes, local
-    heap) lives in libhdf5's internal page cache and may not have been
-    flushed to the OS-level file.  Uploading the raw file to S3 in that
-    state produces an unreadable copy.
-
-    On Linux, a second h5py process opening the same file in read-only mode
-    reads through the OS page cache, which *does* contain the unflushed
-    writes from the C++ process.  We exploit this to copy all datasets to a
-    freshly created file that has fully consistent on-disk metadata.
-
-    Returns True on success, False if the read or write failed.
-    """
-    try:
-        import h5py
-
-        with h5py.File(src_path, "r", locking=False) as src, \
-             h5py.File(dst_path, "w") as dst:
-            for name in src.keys():
-                src.copy(name, dst, expand_soft=True, expand_external=True)
-
-        logger.info("HDF5 snapshot written to %s", dst_path)
-        return True
-    except Exception as exc:
-        logger.error("HDF5 snapshot failed: %s", exc)
-        return False
-
-
-def _upload_to_s3(local_path: str, bucket: str, key: str,
-                  *, collector_running: bool = False) -> bool:
-    """Upload a tick HDF5 file to S3.
-
-    When ``collector_running=True`` the C++ TickStore still has the file
-    open, so a direct upload would capture an inconsistent on-disk state
-    (unflushed HDF5 metadata).  In that case a clean snapshot is created
-    first via :func:`_create_h5_snapshot` and the snapshot is uploaded
-    instead.  The original file is left untouched.
-
-    When ``collector_running=False`` (i.e. called after the store has been
-    flushed and closed) the file is uploaded directly.
-    """
-    try:
-        import boto3
-    except ImportError as exc:
-        logger.error("boto3 unavailable — cannot upload to S3: %s", exc)
-        return False
-
-    # Resolve the snapshot path upfront so the finally block can always find
-    # it — regardless of whether the upload succeeds or raises.
-    snapshot: str | None = (local_path + ".snapshot.h5") if collector_running else None
-    upload_path = local_path
-
-    try:
-        if collector_running:
-            logger.info(
-                "Collector is running — creating HDF5 snapshot before upload"
-            )
-            if _create_h5_snapshot(local_path, snapshot):
-                upload_path = snapshot
-            else:
-                logger.warning(
-                    "Snapshot failed; uploading raw file (may be unreadable)"
-                )
-
-        s3 = boto3.client("s3")
-        logger.info("Uploading %s → s3://%s/%s", upload_path, bucket, key)
-        s3.upload_file(upload_path, bucket, key)
-        logger.info("S3 upload complete: s3://%s/%s", bucket, key)
-        return True
-
-    except Exception as exc:
-        logger.error("S3 upload failed: %s", exc)
-        return False
-
-    finally:
-        # Always remove the snapshot — on success, on upload failure, and on
-        # any unexpected exception — so failed uploads never accumulate files.
-        if snapshot and os.path.exists(snapshot):
-            os.unlink(snapshot)
-
-
-# ---------------------------------------------------------------------------
-# Signal handling for SIGTERM (systemd / Docker stop)
-# ---------------------------------------------------------------------------
-#
-# Two co-operating flags coordinate clean shutdown and rotation:
-#
-#   _shutdown_requested  — set on SIGTERM; main loop stops iterating
-#   _rotation_requested  — set by the Parquet flush thread when the live
-#                          HDF5 file exceeds --max-h5-gb; main loop
-#                          archives + deletes the file and exits with
-#                          EXIT_ROTATE so the container is restarted
-#
-# Both signal handlers re-raise as SIGINT (via ``os.kill``) which Python
-# translates to KeyboardInterrupt in the main thread, interrupting the
-# asyncio loop inside ``TickDataCollector.collect()``.
-
-_shutdown_requested = threading.Event()
-_rotation_requested = threading.Event()
-
-
-def _handle_sigterm(signum, frame):  # noqa: ANN001
-    """Translate SIGTERM → KeyboardInterrupt so collect() unwinds cleanly."""
-    if _shutdown_requested.is_set():
-        return  # already handled — avoid recursive signal storm
-    logger.info("SIGTERM received — initiating graceful shutdown")
-    _shutdown_requested.set()
-    try:
-        os.kill(os.getpid(), signal.SIGINT)
-    except OSError:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Path / key helpers — single source of truth for tick file naming
-# ---------------------------------------------------------------------------
-
-def _ticks_h5_path(data_dir: str, symbol: str) -> str:
-    """Canonical HDF5 path: ``{data_dir}/ticks/{SYMBOL}_ticks.h5``."""
-    ticks_dir = os.path.join(data_dir, "ticks")
-    os.makedirs(ticks_dir, exist_ok=True)
-    return os.path.join(ticks_dir, f"{symbol.upper()}_ticks.h5")
-
-
-def _default_s3_key(symbol: str) -> str:
-    return f"ticks/{symbol.upper()}_ticks.h5"
-
-
-def _h5_row_counts(h5_path: str, symbol: str) -> dict:
-    """Current row count per dataset, or ``None`` per dataset if unavailable.
-
-    ``None`` means the file is missing, the symbol/dataset is absent, or the
-    file could not be opened (e.g. corrupt) — all of which the health
-    evaluator treats as a problem worth surfacing.
-    """
-    counts: dict = {d: None for d in DATASETS}
-    if not os.path.exists(h5_path):
-        return counts
-    try:
-        import h5py
-
-        with h5py.File(h5_path, "r", locking=False) as f:
-            if symbol.upper() not in f:
-                return counts
-            grp = f[symbol.upper()]
-            for d in DATASETS:
-                if d in grp:
-                    try:
-                        counts[d] = int(grp[d].shape[0])
-                    except Exception:  # noqa: BLE001 — unreadable dataset metadata
-                        counts[d] = None
-    except OSError as exc:
-        logger.warning("Could not open %s for health check: %s", h5_path, exc)
-    return counts
-
-
-def _archive_s3_key(exchange: str, symbol: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    return f"ticks/archive/{exchange}/{symbol.upper()}_ticks_{ts}.h5"
-
-
-# ---------------------------------------------------------------------------
-# Rotation config + disk-headroom guard
-# ---------------------------------------------------------------------------
-#
-# Rotation (the --max-h5-gb cap) keeps the local disk bounded, but it is also
-# what stranded the Parquet watermark in the 2026-06 freeze. The freeze itself
-# is now fixed by the self-heal in TickParquetStore; the residual foot-gun is
-# the *opposite* extreme — raising --max-h5-gb so high that n_symbols copies no
-# longer fit on the data volume, which fills the disk and corrupts the live
-# HDF5 (the exact failure rotation exists to prevent). This guard surfaces the
-# rotation config at startup and warns before that can happen, rather than
-# discovering it when the disk hits 100%.
-
-def _default_max_h5_gb() -> float:
-    """Default rotation cap: ``$MAX_H5_GB`` if set and valid, else 8.0.
-
-    Keeps the docker-compose (``--max-h5-gb ${MAX_H5_GB:-8}``) and the direct /
-    systemd invocation paths in agreement: both honour the same env var, so the
-    cap is tunable from a single place (``.env``) without editing code.
-    """
-    raw = os.environ.get("MAX_H5_GB")
-    if raw is None or raw.strip() == "":
-        return 8.0
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid MAX_H5_GB=%r — falling back to 8.0", raw)
-        return 8.0
-
-
-def _min_free_disk_gb() -> float:
-    """Free-disk floor (GB) below which the live HDF5 is rotated early.
-
-    A hard guard against the 2026-06 disk-full incident (root volume hit 96%
-    with two multi-GB HDF5 files). Independent of ``--max-h5-gb``: even if the
-    size cap is large or disabled, the collector archives + deletes the live
-    HDF5 and restarts clean once free space drops below this floor, so the box
-    can never wedge itself full. Default 2.0 GB; tune via ``$MIN_FREE_DISK_GB``.
-    """
-    raw = os.environ.get("MIN_FREE_DISK_GB")
-    if raw is None or raw.strip() == "":
-        return 2.0
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid MIN_FREE_DISK_GB=%r — falling back to 2.0", raw)
-        return 2.0
-
-
-def _rotation_reason(h5_path: str, max_h5_bytes: int) -> str | None:
-    """Return a human-readable reason to rotate the live HDF5, or ``None``.
-
-    Two independent triggers, either of which forces an archive+delete+restart:
-
-      * **Size cap** — the file grew past ``max_h5_bytes`` (``--max-h5-gb``).
-      * **Disk floor** — free space on the data volume fell below
-        :func:`_min_free_disk_gb`, regardless of file size. HDF5 is only a
-        secondary artifact now (the Parquet mirror is the durable store), so
-        shedding it to reclaim space is always safe.
-    """
-    if not os.path.exists(h5_path):
-        return None
-
-    if max_h5_bytes > 0:
-        try:
-            size = os.path.getsize(h5_path)
-        except OSError as exc:
-            # The file exists (guarded above) but cannot be stat'd. Do NOT fall
-            # back to size=0 — that is a success-shaped value that suppresses
-            # size-based rotation and lets a large, unreadable HDF5 accumulate
-            # until the disk fills (the 2026-06 failure mode). HDF5 is only a
-            # disposable secondary artifact, so the safe, loud action is to
-            # force rotation: archive + delete + restart clean.
-            logger.error(
-                "Cannot stat live HDF5 %s (%s) — forcing rotation to recover",
-                h5_path,
-                exc,
-            )
-            return f"HDF5 file {h5_path} could not be stat'd ({exc}) — forcing rotation"
-        if size >= max_h5_bytes:
-            return (
-                f"HDF5 file {h5_path} reached {size / 1024**3:.2f} GB "
-                f"(limit {max_h5_bytes / 1024**3:.2f} GB)"
-            )
-
-    floor_gb = _min_free_disk_gb()
-    if floor_gb > 0:
-        try:
-            free_gb = shutil.disk_usage(os.path.dirname(h5_path) or ".").free / 1024**3
-        except OSError as exc:
-            # Deliberate skip-and-log: without a free-space reading we cannot
-            # assert the floor, but we must not do so silently.
-            logger.warning(
-                "Cannot read free disk for %s (%s) — skipping disk-floor check this cycle",
-                os.path.dirname(h5_path) or ".",
-                exc,
-            )
-            free_gb = None
-        if free_gb is not None and free_gb < floor_gb:
-            return (
-                f"Free disk on data volume fell to {free_gb:.2f} GB "
-                f"(floor {floor_gb:.2f} GB)"
-            )
-    return None
-
-
-def _default_parquet_flush_interval() -> int:
-    """Default mirror flush cadence: ``$PARQUET_FLUSH_INTERVAL`` if set, else 60.
-
-    The live mirror buffers ticks in memory between flushes, so a shorter
-    interval means a smaller peak buffer and a tighter worst-case data-loss
-    window if the collector is killed. 60s keeps per-process buffers to a few
-    tens of MB on the busiest symbols.
-    """
-    raw = os.environ.get("PARQUET_FLUSH_INTERVAL")
-    if raw is None or raw.strip() == "":
-        return 60
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid PARQUET_FLUSH_INTERVAL=%r — falling back to 60", raw
-        )
-        return 60
-
-
-def _check_disk_headroom(data_dir: str, max_h5_gb: float, n_symbols: int) -> None:
-    """Log the rotation/disk budget and warn if headroom is thin.
-
-    Best-effort and never raises — a monitoring aid, not a gate. Projected peak
-    is ``n_symbols × max_h5_gb`` (each symbol can hold a full pre-rotation file
-    simultaneously) plus a margin for the Parquet mirror and snapshots.
-    """
-    if max_h5_gb <= 0:
-        logger.warning(
-            "HDF5 rotation is DISABLED (--max-h5-gb=0) — the live file will "
-            "grow unbounded and can fill the disk. Set a cap unless you have a "
-            "specific reason not to."
-        )
-        return
-    try:
-        ticks_dir = os.path.join(data_dir, "ticks")
-        os.makedirs(ticks_dir, exist_ok=True)
-        usage = shutil.disk_usage(ticks_dir)
-    except OSError as exc:
-        logger.warning("Could not check disk headroom for %s: %s", data_dir, exc)
-        return
-
-    free_gb = usage.free / 1024**3
-    total_gb = usage.total / 1024**3
-    # Each symbol can hold a full pre-rotation HDF5 plus its in-flight rotation
-    # archive copy; add ~30% for the Parquet mirror + snapshot temp files.
-    projected_peak_gb = n_symbols * max_h5_gb * 1.3
-    logger.info(
-        "Disk budget for %s: free=%.1f GB / total=%.1f GB | rotation cap=%.1f "
-        "GB/symbol × %d symbol(s) ⇒ projected peak ≈ %.1f GB",
-        ticks_dir, free_gb, total_gb, max_h5_gb, n_symbols, projected_peak_gb,
+def run_health_check(
+    *,
+    data_dir: str,
+    venue: str,
+    symbol: str,
+    max_staleness_seconds: float,
+) -> int:
+    """Exit 0 if Parquet shards for ``symbol`` are fresh; else 1."""
+    root = os.path.join(data_dir, "ticks")
+    writer = ImmutableShardWriter(root, venue, symbol)
+    mtimes, days = writer.latest_shard_info()
+    report = evaluate_pipeline_health(
+        symbol,
+        venue=venue,
+        latest_shard_mtime=mtimes,
+        latest_shard_day=days,
+        now=datetime.now(timezone.utc),
+        max_staleness_seconds=max_staleness_seconds,
+        datasets=("trades",),  # depth may be quiet; trades are the heartbeat
     )
-    if projected_peak_gb > free_gb:
-        logger.warning(
-            "Projected peak HDF5 usage (%.1f GB) exceeds free disk (%.1f GB). "
-            "Lower MAX_H5_GB, reduce the symbol count, or grow the volume — "
-            "a full disk corrupts the live HDF5, which is exactly what "
-            "rotation exists to prevent.",
-            projected_peak_gb, free_gb,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Parquet flush worker — background mirror of HDF5 → daily Parquet files
-# ---------------------------------------------------------------------------
-
-def _parquet_flush_worker(
-    mirror: LiveParquetMirror,
-    h5_path: str,
-    interval_sec: int,
-    stop_event: threading.Event,
-    max_h5_bytes: int,
-) -> None:
-    """Flush the live Parquet mirror on a fixed interval and enforce rotation.
-
-    The durable mirror (:class:`LiveParquetMirror`) is fed DIRECTLY off the
-    WebSocket feed by :class:`TickDataCollector`, so this worker no longer
-    reads the HDF5 file to produce Parquet — that read path was the cause of
-    the 2026-06 freezes (a corrupt HDF5 silently froze the mirror). It now
-    only:
-
-      1. flushes the in-memory mirror buffers to per-day Parquet, and
-      2. enforces the HDF5 size cap by requesting rotation (SIGINT) when the
-         file grows past ``max_h5_bytes`` — HDF5 is still written by the C++
-         engine as a secondary artifact, just no longer on the durability
-         path.
-    """
-    logger.info(
-        "Parquet mirror flush thread started (every %ds, HDF5 rotation @ %s)",
-        interval_sec,
-        f"{max_h5_bytes / 1024**3:.1f} GB" if max_h5_bytes > 0 else "disabled",
-    )
-    while not stop_event.wait(interval_sec):
-        try:
-            mirror.flush()
-        except Exception as exc:
-            logger.warning("Parquet mirror flush failed: %s", exc)
-
-        rotate_reason = _rotation_reason(h5_path, max_h5_bytes)
-        if rotate_reason:
-            logger.warning("%s — requesting rotation", rotate_reason)
-            _rotation_requested.set()
-            try:
-                os.kill(os.getpid(), signal.SIGINT)
-            except OSError:
-                pass
-            return
-
-    # Final flush on clean shutdown so we capture rows buffered since the
-    # last interval tick.
-    try:
-        mirror.flush()
-    except Exception as exc:
-        logger.warning("Final Parquet mirror flush failed: %s", exc)
-
-
-def _archive_and_remove_h5(
-    h5_path: str, bucket: str | None, exchange: str, symbol: str
-) -> None:
-    """Upload ``h5_path`` to the archive prefix in S3 (if a bucket is
-    configured) and delete the local file."""
-    if not os.path.exists(h5_path):
-        return
-    if bucket:
-        key = _archive_s3_key(exchange, symbol)
-        ok = _upload_to_s3(h5_path, bucket, key, collector_running=False)
-        if not ok:
-            logger.error(
-                "Archive upload failed — leaving %s in place for manual recovery",
-                h5_path,
-            )
-            return
-    try:
-        os.unlink(h5_path)
-        logger.info("Removed local HDF5 %s after archive", h5_path)
-    except OSError as exc:
-        logger.error("Failed to remove %s: %s", h5_path, exc)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Headless Binance tick data collector for EC2 deployment.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument(
-        "--symbol",
-        default="BTCUSDT",
-        help="Single symbol to collect (use --symbols for multiple).",
-    )
-    p.add_argument(
-        "--symbols",
-        default=None,
-        help="Comma-separated list of symbols, e.g. BTCUSDT,ETHUSDT. "
-             "Overrides --symbol when set.",
-    )
-    p.add_argument(
-        "--exchange",
-        default="binance",
-        choices=["binance"],
-        help="Exchange to collect from.",
-    )
-    p.add_argument(
-        "--futures",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use Binance USD-M Futures streams (default: true).",
-    )
-    p.add_argument(
-        "--duration",
-        type=int,
-        default=0,
-        help="Collection duration in seconds. 0 = run until SIGTERM/Ctrl+C.",
-    )
-    p.add_argument(
-        "--s3-bucket",
-        default=None,
-        help="If set, upload the HDF5 file to this S3 bucket on clean exit.",
-    )
-    p.add_argument(
-        "--s3-key",
-        default=None,
-        help="S3 object key for the uploaded HDF5 file. "
-             "Defaults to ticks/{SYMBOL}_ticks.h5 per symbol.",
-    )
-    p.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging verbosity.",
-    )
-    p.add_argument(
-        "--data-dir",
-        default="data",
-        help="Root directory for tick data. HDF5 lives under "
-             "{data-dir}/ticks/ and Parquet mirror under the same tree.",
-    )
-    p.add_argument(
-        "--parquet-flush-interval",
-        type=int,
-        default=_default_parquet_flush_interval(),
-        help="Seconds between live Parquet mirror flushes (0 = disable "
-             "mirror). The mirror buffers ticks in memory between flushes, so "
-             "this also bounds peak buffer size and the worst-case data-loss "
-             "window on a crash. Default 60 (from $PARQUET_FLUSH_INTERVAL).",
-    )
-    p.add_argument(
-        "--max-h5-gb",
-        type=float,
-        default=_default_max_h5_gb(),
-        help="Rotate the live HDF5 file when it exceeds this many GB "
-             "(default from $MAX_H5_GB, else 8). 0 = no rotation (HDF5 grows "
-             "unbounded — not recommended). Keep n_symbols × this comfortably "
-             "below the data volume's free space — see docs/DEPLOYMENT.md.",
-    )
-    return p.parse_args()
-
-
-def _collect_one(args: argparse.Namespace, symbol: str) -> int:
-    """Collect one symbol with its own HDF5 store and Parquet flush thread.
-
-    Returns the per-symbol exit code:
-
-      * ``0``            — clean exit (SIGTERM or duration elapsed)
-      * ``EXIT_ROTATE``  — rotation was requested; archive + delete done
-      * ``1``            — unhandled exception
-      * ``2``            — S3 upload failure
-    """
-    exchange = args.exchange
-    store_path = _ticks_h5_path(args.data_dir, symbol)
-    s3_key = args.s3_key or _default_s3_key(symbol)
-    max_h5_bytes = int(args.max_h5_gb * 1024**3) if args.max_h5_gb > 0 else 0
-    parquet_root = os.path.join(args.data_dir, "ticks")
-
-    _rotation_requested.clear()
-
-    # Durable Parquet mirror fed straight off the feed (decoupled from the
-    # corruption-prone live HDF5 read — see LiveParquetMirror).
-    mirror = LiveParquetMirror(root=parquet_root, exchange=exchange)
-
-    collector = TickDataCollector(
-        exchange=exchange,
-        futures=args.futures,
-        store_path=store_path,
-        parquet_mirror=mirror,
-    )
-
-    flush_stop = threading.Event()
-    flush_thread: threading.Thread | None = None
-    if args.parquet_flush_interval > 0:
-        flush_thread = threading.Thread(
-            target=_parquet_flush_worker,
-            args=(
-                mirror, store_path,
-                args.parquet_flush_interval, flush_stop, max_h5_bytes,
-            ),
-            name=f"parquet-flush-{symbol}",
-            daemon=True,
-        )
-        flush_thread.start()
-
-    exit_code = 0
-    try:
-        # collect() owns the store lifecycle — it calls store.flush() and
-        # store.close() in its own finally block before returning.  Do NOT
-        # call flush/close here; doing so would be a double-close of the
-        # C++ TickStore which is undefined behaviour.
-        collector.collect(symbol, duration_seconds=args.duration)
-    except KeyboardInterrupt:
-        if _rotation_requested.is_set():
-            logger.info("Collection stopped for HDF5 rotation")
-        else:
-            logger.info("Keyboard interrupt — shutting down")
-    except Exception as exc:
-        logger.exception("Unhandled exception for %s: %s", symbol, exc)
-        exit_code = 1
-    finally:
-        # At this point data_service.collect() has already called
-        # store.flush() + store.close().  The HDF5 file is closed.
-
-        # 1. Stop the Parquet flush thread and wait for it to drain.
-        flush_stop.set()
-        if flush_thread is not None:
-            flush_thread.join(timeout=30)
-
-        # 2. Final mirror flush: captures any rows buffered between the
-        #    background thread's last wake-up and shutdown. Fed off the
-        #    live feed, so this is independent of the HDF5 file's state.
-        try:
-            mirror.flush()
-        except Exception as exc:
-            logger.warning("Final Parquet mirror flush failed: %s", exc)
-
-        # 3. Either archive+rotate or upload the closed HDF5 to S3.
-        if _rotation_requested.is_set():
-            _archive_and_remove_h5(store_path, args.s3_bucket, exchange, symbol)
-            exit_code = EXIT_ROTATE
-        elif args.s3_bucket:
-            ok = _upload_to_s3(
-                store_path, args.s3_bucket, s3_key, collector_running=False,
-            )
-            if not ok:
-                exit_code = max(exit_code, 2)
-
-    return exit_code
-
-
-def _build_child_argv(symbol: str) -> list:
-    """Reconstruct sys.argv for a single-symbol child process.
-
-    Uses ``sys.executable`` as the interpreter and resolves ``sys.argv[0]``
-    to an absolute path so the subprocess can be found regardless of the
-    working directory.  Replaces ``--symbols A,B,...`` with ``--symbol X``.
-    """
-    # Always use the current interpreter + absolute script path so Popen
-    # can locate the script even when argv[0] is a bare filename.
-    script = os.path.abspath(sys.argv[0])
-    result: list = [sys.executable, script]
-
-    argv = list(sys.argv[1:])  # argv[0] handled above
-    i = 0
-    while i < len(argv):
-        if argv[i] == "--symbols" and i + 1 < len(argv):
-            result += ["--symbol", symbol]
-            i += 2
-        elif argv[i].startswith("--symbols="):
-            result += [f"--symbol={symbol}"]
-            i += 1
-        else:
-            result.append(argv[i])
-            i += 1
-    return result
-
-
-def _run_multi_symbol(symbols: list) -> int:
-    """Spawn one child process per symbol and run them all in parallel.
-
-    Each child is a fresh invocation of this script with ``--symbol <X>``
-    so it owns its own HDF5 store, Parquet flush thread, SIGTERM handler,
-    and S3 upload.  The parent only forwards signals and collects exit codes.
-
-    Returns the maximum exit code of all children (so rotation exit code 75
-    propagates correctly to Docker/systemd restart logic).
-    """
-    import subprocess
-
-    children: dict = {}
-    for sym in symbols:
-        child_argv = _build_child_argv(sym)
-        p = subprocess.Popen(child_argv)
-        children[sym] = p
-        logger.info("Spawned collector for %s (pid=%d)", sym, p.pid)
-
-    def _forward_signal(signum, frame):  # noqa: ANN001
-        name = signal.Signals(signum).name
-        logger.info(
-            "%s received in parent — forwarding to %d child collectors",
-            name, len(children),
-        )
-        for p in children.values():
-            if p.poll() is None:
-                try:
-                    p.send_signal(signum)
-                except ProcessLookupError:
-                    pass
-
-    signal.signal(signal.SIGTERM, _forward_signal)
-    signal.signal(signal.SIGINT, _forward_signal)
-
-    max_exit = 0
-    for sym, p in children.items():
-        rc = p.wait()
-        rc = rc if rc is not None else 1
-        max_exit = max(max_exit, rc)
-        logger.info("Collector for %s exited (rc=%d)", sym, rc)
-
-    return max_exit
-
-
-def main() -> int:
-    args = _parse_args()
-    _setup_logging(args.log_level)
-
-    symbols = (
-        [s.strip().upper() for s in args.symbols.split(",")]
-        if args.symbols
-        else [args.symbol.upper()]
-    )
-
-    logger.info(
-        "collect_ticks starting | symbols=%s exchange=%s futures=%s duration=%ss "
-        "parquet_flush=%ss max_h5=%sGB",
-        symbols,
-        args.exchange,
-        args.futures,
-        args.duration if args.duration > 0 else "∞",
-        args.parquet_flush_interval,
-        args.max_h5_gb,
-    )
-
-    _check_disk_headroom(args.data_dir, args.max_h5_gb, len(symbols))
-
-    # Multiple symbols: each runs in its own subprocess so they collect in
-    # parallel and each handles its own signal / HDF5 / S3 lifecycle.
-    if len(symbols) > 1:
-        overall_exit = _run_multi_symbol(symbols)
-        logger.info("collect_ticks (parent) exiting with code %d", overall_exit)
-        return overall_exit
-
-    # Single symbol: run directly in this process.
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-
-    overall_exit = 0
-    sym = symbols[0]
-    logger.info("Starting collection for %s", sym)
-    overall_exit = _collect_one(args, sym)
-    if overall_exit == EXIT_ROTATE:
-        logger.info(
-            "Exiting with code %d so the supervisor restarts us with a "
-            "fresh HDF5 file",
-            EXIT_ROTATE,
-        )
-
-    logger.info("collect_ticks exiting with code %d", overall_exit)
-    return overall_exit
-
-
-def upload_snapshot() -> int:
-    """Upload a clean HDF5 snapshot to S3 without stopping the collector.
-
-    Use this from a cron job or systemd timer to push fresh data to S3
-    while collect_ticks.py is still running::
-
-        # crontab — upload every 6 hours
-        0 */6 * * *  cd /path/to/backtest && python collect_ticks.py --upload-snapshot \\
-                         --symbol BTCUSDT --s3-bucket trading-data-centheos
-
-    Because the collector is running during the upload we use
-    :func:`_create_h5_snapshot` to produce a clean copy first.
-
-    The Parquet mirror is the preferred durable store going forward —
-    this snapshot upload is kept for ad-hoc full-HDF5 sync needs.
-    """
-    import argparse as _ap
-
-    p = _ap.ArgumentParser(description="Upload HDF5 snapshot without stopping collector")
-    p.add_argument("--s3-bucket", required=True)
-    p.add_argument("--symbol", default="BTCUSDT",
-                   help="Symbol whose HDF5 file to snapshot.")
-    p.add_argument("--s3-key", default=None,
-                   help="S3 key override (default: ticks/{SYMBOL}_ticks.h5).")
-    p.add_argument("--data-dir", default="data")
-    p.add_argument("--log-level", default="INFO")
-    args = p.parse_args()
-
-    _setup_logging(args.log_level)
-    symbol = args.symbol.upper()
-    store_path = _ticks_h5_path(args.data_dir, symbol)
-    s3_key = args.s3_key or _default_s3_key(symbol)
-    ok = _upload_to_s3(store_path, args.s3_bucket, s3_key, collector_running=True)
-    return 0 if ok else 1
-
-
-def backfill_parquet() -> int:
-    """One-shot HDF5 → Parquet flush for manual backfill / recovery.
-
-    Runs a single :meth:`TickParquetStore.flush_from_h5` pass against a
-    chosen HDF5 file into a chosen Parquet root, then prints the ``aws s3
-    sync`` command to publish it. Use it to recover the mirror after the
-    background flusher has fallen behind or to re-flush an archived file.
-
-    Examples::
-
-        # Heal the live mirror on the collector host. The rotation-reset in
-        # flush_from_h5 re-flushes from row 0 if the watermark was stranded
-        # by an HDF5 rotation:
-        python collect_ticks.py --backfill-parquet --symbol BTCUSDT
-
-        # Backfill from a downloaded archive into an isolated root so the
-        # live watermark is left untouched, then sync to S3:
-        python collect_ticks.py --backfill-parquet --symbol BTCUSDT \\
-            --h5-path /tmp/BTCUSDT_ticks_2026-06-10.h5 \\
-            --parquet-root /tmp/backfill
-
-    Note: a mid-write HDF5 *snapshot* downloaded from S3 may have a corrupt
-    chunk index for some datasets; flush_from_h5 will skip unreadable ranges
-    (see ``_MAX_READ_FAILURES``). For full recovery run this on the collector
-    host against the live or archived files, which are self-consistent.
-    """
-    import argparse as _ap
-
-    p = _ap.ArgumentParser(description="One-shot HDF5 → Parquet backfill")
-    p.add_argument("--symbol", default="BTCUSDT")
-    p.add_argument("--exchange", default="binance", choices=["binance"])
-    p.add_argument("--data-dir", default="data")
-    p.add_argument("--h5-path", default=None,
-                   help="HDF5 file to flush "
-                        "(default: {data-dir}/ticks/{SYMBOL}_ticks.h5).")
-    p.add_argument("--parquet-root", default=None,
-                   help="Parquet output root (default: {data-dir}/ticks).")
-    p.add_argument("--log-level", default="INFO")
-    args = p.parse_args()
-
-    _setup_logging(args.log_level)
-    symbol = args.symbol.upper()
-    h5_path = args.h5_path or _ticks_h5_path(args.data_dir, symbol)
-    parquet_root = args.parquet_root or os.path.join(args.data_dir, "ticks")
-
-    if not os.path.exists(h5_path):
-        logger.error("HDF5 file not found: %s", h5_path)
-        return 1
-
-    store = TickParquetStore(root=parquet_root)
-    written = store.flush_from_h5(h5_path, symbol, args.exchange)
-    total = sum(written.values())
-    logger.info(
-        "Backfill complete (%d rows): %s",
-        total,
-        ", ".join(f"{k}={v}" for k, v in written.items()) or "nothing new",
-    )
-    rel = os.path.join(args.exchange, symbol)
-    logger.info(
-        "To publish: aws s3 sync %s s3://$S3_BUCKET/ticks-parquet/%s",
-        os.path.join(parquet_root, rel), rel,
-    )
-    return 0
-
-
-def health_check() -> int:
-    """Assert the HDF5 → Parquet mirror is healthy and producing RECENT data.
-
-    This is the guardrail for the 2026-06 freeze class of failure: a container
-    that looks healthy while the Parquet mirror has silently stopped advancing.
-    It checks, per symbol and dataset:
-
-      * the live HDF5 is readable and has the expected datasets;
-      * the flush watermark is not stranded above the current row count
-        (rotation not yet healed);
-      * the newest local Parquet day-file is current (the flush thread is
-        advancing), within a small grace window just after 00:00 UTC.
-
-    Intended to run INSIDE the collector container (it needs h5py and the
-    mounted data volume) on a schedule via ``scripts/pipeline_health.sh``::
-
-        python collect_ticks.py --health-check --symbols BTCUSDT,ETHUSDT \\
-            --data-dir /app/data
-
-    Exits 0 when every symbol/dataset is healthy, 1 otherwise, so the cron
-    wrapper / systemd timer surfaces (and optionally alerts on) the failure.
-    """
-    import argparse as _ap
-
-    p = _ap.ArgumentParser(description="Tick pipeline health check")
-    p.add_argument("--symbol", default="BTCUSDT")
-    p.add_argument("--symbols", default=None,
-                   help="Comma-separated symbols; overrides --symbol.")
-    p.add_argument("--exchange", default="binance", choices=["binance"])
-    p.add_argument("--data-dir", default="data")
-    p.add_argument(
-        "--max-staleness-hours",
-        type=float,
-        default=float(os.environ.get("HEALTH_MAX_STALENESS_HOURS", 2.0)),
-        help="Grace period after 00:00 UTC before yesterday's day-file is "
-             "considered stale (default from $HEALTH_MAX_STALENESS_HOURS, else 2).",
-    )
-    p.add_argument("--log-level", default="INFO")
-    args = p.parse_args()
-
-    _setup_logging(args.log_level)
-
-    symbols = (
-        [s.strip().upper() for s in args.symbols.split(",")]
-        if args.symbols
-        else [args.symbol.upper()]
-    )
-    store = TickParquetStore(root=os.path.join(args.data_dir, "ticks"))
-    now = datetime.now(timezone.utc)
-
-    all_ok = True
-    for sym in symbols:
-        h5_path = _ticks_h5_path(args.data_dir, sym)
-        report = evaluate_pipeline_health(
-            sym,
-            exchange=args.exchange,
-            n_rows=_h5_row_counts(h5_path, sym),
-            watermarks={d: store.watermark(args.exchange, sym, d) for d in DATASETS},
-            latest_parquet_day={
-                d: store.latest_parquet_date(args.exchange, sym, d)
-                for d in DATASETS
-            },
-            now=now,
-            max_staleness_hours=args.max_staleness_hours,
-        )
-        for line in report.summary:
-            logger.info("HEALTH %s", line)
-        if report.ok:
-            logger.info("HEALTH %s/%s: OK", args.exchange, sym)
-        else:
-            all_ok = False
-            for issue in report.issues:
-                logger.error("HEALTH ISSUE %s", issue)
-
-    if all_ok:
-        logger.info("HEALTH: all %d symbol(s) healthy", len(symbols))
+    for line in report.summary:
+        logger.info("health: %s", line)
+    for issue in report.issues:
+        logger.error("health: %s", issue)
+    if report.ok:
+        logger.info("health: OK venue=%s symbol=%s", venue, symbol)
         return 0
-    logger.error("HEALTH: pipeline UNHEALTHY — see HEALTH ISSUE lines above")
     return 1
 
 
+def _run_one(
+    *,
+    venue: str,
+    symbol: str,
+    data_dir: str,
+    duration: int,
+    flush_interval: float,
+    futures: bool,
+    redis_url: Optional[str],
+) -> int:
+    parquet_root = os.path.join(data_dir, "ticks")
+    os.makedirs(parquet_root, exist_ok=True)
+    writer = ImmutableShardWriter(
+        parquet_root,
+        venue,
+        symbol,
+        flush_interval_s=flush_interval,
+    )
+
+    stopping = {"flag": False}
+
+    def _handle_sig(signum, _frame) -> None:
+        logger.info("Received signal %s — flushing shards", signum)
+        stopping["flag"] = True
+        writer.stop()
+
+    signal.signal(signal.SIGTERM, _handle_sig)
+    signal.signal(signal.SIGINT, _handle_sig)
+
+    collector = TickDataCollector(
+        exchange=venue,
+        futures=futures,
+        redis_url=redis_url,
+        shard_writer=writer,
+    )
+    try:
+        collector.collect(symbol, duration_seconds=duration)
+    except Exception:
+        logger.exception("Collector crashed venue=%s symbol=%s", venue, symbol)
+        writer.stop()
+        return 1
+    return 0
+
+
+def _spawn_children(symbols: List[str], argv_tail: List[str]) -> int:
+    """One OS process per symbol so a crash cannot kill sibling feeds."""
+    import subprocess
+
+    procs = []
+    for sym in symbols:
+        cmd = [sys.executable, __file__, "--symbol", sym, *argv_tail]
+        logger.info("Spawning isolated collector: %s", " ".join(cmd))
+        procs.append(subprocess.Popen(cmd))
+
+    codes = []
+    try:
+        for p in procs:
+            codes.append(p.wait())
+    except KeyboardInterrupt:
+        for p in procs:
+            p.send_signal(signal.SIGTERM)
+        for p in procs:
+            codes.append(p.wait())
+    # Non-zero if any child failed.
+    return 0 if codes and all(c == 0 for c in codes) else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Parquet-only tick collector")
+    p.add_argument("--symbol", default="", help="Single symbol (preferred)")
+    p.add_argument(
+        "--symbols",
+        default="",
+        help="Comma-separated; spawns one child process per symbol",
+    )
+    p.add_argument("--venue", default="binance", help="Venue id (default binance)")
+    p.add_argument("--exchange", default="", help=argparse.SUPPRESS)  # alias
+    p.add_argument("--data-dir", default="data")
+    p.add_argument("--duration", type=int, default=0, help="Seconds; 0=forever")
+    p.add_argument(
+        "--parquet-flush-interval",
+        type=float,
+        default=float(os.environ.get("PARQUET_FLUSH_INTERVAL", "60")),
+    )
+    p.add_argument("--spot", action="store_true", help="Use Binance spot WS")
+    p.add_argument("--s3-bucket", default=os.environ.get("S3_BUCKET", ""))
+    p.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
+    p.add_argument("--log-dir", default="logs")
+    p.add_argument(
+        "--health-check",
+        action="store_true",
+        help="Check Parquet shard freshness and exit",
+    )
+    p.add_argument(
+        "--max-staleness-seconds",
+        type=float,
+        default=300.0,
+        help="Health-check max shard age (seconds)",
+    )
+    p.add_argument(
+        "--redis-url",
+        default=os.environ.get("REDIS_URL", ""),
+        help="ElastiCache / Redis URL for md:{venue}:* streams",
+    )
+    # Removed HDF5 knobs (accepted+ignored so old compose env doesn't crash).
+    p.add_argument("--max-h5-gb", type=float, default=0, help=argparse.SUPPRESS)
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    venue = (args.exchange or args.venue or "binance").lower()
+    symbols = _parse_symbols(args)
+    if not symbols:
+        parser.error("Provide --symbol or --symbols")
+
+    if args.health_check:
+        _setup_logging(args.log_level, args.log_dir)
+        # Multi-symbol: all must be healthy.
+        rc = 0
+        for sym in symbols:
+            if run_health_check(
+                data_dir=args.data_dir,
+                venue=venue,
+                symbol=sym,
+                max_staleness_seconds=args.max_staleness_seconds,
+            ) != 0:
+                rc = 1
+        return rc
+
+    if len(symbols) > 1:
+        _setup_logging(args.log_level, args.log_dir)
+        # Re-pass flags except --symbols so each child runs one symbol.
+        tail = [
+            "--venue", venue,
+            "--data-dir", args.data_dir,
+            "--duration", str(args.duration),
+            "--parquet-flush-interval", str(args.parquet_flush_interval),
+            "--log-level", args.log_level,
+            "--log-dir", args.log_dir,
+        ]
+        if args.spot:
+            tail.append("--spot")
+        if args.redis_url:
+            tail.extend(["--redis-url", args.redis_url])
+        if args.s3_bucket:
+            tail.extend(["--s3-bucket", args.s3_bucket])
+        return _spawn_children(symbols, tail)
+
+    symbol = symbols[0]
+    _setup_logging(args.log_level, args.log_dir, symbol=symbol)
+    if args.s3_bucket:
+        logger.info(
+            "S3 bucket=%s (sync via host s3_sync / sidecar; collector writes local shards)",
+            args.s3_bucket,
+        )
+    return _run_one(
+        venue=venue,
+        symbol=symbol,
+        data_dir=args.data_dir,
+        duration=args.duration,
+        flush_interval=args.parquet_flush_interval,
+        futures=not args.spot,
+        redis_url=args.redis_url or None,
+    )
+
+
 if __name__ == "__main__":
-    import sys as _sys
-    if "--upload-snapshot" in _sys.argv:
-        _sys.argv.remove("--upload-snapshot")
-        _sys.exit(upload_snapshot())
-    if "--backfill-parquet" in _sys.argv:
-        _sys.argv.remove("--backfill-parquet")
-        _sys.exit(backfill_parquet())
-    if "--health-check" in _sys.argv:
-        _sys.argv.remove("--health-check")
-        _sys.exit(health_check())
-    _sys.exit(main())
+    sys.exit(main())

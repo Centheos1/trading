@@ -13,11 +13,8 @@ I/O cost of the read-modify-write ``append`` (the collector only ever rewrites
 the current year, never the entire multi-year history) and lets a backfill
 persist progress incrementally so it survives process restarts.
 
-Legacy layout (read-only back-compat):
-    {root}/ohlcv/{exchange}/{symbol}/{timeframe}.parquet
-Single-file parquets written by older collector builds are still read and
-unioned into results, and counted by ``get_last_timestamp`` so a backfill
-resumes past them.  New data is only ever written to the yearly files.
+Greenfield: yearly files only. Legacy single-file
+``{timeframe}.parquet`` paths are not read or written.
 
 Backend selection:
     The ``get_ohlcv_store()`` factory returns a backend based on the
@@ -46,6 +43,7 @@ import os
 import threading
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -148,6 +146,10 @@ _S3_RETRYABLE_SUBSTRINGS = (
     "500",
     "service unavailable",
     "internal error",
+    "ssl",
+    "ssleof",
+    "unexpected_eof",
+    "broken pipe",
 )
 
 
@@ -204,11 +206,7 @@ class OhlcvStore(ABC):
 
     @abstractmethod
     def path_for(self, exchange: str, symbol: str, timeframe: str) -> str:
-        """Return the legacy single-file locator for a symbol/timeframe.
-
-        Retained for backwards compatibility; the live layout is yearly
-        (see :meth:`read`/:meth:`append`).
-        """
+        """Return a representative yearly locator (current UTC year)."""
 
     @abstractmethod
     def exists(self, exchange: str, symbol: str, timeframe: str) -> bool:
@@ -269,10 +267,9 @@ class OhlcvStore(ABC):
 class _YearPartitionedMixin:
     """Implements the public :class:`OhlcvStore` API on top of small,
     backend-specific I/O primitives so the local and S3 backends share the
-    yearly-partitioning, dedup, legacy-fallback and corruption-handling logic.
+    yearly-partitioning, dedup and corruption-handling logic.
 
     Backends must implement:
-        _legacy_locator(e, s, tf)           -> locator for legacy single file
         _year_locator(e, s, tf, year)       -> locator for a year file
         _locator_exists(locator)            -> bool
         _read_df(locator, columns=None)     -> DataFrame (raises on missing/corrupt)
@@ -283,9 +280,6 @@ class _YearPartitionedMixin:
     """
 
     # -- primitives (overridden by backends) --------------------------------
-    def _legacy_locator(self, exchange: str, symbol: str, timeframe: str) -> str:
-        raise NotImplementedError
-
     def _year_locator(
         self, exchange: str, symbol: str, timeframe: str, year: int
     ) -> str:
@@ -337,13 +331,12 @@ class _YearPartitionedMixin:
             return None
 
     def _symbol_has_data(self, exchange: str, symbol: str, timeframe: str) -> bool:
-        if self._locator_exists(self._legacy_locator(exchange, symbol, timeframe)):
-            return True
         return len(self._list_year_entries(exchange, symbol, timeframe)) > 0
 
     # -- public API ---------------------------------------------------------
     def path_for(self, exchange: str, symbol: str, timeframe: str) -> str:
-        return self._legacy_locator(exchange, symbol, timeframe)
+        year = datetime.now(timezone.utc).year
+        return self._year_locator(exchange, symbol, timeframe, year)
 
     def exists(self, exchange: str, symbol: str, timeframe: str) -> bool:
         return self._symbol_has_data(exchange, symbol, timeframe)
@@ -370,13 +363,6 @@ class _YearPartitionedMixin:
             if df is not None and not df.empty:
                 frames.append(df)
 
-        # Legacy single-file (range unknown) — always include, slice later.
-        legacy = self._legacy_locator(exchange, symbol, timeframe)
-        if self._locator_exists(legacy):
-            df = self._safe_read(legacy)
-            if df is not None and not df.empty:
-                frames.append(df)
-
         if not frames:
             return _empty_indexed()
         combined = _dedup_sort(pd.concat(frames, ignore_index=True))
@@ -395,13 +381,6 @@ class _YearPartitionedMixin:
             if df is not None and not df.empty:
                 candidates.append(int(df["timestamp"].max()))
                 break
-
-        # Legacy single-file may carry history that predates yearly writes.
-        legacy = self._legacy_locator(exchange, symbol, timeframe)
-        if self._locator_exists(legacy):
-            df = self._safe_read(legacy, columns=["timestamp"])
-            if df is not None and not df.empty:
-                candidates.append(int(df["timestamp"].max()))
 
         return max(candidates) if candidates else None
 
@@ -456,11 +435,6 @@ class LocalParquetStore(_YearPartitionedMixin, OhlcvStore):
 
     def __init__(self, root: str = "data") -> None:
         self.root = root
-
-    def _legacy_locator(self, exchange: str, symbol: str, timeframe: str) -> str:
-        return os.path.join(
-            self.root, "ohlcv", exchange, symbol, f"{timeframe}.parquet"
-        )
 
     def _year_dir(self, exchange: str, symbol: str, timeframe: str) -> str:
         return os.path.join(self.root, "ohlcv", exchange, symbol, timeframe)
@@ -544,9 +518,6 @@ class S3ParquetStore(_YearPartitionedMixin, OhlcvStore):
         return self._fs_cache
 
     # -- locators -----------------------------------------------------------
-    def _legacy_locator(self, exchange: str, symbol: str, timeframe: str) -> str:
-        return f"s3://{self.bucket}/ohlcv/{exchange}/{symbol}/{timeframe}.parquet"
-
     def _year_dir_key(self, exchange: str, symbol: str, timeframe: str) -> str:
         return f"{self.bucket}/ohlcv/{exchange}/{symbol}/{timeframe}"
 

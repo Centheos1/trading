@@ -132,15 +132,10 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Build the Docker image
 # ---------------------------------------------------------------------------
-log "Building Docker image (this takes ~5 minutes on first run)..."
-# --profile ohlcv ensures the ohlcv-collector image (Binance + Oanda OHLCV)
-# is built too — it is gated behind the "ohlcv" profile and is otherwise
-# skipped by a plain `docker compose build`.
-docker compose --profile ohlcv build
+log "Building collector Docker image..."
+# Collector host only: data-btc, data-eth, ohlcv. Never strategy/BookMap here.
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile ohlcv build
 
-# Remove dangling build cache and old image layers immediately after build.
-# On a 30 GB root volume, accumulated build layers are the #1 cause of
-# "no space left on device" errors during subsequent builds or deploys.
 docker system prune -f --filter "until=1h"
 
 log "Image built."
@@ -148,10 +143,10 @@ log "Image built."
 # ---------------------------------------------------------------------------
 # 6. Install docker compose as a systemd service so it auto-starts on reboot
 # ---------------------------------------------------------------------------
-log "Installing docker-compose@trading systemd service..."
+log "Installing docker-compose@trading systemd service (collector profile)..."
 sudo tee /etc/systemd/system/docker-compose@trading.service > /dev/null <<SERVICE
 [Unit]
-Description=Docker Compose — Trading App (%i)
+Description=Docker Compose — Trading Collector (%i)
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -160,13 +155,10 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${APP_DIR}
-# --profile ohlcv is REQUIRED: the ohlcv-collector service (the only source
-# of Oanda + historical OHLCV data) is gated behind the "ohlcv" compose
-# profile. Without it, `docker compose up -d` silently starts only redis,
-# data (Binance ticks) and strategy — so on every boot/reboot the OHLCV
-# collector stays down and NO Oanda data is ever written to S3.
-ExecStart=/usr/bin/docker compose --profile ohlcv up -d
-ExecStop=/usr/bin/docker compose --profile ohlcv down
+# Collector EC2: per-symbol tick services + OHLCV. Strategy is profile-gated
+# off this host. REDIS_URL must point at ElastiCache (see .env / infra/).
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile ohlcv up -d data-btc data-eth ohlcv-collector
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile ohlcv down
 TimeoutStartSec=300
 
 [Install]
@@ -217,16 +209,17 @@ echo "│                                                              │"
 echo "│  1. Edit .env:  nano ${APP_DIR}/.env                        │"
 echo "│     Set S3_BUCKET=your-bucket-name                          │"
 echo "│                                                              │"
-echo "│  2. Start collector:                                         │"
-echo "│     docker compose up -d                                     │"
+echo "│  2. Set REDIS_URL to ElastiCache (required in prod).         │"
+echo "│     Confirm go-live gate in docs/DEPLOYMENT.md.              │"
 echo "│                                                              │"
-echo "│  3. Watch logs:                                              │"
-echo "│     docker compose logs -f collector                         │"
+echo "│  3. Start collector (no strategy on this host):              │"
+echo "│     docker compose -f docker-compose.yml \\                   │"
+echo "│       -f docker-compose.prod.yml --profile ohlcv up -d       │"
 echo "│                                                              │"
-echo "│  4. Add ETHUSDT (optional):                                  │"
-echo "│     docker compose --profile multi up -d collector-eth       │"
+echo "│  4. Watch logs:                                              │"
+echo "│     docker compose logs -f data-btc data-eth ohlcv-collector │"
 echo "│                                                              │"
-echo "│  5. Verify S3 upload (after ~1 hour):                        │"
+echo "│  5. Verify S3 tick shards (after flush + sync):              │"
 echo "│     aws s3 ls s3://YOUR-BUCKET/ticks/                        │"
 echo "└─────────────────────────────────────────────────────────────┘"
 echo ""

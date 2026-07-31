@@ -338,63 +338,82 @@ class LiveEngine:
 
     # ---------------------------------------------------- Redis consumers
 
+    def _md_venue(self) -> str:
+        return (os.environ.get("MD_VENUE") or "binance").lower()
+
     async def _consume_trades(self, symbol: str) -> None:
-        """Subscribe to ``trades:{symbol}`` and feed the C++ engine."""
+        """XREAD Redis Stream ``md:{venue}:trades`` filtered by symbol."""
         try:
             import redis.asyncio as aioredis
         except ImportError:
             logger.error("redis package missing; cannot consume trades")
             return
 
-        channel = f"trades:{symbol}"
+        stream = f"md:{self._md_venue()}:trades"
+        last_id = "$"
         backoff = 1.0
         while not self._stopping.is_set():
             try:
                 client = aioredis.from_url(self._redis_url)
-                pubsub = client.pubsub()
-                await pubsub.subscribe(channel)
-                logger.info("Subscribed to %s", channel)
+                logger.info("XREAD %s (symbol=%s)", stream, symbol)
                 backoff = 1.0
-                async for raw in pubsub.listen():
-                    if raw.get("type") != "message":
+                while not self._stopping.is_set():
+                    rows = await client.xread({stream: last_id}, count=100, block=1000)
+                    if not rows:
                         continue
-                    self._handle_trade_payload(symbol, raw.get("data") or b"")
-                    if self._stopping.is_set():
-                        break
+                    for _name, entries in rows:
+                        for entry_id, fields in entries:
+                            last_id = entry_id
+                            sym = fields.get(b"symbol") or fields.get("symbol")
+                            if isinstance(sym, bytes):
+                                sym = sym.decode()
+                            if str(sym).upper() != symbol.upper():
+                                continue
+                            payload = fields.get(b"payload") or fields.get("payload")
+                            if payload:
+                                self._handle_trade_payload(symbol, payload)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Trade subscription error on %s", channel)
+                logger.exception("Trade stream error on %s", stream)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, 30.0)
 
     async def _consume_depth(self, symbol: str) -> None:
-        """Subscribe to ``depth:{symbol}`` and feed the C++ engine."""
+        """XREAD Redis Stream ``md:{venue}:depth`` filtered by symbol."""
         try:
             import redis.asyncio as aioredis
         except ImportError:
             logger.error("redis package missing; cannot consume depth")
             return
 
-        channel = f"depth:{symbol}"
+        stream = f"md:{self._md_venue()}:depth"
+        last_id = "$"
         backoff = 1.0
         while not self._stopping.is_set():
             try:
                 client = aioredis.from_url(self._redis_url)
-                pubsub = client.pubsub()
-                await pubsub.subscribe(channel)
-                logger.info("Subscribed to %s", channel)
+                logger.info("XREAD %s (symbol=%s)", stream, symbol)
                 backoff = 1.0
-                async for raw in pubsub.listen():
-                    if raw.get("type") != "message":
+                while not self._stopping.is_set():
+                    rows = await client.xread({stream: last_id}, count=50, block=1000)
+                    if not rows:
                         continue
-                    self._handle_depth_payload(symbol, raw.get("data") or b"")
-                    if self._stopping.is_set():
-                        break
+                    for _name, entries in rows:
+                        for entry_id, fields in entries:
+                            last_id = entry_id
+                            sym = fields.get(b"symbol") or fields.get("symbol")
+                            if isinstance(sym, bytes):
+                                sym = sym.decode()
+                            if str(sym).upper() != symbol.upper():
+                                continue
+                            payload = fields.get(b"payload") or fields.get("payload")
+                            if payload:
+                                self._handle_depth_payload(symbol, payload)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Depth subscription error on %s", channel)
+                logger.exception("Depth stream error on %s", stream)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, 30.0)
 
@@ -411,9 +430,9 @@ class LiveEngine:
         if state is None:
             return
 
-        ts_ms = int(obj.get("ts_ms") or 0)
+        ts_ms = int(obj.get("ts_exchange_ms") or obj.get("ts_ms") or 0)
         price = float(obj.get("price") or 0.0)
-        qty = float(obj.get("qty") or 0.0)
+        qty = float(obj.get("qty") or obj.get("quantity") or 0.0)
         is_buyer_maker = bool(obj.get("is_buyer_maker", False))
         if price <= 0 or qty <= 0:
             return
@@ -453,12 +472,14 @@ class LiveEngine:
         if state is None:
             return
 
-        ts_ms = int(obj.get("ts_ms") or 0)
+        ts_ms = int(obj.get("ts_exchange_ms") or obj.get("ts_ms") or 0)
         update = ofe.DepthUpdate()
         update.timestamp = ts_ms
         update.first_update_id = int(obj.get("first_update_id") or 0)
         update.final_update_id = int(obj.get("final_update_id") or 0)
-        update.is_snapshot = bool(obj.get("is_snapshot", False))
+        update.is_snapshot = bool(
+            obj.get("is_snapshot", obj.get("kind") == "depth_snapshot")
+        )
         bids = []
         for b in obj.get("bids", []):
             lv = ofe.DepthLevel()

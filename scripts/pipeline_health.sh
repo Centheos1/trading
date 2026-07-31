@@ -94,24 +94,33 @@ find_tick_container() {
 ISSUES=()
 
 # ---------------------------------------------------------------------------
-# 1. In-container mirror health (rows / watermark / Parquet freshness)
+# 1. In-container Parquet shard freshness (per symbol)
 # ---------------------------------------------------------------------------
+HEALTH_MAX_STALENESS_SECONDS="${HEALTH_MAX_STALENESS_SECONDS:-300}"
 CONTAINER="$(find_tick_container)"
 if [ -z "${CONTAINER}" ]; then
-    # Can't even run the check → the collector is down. That is itself the
-    # most severe alert; do not let it look healthy.
     ISSUES+=("collector container not running (checked trading-data-* / ${TICK_CONTAINER}) — no tick data is being collected")
     log "[CRITICAL] no running tick container — cannot run health check"
 else
-    if docker exec "${CONTAINER}" python collect_ticks.py --health-check \
-            --symbols "${SYMBOLS}" \
-            --max-staleness-hours "${HEALTH_MAX_STALENESS_HOURS}" \
-            --data-dir /app/data >> "${LOG_FILE}" 2>&1; then
-        log "[OK] mirror health (${CONTAINER}, symbols=${SYMBOLS})"
-    else
-        ISSUES+=("Parquet mirror unhealthy for ${SYMBOLS} — see HEALTH ISSUE lines in ${LOG_FILE}")
-        log "[FAIL] mirror health check returned non-zero"
-    fi
+    # Prefer checking each symbol in its own container when present.
+    IFS=',' read -r -a SYM_ARR <<< "${SYMBOLS}"
+    for sym in "${SYM_ARR[@]}"; do
+        sym="$(echo "${sym}" | tr -d ' ')"
+        [ -n "${sym}" ] || continue
+        c="trading-data-${sym}"
+        if ! is_running "${c}"; then
+            c="${CONTAINER}"
+        fi
+        if docker exec "${c}" python collect_ticks.py --health-check \
+                --symbol "${sym}" \
+                --max-staleness-seconds "${HEALTH_MAX_STALENESS_SECONDS}" \
+                --data-dir /app/data >> "${LOG_FILE}" 2>&1; then
+            log "[OK] shard health (${c}, symbol=${sym})"
+        else
+            ISSUES+=("Parquet shards unhealthy for ${sym} — see ${LOG_FILE}")
+            log "[FAIL] health check failed for ${sym} via ${c}"
+        fi
+    done
 fi
 
 # ---------------------------------------------------------------------------

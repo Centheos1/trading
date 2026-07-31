@@ -2,43 +2,22 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone, timedelta
-from typing import Tuple
+from typing import Optional, Tuple
 import time
 
-from database import Hdf5Client
 from utils import ms_to_dt, dt_to_ms
-from exchanges.binance import BinanceClient
-from exchanges.oanda import OandaClient
-from data_feed import fetch_and_build_depth_snapshot
 
 logger = logging.getLogger()
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__),
-                                 'backtestingCpp', 'orderflow', 'build'))
-
-try:
-    import orderflow_engine as ofe
-except ImportError:
-    ofe = None
-
-# Redis is optional at import time so unit tests / offline runs work
-# without the distributed stack.  When ``REDIS_URL`` is set the
-# ``TickDataCollector`` publishes raw trades and depth updates to
-# ``trades:{symbol}`` and ``depth:{symbol}`` channels for the strategy
-# service to consume.
-try:
-    import msgpack  # type: ignore
-except ImportError:  # pragma: no cover
-    msgpack = None  # type: ignore
-
-try:
-    import redis as _redis  # type: ignore
-except ImportError:  # pragma: no cover
-    _redis = None  # type: ignore
-
 
 class DataCollector:
+    """Legacy research collector (HDF5). Not used by the Parquet tick path."""
+
     def __init__(self, exchange: str):
+        from database import Hdf5Client
+        from exchanges.binance import BinanceClient
+        from exchanges.oanda import OandaClient
+
         if exchange == "binance":
             self.client = BinanceClient()
         elif exchange == "oanda":
@@ -219,328 +198,65 @@ class DataCollector:
 
 
 class TickDataCollector:
-    """Collects real-time tick and depth data from Binance via Python WebSocket
-    and stores it in HDF5 via the C++ engine for order flow backtesting.
+    """Parquet-only tick collector: venue adapter → shard writer + Redis Streams.
 
-    Distributed-architecture extension:
-        When ``REDIS_URL`` is set (or ``redis_url`` is passed) every trade
-        and depth update is also published to the Redis pub/sub channels
-        ``trades:{SYMBOL}`` and ``depth:{SYMBOL}`` as msgpack payloads.
-        The strategy service subscribes to these channels via
-        :class:`strategy.engine.live_engine.LiveEngine`.
+    No HDF5 / C++ TickStore on this path. Durable SoR is immutable Parquet
+    shards; Redis publish (``md:{venue}:{kind}``) is best-effort.
     """
 
     def __init__(
         self,
         exchange: str = "binance",
         futures: bool = True,
-        store_path: str | None = None,
+        store_path: str | None = None,  # unused; kept for call-site compat
         redis_url: str | None = None,
         parquet_mirror=None,
+        shard_writer=None,
     ):
-        if ofe is None:
-            raise RuntimeError(
-                "orderflow_engine C++ module not built. "
-                "Build: cd backtestingCpp/orderflow && ./build.sh"
-            )
-
-        self.exchange = exchange
+        del store_path  # greenfield: no TickStore path
+        self.exchange = exchange.lower()
         self.futures = futures
+        self._writer = shard_writer if shard_writer is not None else parquet_mirror
+        from redis_md_bus import RedisMDBus
+        self._bus = RedisMDBus(redis_url or os.getenv("REDIS_URL"))
 
-        # Durable Parquet mirror fed directly off the feed (decoupled from
-        # HDF5). When set, every trade/depth message is also buffered here
-        # and periodically flushed to per-day Parquet — so HDF5 corruption
-        # or rotation can no longer freeze the mirror. See
-        # tick_parquet_store.LiveParquetMirror.
-        self._mirror = parquet_mirror
-
-        if store_path is None:
-            os.makedirs("data", exist_ok=True)
-            store_path = os.path.join("data", f"{exchange}_ticks.h5")
+        if self.exchange == "binance":
+            from adapters.binance import BinanceAdapter
+            self._adapter = BinanceAdapter(futures=futures)
         else:
-            os.makedirs(os.path.dirname(os.path.abspath(store_path)), exist_ok=True)
-        self.store = ofe.TickStore(store_path)
-        self.engine = ofe.OrderFlowEngine()
-        self.engine.set_tick_store(self.store, "")
+            raise ValueError(
+                f"No live tick adapter for venue={self.exchange!r} yet"
+            )
 
-        if futures:
-            self.ws_base = "wss://fstream.binance.com/ws/"
-            self.rest_base = "https://fapi.binance.com/fapi/v1/depth"
-        else:
-            self.ws_base = "wss://stream.binance.com:9443/ws/"
-            self.rest_base = "https://api.binance.com/api/v3/depth"
-
-        # Optional Redis publisher.  We use the sync client because the
-        # WS reader threads are already in tight per-message loops; the
-        # publish is a single ``socket.send`` and the overhead is
-        # negligible compared to msgpack encoding.
-        self._redis_url = redis_url or os.getenv("REDIS_URL")
-        self._redis = None
-        if self._redis_url:
-            if _redis is None or msgpack is None:
-                logger.warning(
-                    "REDIS_URL set but 'redis'/'msgpack' not installed — "
-                    "data will not be published to the strategy service"
+    def _on_event(self, event) -> None:
+        if self._writer is not None:
+            try:
+                self._writer.on_market_event(event)
+            except Exception:
+                logger.exception(
+                    "Shard writer failed venue=%s symbol=%s kind=%s",
+                    event.venue, event.symbol, event.kind,
                 )
-            else:
-                try:
-                    self._redis = _redis.from_url(
-                        self._redis_url, socket_timeout=2.0, socket_keepalive=True
-                    )
-                    self._redis.ping()
-                    logger.info("TickDataCollector connected to Redis %s",
-                                self._redis_url)
-                except Exception as exc:  # pragma: no cover - depends on env
-                    logger.warning("Redis connection failed (%s); "
-                                   "publishing disabled", exc)
-                    self._redis = None
-
-    # ------------------------------------------------------ pub helpers
-
-    def _publish_trade(
-        self, symbol: str, ts_ms: int, price: float, qty: float,
-        is_buyer_maker: bool,
-    ) -> None:
-        if self._redis is None or msgpack is None:
-            return
-        try:
-            payload = msgpack.packb(
-                {
-                    "ts_ms": int(ts_ms),
-                    "price": float(price),
-                    "qty": float(qty),
-                    "is_buyer_maker": bool(is_buyer_maker),
-                },
-                use_bin_type=True,
-            )
-            self._redis.publish(f"trades:{symbol}", payload)
-        except Exception:
-            # Publishing is best-effort — the HDF5 store remains canonical.
-            logger.exception("Redis trade publish failed")
-
-    def _publish_depth(
-        self, symbol: str, ts_ms: int, bids: list, asks: list,
-        first_update_id: int = 0, final_update_id: int = 0,
-        is_snapshot: bool = False,
-    ) -> None:
-        if self._redis is None or msgpack is None:
-            return
-        try:
-            payload = msgpack.packb(
-                {
-                    "ts_ms": int(ts_ms),
-                    "is_snapshot": bool(is_snapshot),
-                    "first_update_id": int(first_update_id),
-                    "final_update_id": int(final_update_id),
-                    "bids": [[float(p), float(q)] for p, q in bids],
-                    "asks": [[float(p), float(q)] for p, q in asks],
-                },
-                use_bin_type=True,
-            )
-            self._redis.publish(f"depth:{symbol}", payload)
-        except Exception:
-            logger.exception("Redis depth publish failed")
+        self._bus.publish(event)
 
     def collect(self, symbol: str, duration_seconds: int = 0):
-        import asyncio
-        import json as pyjson
-
         symbol_upper = symbol.upper()
-        symbol_lower = symbol.lower()
-
-        self.engine.set_tick_store(self.store, symbol_upper)
-
-        logger.info(f"Starting tick data collection for {symbol_upper}")
-
-        self._fetch_depth_snapshot(symbol_upper)
-
-        trade_count = 0
-        depth_count = 0
-
-        async def _run():
-            nonlocal trade_count, depth_count
-            import websockets
-
-            trade_uri = f"{self.ws_base}{symbol_lower}@trade"
-            depth_uri = f"{self.ws_base}{symbol_lower}@depth@100ms"
-
-            async def read_trades():
-                nonlocal trade_count
-                async for ws in websockets.connect(trade_uri):
-                    try:
-                        async for msg in ws:
-                            j = pyjson.loads(msg)
-                            ts_ms = int(j["T"])
-                            price = float(j["p"])
-                            qty = float(j["q"])
-                            is_buyer_maker = bool(j["m"])
-                            trade = ofe.Trade()
-                            trade.timestamp = ts_ms
-                            trade.price = price
-                            trade.quantity = qty
-                            trade.is_buyer_maker = is_buyer_maker
-                            self.engine.process_trade(trade)
-                            # Durable mirror, straight off the feed.
-                            if self._mirror is not None:
-                                self._mirror.add_trade(
-                                    symbol_upper, ts_ms, price, qty,
-                                    is_buyer_maker,
-                                )
-                            # Publish to Redis for the strategy service.
-                            self._publish_trade(
-                                symbol_upper, ts_ms, price, qty,
-                                is_buyer_maker,
-                            )
-                            trade_count += 1
-                    except websockets.ConnectionClosed:
-                        logger.warning("Trade WS reconnecting...")
-                        continue
-
-            async def read_depth():
-                nonlocal depth_count
-                async for ws in websockets.connect(depth_uri):
-                    try:
-                        async for msg in ws:
-                            j = pyjson.loads(msg)
-                            ts_ms = int(j.get("E", 0))
-                            first_id = int(j.get("U", 0))
-                            final_id = int(j.get("u", 0))
-                            raw_bids = j.get("b", []) or []
-                            raw_asks = j.get("a", []) or []
-                            update = ofe.DepthUpdate()
-                            update.timestamp = ts_ms
-                            update.first_update_id = first_id
-                            update.final_update_id = final_id
-                            update.is_snapshot = False
-                            bids = []
-                            for b in raw_bids:
-                                lv = ofe.DepthLevel()
-                                lv.price = float(b[0])
-                                lv.quantity = float(b[1])
-                                bids.append(lv)
-                            asks = []
-                            for a in raw_asks:
-                                lv = ofe.DepthLevel()
-                                lv.price = float(a[0])
-                                lv.quantity = float(a[1])
-                                asks.append(lv)
-                            update.bids = bids
-                            update.asks = asks
-                            self.engine.process_depth(update)
-                            # Durable mirror, straight off the feed.
-                            if self._mirror is not None:
-                                self._mirror.add_depth(
-                                    symbol_upper, ts_ms, raw_bids, raw_asks,
-                                    is_snapshot=False,
-                                )
-                            # Publish to Redis for the strategy service.
-                            self._publish_depth(
-                                symbol_upper, ts_ms, raw_bids, raw_asks,
-                                first_update_id=first_id,
-                                final_update_id=final_id,
-                                is_snapshot=False,
-                            )
-                            depth_count += 1
-                    except websockets.ConnectionClosed:
-                        logger.warning("Depth WS reconnecting...")
-                        continue
-
-            async def status_printer():
-                while True:
-                    await asyncio.sleep(10)
-                    logger.info(f"Collected {trade_count} trades, {depth_count} depth updates")
-
-            tasks = [
-                asyncio.create_task(read_trades()),
-                asyncio.create_task(read_depth()),
-                asyncio.create_task(status_printer()),
-            ]
-
-            if duration_seconds > 0:
-                await asyncio.sleep(duration_seconds)
-            else:
-                logger.info("Collecting... Press Ctrl+C to stop.")
-                done = asyncio.Event()
-                try:
-                    await done.wait()
-                except asyncio.CancelledError:
-                    pass
-
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
+        logger.info(
+            "Starting Parquet tick collection venue=%s symbol=%s",
+            self.exchange, symbol_upper,
+        )
+        if self._writer is not None and hasattr(self._writer, "start"):
+            self._writer.start()
         try:
-            asyncio.run(_run())
-        except KeyboardInterrupt:
-            logger.info("Collection interrupted by user")
+            self._adapter.run(
+                symbol_upper, self._on_event, duration_seconds=duration_seconds
+            )
         finally:
-            self.store.flush()
-            self.store.close()
+            if self._writer is not None and hasattr(self._writer, "stop"):
+                self._writer.stop()
             logger.info(
-                f"Tick data collection complete for {symbol_upper}: "
-                f"{trade_count} trades, {depth_count} depth updates"
+                "Tick collection stopped venue=%s symbol=%s stats=%s",
+                self.exchange,
+                symbol_upper,
+                getattr(self._writer, "stats", lambda: {})(),
             )
-
-    def _fetch_depth_snapshot(self, symbol: str):
-        """REST bootstrap; HTTP parsing in ``data_feed``."""
-        try:
-            ts_ms = int(time.time() * 1000)
-            snapshot = fetch_and_build_depth_snapshot(
-                ofe,
-                self.rest_base,
-                symbol,
-                limit=1000,
-                timeout=10.0,
-                timestamp_ms=ts_ms,
-            )
-            self.engine.process_depth(snapshot)
-            logger.info(
-                "Loaded depth snapshot: %d bids, %d asks",
-                len(snapshot.bids),
-                len(snapshot.asks),
-            )
-            snap_bids = [(lv.price, lv.quantity) for lv in snapshot.bids]
-            snap_asks = [(lv.price, lv.quantity) for lv in snapshot.asks]
-            # Durable mirror, straight off the feed.
-            if self._mirror is not None:
-                self._mirror.add_depth(
-                    symbol, ts_ms, snap_bids, snap_asks, is_snapshot=True,
-                )
-            # Publish the initial snapshot so a freshly-started strategy
-            # service has a full book before the diff stream starts.
-            self._publish_depth(
-                symbol, ts_ms, snap_bids, snap_asks, is_snapshot=True,
-            )
-        except Exception as e:
-            logger.error("Failed to fetch depth snapshot: %s", e)
-
-
-    # WIP - test this, if it works turn the filter back on in database
-    # from typing import Generator, Tuple
-    # @staticmethod
-    # def _generate_batches(
-    #         from_timestamp_ms: int,
-    #         to_timestamp_ms: int,
-    #         max_minutes=5000,
-    #         reversed: bool = False
-    # ) -> Generator[Tuple[int, int], None, None]:
-    #     # Convert from and to milliseconds to datetime
-    #     from_date = datetime.fromtimestamp(from_timestamp_ms / 1000, tz=timezone.utc)
-    #     to_date = datetime.fromtimestamp(to_timestamp_ms / 1000, tz=timezone.utc)
-    #
-    #     # Extend to end of day for 'to_date'
-    #     to_date = to_date.replace(hour=23, minute=59, second=59)
-    #
-    #     if not reversed:
-    #         current = from_date
-    #         while current < to_date:
-    #             batch_end = min(current + timedelta(minutes=max_minutes), to_date)
-    #             yield int(current.timestamp() * 1000), int(batch_end.timestamp() * 1000)
-    #             current = batch_end
-    #     else:
-    #         current = to_date
-    #         while current > from_date:
-    #             batch_start = max(current - timedelta(minutes=max_minutes), from_date)
-    #             yield int(batch_start.timestamp() * 1000), int(current.timestamp() * 1000)
-    #             current = batch_start

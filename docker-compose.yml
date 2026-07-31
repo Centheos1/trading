@@ -1,26 +1,24 @@
-# Trading App — Docker Compose (local development)
+# Trading App — Collector host (greenfield Parquet-only)
 #
-# Three services compose the distributed stack:
+# Collector EC2 runs ONLY:
+#   redis (dev profile) | data-btc | data-eth | ohlcv
 #
-#   redis     — pub/sub bus between data and strategy services
-#   data      — Binance WS → HDF5 + Redis (trades:{SYM}, depth:{SYM})
-#   strategy  — headless OrderFlowEngine + FastAPI REST (/api)
+# Strategy and BookMap live on separate hosts and subscribe to ElastiCache
+# Streams ``md:{venue}:{kind}``. Do not start strategy on this box.
 #
-# Quick start:
+# Quick start (dev with bundled Redis):
 #
-#   cp .env.template .env && nano .env       # set SYMBOLS, S3_BUCKET if any
-#   docker compose up
+#   cp .env.template .env
+#   docker compose --profile bundled-redis up -d
 #
-# Tests still live under the `test` profile:
+# Production (ElastiCache): set REDIS_URL in .env, no bundled-redis profile.
 #
-#   docker compose --profile test run --rm test
-#
-# Production deployment uses docker-compose.prod.yml.
+#   docker compose --profile ohlcv up -d
 
 services:
 
   # ------------------------------------------------------------------
-  # Redis pub/sub bus
+  # Local Redis — laptop/dev only. Prod uses ElastiCache via REDIS_URL.
   # ------------------------------------------------------------------
   redis:
     image: redis:7-alpine
@@ -38,41 +36,30 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    profiles: ["bundled-redis"]
 
   # ------------------------------------------------------------------
-  # Data collector — Binance futures WS → HDF5 + Redis pub/sub
+  # Per-symbol tick collectors (immutable Parquet shards + Redis Streams)
   # ------------------------------------------------------------------
-  data:
+  data-btc:
     build:
       context: .
       dockerfile: data/Dockerfile
-    container_name: trading-data
+    container_name: trading-data-BTCUSDT
     restart: unless-stopped
-    # Allow 120 s for each child collector to flush Parquet + upload HDF5
-    # to S3 before Docker force-kills the container.
     stop_grace_period: 120s
-    # Tick data is the protected priority — it cannot be re-fetched from any
-    # API, so the scheduler must keep this container's working set resident.
-    # The ohlcv-collector is hard-capped (see below) so it can never starve
-    # this service of memory on the shared host.
     mem_reservation: 1g
     env_file: .env
     environment:
       PYTHONUNBUFFERED: "1"
-      REDIS_URL: "redis://redis:6379"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      # Free-disk floor for early HDF5 rotation (read by collect_ticks).
-      MIN_FREE_DISK_GB: "${MIN_FREE_DISK_GB:-2}"
     command: >
       python collect_ticks.py
-        --symbols ${SYMBOLS:-BTCUSDT,ETHUSDT}
-        --s3-bucket ${S3_BUCKET:-}
+        --symbol BTCUSDT
+        --venue binance
         --parquet-flush-interval ${PARQUET_FLUSH_INTERVAL:-60}
-        --max-h5-gb ${MAX_H5_GB:-3}
         --log-level ${LOG_LEVEL:-INFO}
-    depends_on:
-      redis:
-        condition: service_healthy
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -82,53 +69,91 @@ services:
         max-size: "50m"
         max-file: "3"
     healthcheck:
-      # Healthy when at least one per-symbol HDF5 file under data/ticks/
-      # was mtime-updated in the last 2 minutes (i.e. WS data is flowing).
-      test: ["CMD", "python", "-c",
-             "import glob, os, sys, time; files = glob.glob('/app/data/ticks/*_ticks.h5'); sys.exit(0 if files and (time.time() - max(os.path.getmtime(f) for f in files)) < 120 else 1)"]
+      test: ["CMD", "python", "collect_ticks.py", "--health-check",
+             "--symbol", "BTCUSDT", "--max-staleness-seconds", "300",
+             "--data-dir", "/app/data"]
       interval: 60s
-      timeout: 10s
+      timeout: 15s
       retries: 3
-      start_period: 30s
+      start_period: 90s
 
-  # ------------------------------------------------------------------
-  # Strategy engine — FastAPI REST control plane
-  # ------------------------------------------------------------------
-  strategy:
+  data-eth:
     build:
       context: .
-      dockerfile: strategy/Dockerfile
-    container_name: trading-strategy
+      dockerfile: data/Dockerfile
+    container_name: trading-data-ETHUSDT
     restart: unless-stopped
+    stop_grace_period: 120s
+    mem_reservation: 1g
     env_file: .env
     environment:
       PYTHONUNBUFFERED: "1"
-      REDIS_URL: "redis://redis:6379"
-      SYMBOLS: "${SYMBOLS:-BTCUSDT}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      CANDLE_BUCKET_MS: "${CANDLE_BUCKET_MS:-60000}"
     command: >
-      uvicorn strategy.main:app
-        --host 0.0.0.0
-        --port 8000
-        --workers 1
-        --log-level ${LOG_LEVEL:-info}
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "8000:8000"
+      python collect_ticks.py
+        --symbol ETHUSDT
+        --venue binance
+        --parquet-flush-interval ${PARQUET_FLUSH_INTERVAL:-60}
+        --log-level ${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/app/data:ro
+      - ./data:/app/data
       - ./logs:/app/logs
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "collect_ticks.py", "--health-check",
+             "--symbol", "ETHUSDT", "--max-staleness-seconds", "300",
+             "--data-dir", "/app/data"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
+
+  # Back-compat alias: single multi-symbol process that forks children.
+  # Prefer data-btc / data-eth for true cgroup isolation.
+  data:
+    build:
+      context: .
+      dockerfile: data/Dockerfile
+    container_name: trading-data
+    restart: unless-stopped
+    stop_grace_period: 120s
+    mem_reservation: 1g
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    command: >
+      python collect_ticks.py
+        --symbols ${SYMBOLS:-BTCUSDT,ETHUSDT}
+        --venue binance
+        --parquet-flush-interval ${PARQUET_FLUSH_INTERVAL:-60}
+        --log-level ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    profiles: ["legacy-multi"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "collect_ticks.py", "--health-check",
+             "--symbols", "BTCUSDT", "--max-staleness-seconds", "300",
+             "--data-dir", "/app/data"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
 
   # ------------------------------------------------------------------
-  # OHLCV historical collector (opt-in profile)
+  # OHLCV historical collector (hard-capped; re-fetchable)
   # ------------------------------------------------------------------
   ohlcv-collector:
     build:
@@ -136,12 +161,6 @@ services:
       dockerfile: data/Dockerfile
     container_name: trading-ohlcv-collector
     restart: unless-stopped
-    # Hard memory cap (cgroup limit). OHLCV is re-fetchable from the venue
-    # APIs, so it is the expendable workload here: if it ever overshoots, the
-    # cgroup OOM-killer reaps ONLY this container's process (which then resumes
-    # from the last persisted year), and the tick collector is never touched.
-    # memswap_limit == mem_limit disables swap for this container so it cannot
-    # drag the whole host into swap-thrashing (the original failure mode).
     mem_limit: 1.25g
     memswap_limit: 1.25g
     cpus: "1.5"
@@ -168,25 +187,49 @@ services:
       options:
         max-size: "100m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import sys; sys.exit(0)"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     profiles: ["ohlcv"]
 
   # ------------------------------------------------------------------
-  # Bookmap mock event publisher (opt-in profile)
-  #
-  # Stand-alone WebSocket publisher used to drive the Bookmap Java
-  # add-on without the full trading stack. Brings up a single
-  # container that emits ENTRY, EXIT, METRIC, POSITION, and HEALTH
-  # events to ws://localhost:8765 so the add-on can be exercised end-
-  # to-end during development.
-  #
-  # Activation:
-  #
-  #   docker compose --profile bookmap up bookmap-publisher
-  #
-  # The Bookmap add-on is a Java module that runs inside the Bookmap
-  # process on the host — it is NOT containerised here. See
-  # docs/BOOKMAP_INTEGRATION.md for the full event flow.
+  # Strategy — NOT for collector EC2. Profile-gated for local full-stack.
   # ------------------------------------------------------------------
+  strategy:
+    build:
+      context: .
+      dockerfile: strategy/Dockerfile
+    container_name: trading-strategy
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      SYMBOLS: "${SYMBOLS:-BTCUSDT}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      CANDLE_BUCKET_MS: "${CANDLE_BUCKET_MS:-60000}"
+    command: >
+      uvicorn strategy.main:app
+        --host 0.0.0.0
+        --port 8000
+        --workers 1
+        --log-level info
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+    profiles: ["strategy"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
   bookmap-publisher:
     build:
       context: .
@@ -208,13 +251,10 @@ services:
       - ./bookmap_publisher:/app/bookmap_publisher:ro
     profiles: ["bookmap"]
 
-  # ------------------------------------------------------------------
-  # Test runner (kept for parity with the legacy compose file)
-  # ------------------------------------------------------------------
   test:
     build:
       context: .
-      dockerfile: strategy/Dockerfile
+      dockerfile: data/Dockerfile
     container_name: trading-test
     environment:
       PYTHONUNBUFFERED: "1"

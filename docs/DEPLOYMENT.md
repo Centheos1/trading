@@ -1,9 +1,203 @@
 # Deployment Guide
 
-This is the complete end-to-end runbook for deploying the tick data collector
-to EC2. Follow the steps in order on a fresh instance.
+This is the complete end-to-end runbook for deploying the **greenfield
+Parquet-only** tick data collector to EC2. Follow the steps in order.
 
 **S3 bucket:** `trading-data-centheos` (all trading data lives here — do not change)
+
+---
+
+## Greenfield architecture (2026-07)
+
+| Concern | Design |
+|---|---|
+| Durable ticks | Immutable Parquet shards `ticks/{venue}/{symbol}/{dataset}/date=…/hour=…/part-*.parquet` |
+| Live MD bus | ElastiCache Redis Streams `md:{venue}:{kind}` (best-effort; never SoR) |
+| Process model | One container per `(venue, symbol)` — `data-btc`, `data-eth` |
+| OHLCV | Yearly Parquet only; `workers=2`; bounded adapter retries that **raise** |
+| This host | **Collector only** — no strategy / BookMap / uvicorn |
+| CI/CD | GitHub Actions CI on push; Infra/App CD path-filtered + environment approval |
+
+### Cross-host contracts
+
+| Concern | Contract |
+|---|---|
+| Durable history | Read `s3://…/ticks/{venue}/…` and `ohlcv/{venue}/…` |
+| Live market data | Subscribe ElastiCache Streams `md:{venue}:{kind}` filtered by symbol |
+| BookMap overlays | Strategy `bookmap_publisher` WebSocket on the **strategy** host |
+| Failure isolation | Strategy down ≠ stop collector; Redis down ≠ stop Parquet; one symbol ≠ kill others |
+
+### Go-live gate (instance stays **stopped** until all pass)
+
+1. Unit tests green: `python -m unittest tests.test_tick_parquet_store tests.test_collect_ticks tests.test_ohlcv_bounded_retry -v`
+2. Staging dry-run ≥30 min dual-symbol; `kill -9` one symbol container → other continues; restart → no shard corruption; S3 shows new `part-*.parquet` within flush interval.
+3. OHLCV: one Oanda + one Binance year append under `mem_limit`; forced SSL faults raise (no infinite loop).
+4. `pipeline_health.sh` emits `PipelineHealthy=1`; forced stop → alarm within 2 periods.
+5. Disk headroom > 40%; **no** `*_ticks.h5` written.
+6. Archive/clean S3 via `scripts/s3_archive_and_clean.sh --dry-run` then `--execute` after review.
+7. Only then: start EC2, deploy, watch 24h unattended.
+
+### S3 archive / clean
+
+**Use the profile that owns the bucket.** The default credential chain on the
+dev laptop resolves to an unrelated AWS account (`exerp-server`, acct
+`346880879164`) and fails with a bare `AccessDenied`. The bucket lives in acct
+`437329951890` — profile `trading`. The script now prints the resolved identity
+up front and refuses to continue if it cannot list the bucket.
+
+```bash
+./scripts/s3_archive_and_clean.sh --profile trading \
+  --bucket trading-data-centheos --dry-run
+
+# Reclaim the 6.6 TB AND stop it recurring. This is the minimum fix.
+./scripts/s3_archive_and_clean.sh --profile trading \
+  --bucket trading-data-centheos \
+  --expire-versions --apply-lifecycle --execute
+
+# Selective tick cleanup: delete corrupt HDF5, Glacier readable tick data,
+# and prove OHLCV stayed untouched in Standard.
+./scripts/s3_archive_and_clean.sh --profile trading \
+  --bucket trading-data-centheos \
+  --archive-ticks --dry-run
+./scripts/s3_archive_and_clean.sh --profile trading \
+  --bucket trading-data-centheos \
+  --archive-ticks --execute
+
+# Full-bucket archive path. Do NOT use this when OHLCV must stay Standard.
+./scripts/s3_archive_and_clean.sh --profile trading \
+  --bucket trading-data-centheos \
+  --expire-versions --delete-corrupt-h5 --glacier --clean-live --execute
+```
+
+`--expire-versions` is the **one-off cleanup**; `--apply-lifecycle` is the
+**recurrence fix**. They are separate because expiring versions today does
+nothing to stop the tail re-growing tomorrow. `--apply-lifecycle` installs a
+`NoncurrentVersionExpiration` rule (`--noncurrent-days`, default 14, matching
+`infra/main.tf`) plus a 7-day `AbortIncompleteMultipartUpload`, without any
+Glacier transition.
+`--glacier` applies that same protection rule *and* the archival transition in
+a single `put-bucket-lifecycle-configuration` call, so the two flags cannot
+clobber each other.
+
+A lifecycle PUT replaces the **entire** document, and both this script and
+`infra/main.tf` use the rule ID `expire-noncurrent-versions`. Once Terraform
+manages the bucket it is authoritative — change retention there. A unit test
+(`tests/test_s3_lifecycle_policy.py`) fails if the two defaults drift apart.
+Use `--print-lifecycle` to review the exact document without touching AWS.
+
+Every run ends by reading the live bucket config back and logs a loud `[WARN]`
+if versioning is enabled while no noncurrent-expiry rule exists.
+
+`--archive-ticks` is the selective path. It auto-enables
+`--delete-corrupt-h5`, then copy-verifies every remaining current object under
+`ticks/` and `ticks-parquet/` into `cold-archive/` with Glacier Flexible
+Retrieval. Only after verification does it permanently delete the exact source
+VersionId, avoiding both delete markers and fresh noncurrent source copies.
+Retries reuse a matching destination; a conflict aborts rather than overwrite
+Glacier data. It snapshots the `ohlcv/` object count and byte total before and
+after and fails if either changes.
+
+`--archive-ticks` is rejected when combined with broad `--glacier` or
+`--clean-live`, because those modes also affect `ohlcv/`.
+
+`--delete-corrupt-h5` permanently removes all versions of `.h5` keys marked
+`ok: false` in `logs/h5_validate/report.json` (fallback: the four keys confirmed
+corrupt by h5py on 2026-07-28). It is auto-enabled by `--archive-ticks`,
+`--glacier`, and `--clean-live`.
+
+Selective restore later: `scripts/s3_restore_tick_parquet.sh`.
+
+#### OHLCV quality audit (2026-07-28)
+
+The timestamp column of every one of the **1,915 current OHLCV Parquet
+objects (16.502 GB)** was read directly from S3 and unioned across legacy-flat
+and yearly layouts per exchange/symbol/timeframe. There were **zero unreadable
+objects**.
+
+| Exchange | Series | Unique candles | Finding |
+|---|---:|---:|---|
+| Binance | 516 | 612,198,701 | **Zero internal one-minute gaps** across each stored series; Binance is 24/7 |
+| Oanda | 127 | 271,113,215 | Readable, but not certifiably gap-free without per-instrument trading calendars |
+
+Oanda does not emit a candle for every wall-clock minute with no price change,
+and its FX, metals, index, bond, and commodity instruments have different
+sessions and holiday closures. A strict one-minute check therefore produces
+false positives. Even after the repository's generic weekend/daily-close
+suppression, long closures remain (for example recurring overnight closures
+in indices and year-end holidays). The repository does not currently encode
+per-instrument calendars, so do **not** claim that every Oanda gap is explained.
+The data remains worth retaining and is suitable for gap-aware OHLCV research;
+strategies must not assume a perfectly contiguous Oanda minute grid.
+
+#### Measured inventory (2026-07-28) — versioning blowout
+
+The plan's "~51 GB" was **current objects only**. Actual billed storage is
+~130× larger because versioning is on with no lifecycle rule:
+
+| | Objects / versions | Size |
+|---|---|---|
+| Current objects | 2,069 | **47.5 GB** |
+| Noncurrent versions | 79,983 | **6,601.5 GB** |
+| **Total billed** | 82,052 | **6,649.0 GB** |
+
+Where the noncurrent bulk came from:
+
+| Prefix | Noncurrent versions | Size | Cause |
+|---|---|---|---|
+| `ticks/` | 2,575 | 5,356 GB | Hourly `s3_sync` re-uploaded each whole multi-GB HDF5 file — `BTCUSDT_ticks.h5` alone has 1,237 versions / 2,726 GB |
+| `ohlcv/` | 75,550 | 1,116 GB | Legacy single-file `{tf}.parquet` read-modify-write — every append rewrote the whole file |
+| `ticks-parquet/` | 1,858 | 129 GB | Daily-file overwrite on each flush |
+
+At ap-southeast-2 Standard rates (~$0.025/GB-month) that is roughly **$166/month
+instead of ~$1.20/month**. Expiring noncurrent versions is free (DELETE requests
+are not billed), so step 2 alone removes essentially all of it.
+
+The greenfield design removes all three root causes: no HDF5 uploads, immutable
+write-once shards (no overwrite), and yearly-only OHLCV files.
+
+#### Remediated 2026-07-28
+
+Run: `--expire-versions --apply-lifecycle --execute` (profile `trading`).
+
+| | Before | After |
+|---|---|---|
+| Current objects | 2,069 / 47.46 GB | 2,069 / 47.46 GB |
+| Noncurrent versions | 79,983 / 6,601.52 GB | **0 / 0 GB** |
+| Delete markers | 4 | 0 |
+| **Total billed** | **6,648.98 GB** | **47.46 GB** |
+
+79,987 objects deleted. Estimated cost drops from ~$166/month to ~$1.20/month.
+No current object was touched.
+
+The bucket now carries a live `expire-noncurrent-versions` rule (14-day
+`NoncurrentVersionExpiration`, 7-day `AbortIncompleteMultipartUpload`), verified
+by reading the config back. Applying `infra/main.tf` is now a no-op for this
+rule and should stay that way — Terraform is authoritative from here.
+
+#### Step ordering is enforced
+
+`--glacier` / `--clean-live` are **refused** while noncurrent versions remain,
+unless `--expire-versions` is in the same invocation. Reasons:
+
+- Glacier Flexible Retrieval bills a **90-day minimum per object** — archiving
+  6.6 TB of junk versions locks in months of cost.
+- With versioning on, `aws s3 rm` only writes **delete markers**; the "removed"
+  objects survive as noncurrent versions and keep billing. Expiring is what
+  actually reclaims the space.
+
+### Start collector (prod)
+
+```bash
+# .env must set REDIS_URL=redis://<elasticache>:6379 and S3_BUCKET=…
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  --profile ohlcv up -d data-btc data-eth ohlcv-collector
+```
+
+Local laptop with bundled Redis:
+
+```bash
+docker compose --profile bundled-redis up -d data-btc data-eth
+```
 
 ---
 

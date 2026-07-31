@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install collector deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r data/requirements.txt
+      - name: Collector unit tests
+        run: |
+          python -m unittest \
+            tests.test_tick_parquet_store \
+            tests.test_collect_ticks \
+            tests.test_ohlcv_bounded_retry \
+            tests.test_s3_archive_ticks \
+            tests.test_s3_lifecycle_policy \
+            -v
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            collector:
+              - 'data/**'
+              - 'collect_ticks.py'
+              - 'collect_ohlcv.py'
+              - 'tick_parquet_store.py'
+              - 'market_data.py'
+              - 'redis_md_bus.py'
+              - 'adapters/**'
+              - 'data_service.py'
+              - 'ohlcv_store.py'
+              - 'docker-compose.yml'
+              - 'docker-compose.prod.yml'
+      - name: Build collector image
+        if: steps.filter.outputs.collector == 'true'
+        run: docker build -f data/Dockerfile -t trading-data:ci .

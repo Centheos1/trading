@@ -1,55 +1,53 @@
-# Production overrides for AWS ECS / EC2 deployment.
+# Production overrides — collector EC2 only.
 #
-# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     --profile ohlcv up -d
 #
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-#
-# AWS target topology:
-#
-#   Redis        → ElastiCache (Serverless)            — REDIS_URL env points to it
-#   Data service → ECS Fargate (always-on)             — 1 vCPU / 2 GB
-#   Strategy     → ECS Fargate (always-on)             — 2 vCPU / 4 GB
-#                  ALB listener on :8000
+# Topology:
+#   Redis     → ElastiCache (REDIS_URL required; no bundled redis)
+#   data-btc / data-eth → always-on tick collectors
+#   ohlcv     → profile ohlcv, hard memory-capped
+#   strategy  → never on this host (separate EC2 later)
 
 services:
 
   redis:
-    # In real production this service should not be deployed — point
-    # REDIS_URL at ElastiCache instead.  The stub here lets the prod
-    # compose file be smoke-tested on a single host.
-    profiles: ["bundled-redis"]
+    profiles: ["bundled-redis", "never"]
 
-  data:
+  data-btc:
     restart: always
     environment:
       LOG_LEVEL: "INFO"
-      REDIS_URL: "${REDIS_URL}"            # ElastiCache endpoint
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: "2G"
+      REDIS_URL: "${REDIS_URL:?REDIS_URL must point at ElastiCache in prod}"
     logging:
-      driver: awslogs
+      driver: json-file
       options:
-        awslogs-region: "${AWS_REGION:-us-east-1}"
-        awslogs-group: "/trading/data"
-        awslogs-stream-prefix: "data"
+        max-size: "50m"
+        max-file: "5"
+
+  data-eth:
+    restart: always
+    environment:
+      LOG_LEVEL: "INFO"
+      REDIS_URL: "${REDIS_URL:?REDIS_URL must point at ElastiCache in prod}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  ohlcv-collector:
+    restart: always
+    environment:
+      LOG_LEVEL: "INFO"
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
 
   strategy:
-    restart: always
-    environment:
-      LOG_LEVEL: "INFO"
-      REDIS_URL: "${REDIS_URL}"
-      SYMBOLS: "${SYMBOLS:-BTCUSDT}"
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: "4G"
-    logging:
-      driver: awslogs
-      options:
-        awslogs-region: "${AWS_REGION:-us-east-1}"
-        awslogs-group: "/trading/strategy"
-        awslogs-stream-prefix: "strategy"
+    profiles: ["never"]
+
+  bookmap-publisher:
+    profiles: ["never"]
