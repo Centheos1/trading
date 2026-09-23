@@ -56,3 +56,5 @@ class HMMModel:
         if "log_prior" in d:
             m.log_prior = np.array(d["log_prior"])
         return m
+
+
