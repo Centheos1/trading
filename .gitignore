@@ -1,6 +1,22 @@
 .idea/**
 logs/**
 .DS_Store
+
+# Terraform — keep *.tf, README, and .terraform.lock.hcl in git.
+# Local state and the provider plugin cache must never be committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+.terraform.tfstate.lock.info
 data/**
 !data/Dockerfile
 !data/requirements.txt

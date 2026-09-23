@@ -43,6 +43,12 @@ variable "private_subnet_ids" {
   default = []
 }
 
+variable "alarm_host_dimension" {
+  type        = string
+  default     = "ip-172-31-10-149"
+  description = "Must match pipeline_health.sh Host=$(hostname) on the collector. Replacing the instance changes this."
+}
+
 # ---------------------------------------------------------------------------
 # S3 lifecycle — expire noncurrent versions; abort incomplete multipart
 # ---------------------------------------------------------------------------
@@ -126,6 +132,9 @@ resource "aws_cloudwatch_metric_alarm" "tick_pipeline_stale" {
   threshold           = 1
   treat_missing_data  = "breaching"
   alarm_description   = "Collector Parquet pipeline unhealthy or host down"
+  dimensions = {
+    Host = var.alarm_host_dimension
+  }
 }
 
 output "redis_endpoint" {
