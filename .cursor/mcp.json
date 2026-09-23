@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "aws-trading": {
+      "command": "/Users/clintsellen/.local/bin/uvx",
+      "args": ["awslabs.aws-api-mcp-server@latest"],
+      "env": {
+        "AWS_PROFILE": "trading",
+        "AWS_REGION": "ap-southeast-2",
+        "AWS_API_MCP_ALLOW_UNRESTRICTED_LOCAL_FILE_ACCESS": "no-access"
+      }
+    }
+  }
+}
