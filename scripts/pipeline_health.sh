@@ -158,7 +158,10 @@ if [ -f "${SYNC_LOG}" ]; then
         log "[OK] s3_sync.log fresh (${age_min} min old)"
     fi
     # Surface a sync that ran but reported failures on its last pass.
-    if tail -n 40 "${SYNC_LOG}" | grep -q "\[DONE\] uploaded=.* failed=[1-9]"; then
+    # Only the latest [DONE] line counts; an older failure must not keep the
+    # alarm red after a later successful run.
+    last_done=$(grep '\[DONE\]' "${SYNC_LOG}" | tail -n 1 || true)
+    if printf '%s\n' "${last_done}" | grep -q "failed=[1-9]"; then
         ISSUES+=("last s3_sync run reported upload failures — see ${SYNC_LOG}")
         log "[FAIL] last s3_sync reported failures"
     fi
