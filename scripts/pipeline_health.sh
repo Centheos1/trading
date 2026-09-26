@@ -58,6 +58,26 @@ log() {
 # (unhealthy) so an alarm can page on 0 AND on missing data (a dead box stops
 # emitting, which CloudWatch treats as breaching — see create_cloudwatch_alarm.sh).
 # Never let a metric failure crash the health check.
+emit_disk_metric() {
+    [ -n "${CLOUDWATCH_NAMESPACE:-}" ] || return 0
+    command -v aws >/dev/null 2>&1 || { log "[WARN] aws CLI missing; skip DiskFreeGB"; return 0; }
+    command -v df >/dev/null 2>&1 || { log "[WARN] df missing; skip DiskFreeGB"; return 0; }
+    free_gb=$(df -B1 / | awk 'NR==2 {printf "%.3f", $4/1073741824}')
+    if [ -z "${free_gb}" ]; then
+        log "[WARN] could not read free bytes on /"
+        return 0
+    fi
+    if aws cloudwatch put-metric-data \
+            --namespace "${CLOUDWATCH_NAMESPACE}" \
+            --metric-name DiskFreeGB \
+            --dimensions "Host=$(hostname)" \
+            --value "${free_gb}" >> "${LOG_FILE}" 2>&1; then
+        log "[OK] emitted DiskFreeGB=${free_gb} to ${CLOUDWATCH_NAMESPACE}"
+    else
+        log "[WARN] DiskFreeGB put-metric-data failed"
+    fi
+}
+
 emit_metric() {
     [ -n "${CLOUDWATCH_NAMESPACE:-}" ] || return 0
     command -v aws >/dev/null 2>&1 || { log "[WARN] aws CLI missing; skip metric"; return 0; }
@@ -150,6 +170,8 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Report + alert
 # ---------------------------------------------------------------------------
+emit_disk_metric
+
 if [ "${#ISSUES[@]}" -eq 0 ]; then
     log "[DONE] pipeline healthy"
     emit_metric 1

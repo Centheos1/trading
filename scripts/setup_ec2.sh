@@ -71,6 +71,15 @@ DAEMON_JSON
 sudo systemctl enable docker
 sudo systemctl start docker
 
+# Cap the systemd journal. An uncapped journal filled ~1.7 GB on the collector
+# and contributed to the 2026-09 disk-full outage.
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/size.conf > /dev/null <<'JOURNALD'
+[Journal]
+SystemMaxUse=200M
+JOURNALD
+sudo systemctl restart systemd-journald || true
+
 log "Docker $(docker --version) installed."
 log "Docker Compose $(docker compose version) installed."
 

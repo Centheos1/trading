@@ -19,15 +19,17 @@ Schema (depth_snapshots / depth_updates)::
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 import threading
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -89,9 +91,15 @@ def evaluate_pipeline_health(
     max_staleness_seconds: float = 300.0,
     max_staleness_hours: float = 2.0,
     datasets: Iterable[str] = DATASETS,
+    durable_mtime: Optional[Dict[str, Optional[float]]] = None,
+    durable_day: Optional[Dict[str, Optional[str]]] = None,
     **_compat: Any,
 ) -> PipelineHealth:
-    """Parquet-only health: shard freshness by mtime and calendar day.
+    """Parquet-only health: freshness of the newest durable upload or local shard.
+
+    A confirmed S3 upload writes a watermark and then deletes the local file.
+    Health stays green from that watermark. A not-yet-uploaded local shard is
+    also fresh. Missing both means the dataset has never been flushed.
 
     Parameters
     ----------
@@ -99,8 +107,12 @@ def evaluate_pipeline_health(
         ``dataset -> unix mtime`` of newest local shard, or ``None``.
     latest_shard_day
         ``dataset -> "YYYY-MM-DD"`` of newest partition, or ``None``.
+    durable_mtime
+        ``dataset -> unix time`` of the last confirmed S3 upload, or ``None``.
+    durable_day
+        ``dataset -> "YYYY-MM-DD"`` recorded on that upload.
     max_staleness_seconds
-        Max age of newest shard file for a live feed (default 5 min).
+        Max age of the freshest signal for a live feed (default 5 min).
     max_staleness_hours
         Grace after UTC midnight for yesterday's day partition.
     """
@@ -108,6 +120,8 @@ def evaluate_pipeline_health(
     sym = symbol.upper()
     issues: List[str] = []
     summary: List[str] = []
+    durable_mtime = durable_mtime or {}
+    durable_day = durable_day or {}
 
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     hours_into_day = (now - midnight).total_seconds() / 3600.0
@@ -117,6 +131,11 @@ def evaluate_pipeline_health(
     for d in datasets:
         mtime = latest_shard_mtime.get(d)
         day = latest_shard_day.get(d)
+        wm_m = durable_mtime.get(d)
+        wm_d = durable_day.get(d)
+        if wm_m is not None and (mtime is None or float(wm_m) >= float(mtime)):
+            mtime = float(wm_m)
+            day = wm_d or day
         age_s = None if mtime is None else now_ts - float(mtime)
         summary.append(
             f"{ven}/{sym}/{d}: latest_day={day or 'none'} "
@@ -125,7 +144,7 @@ def evaluate_pipeline_health(
 
         if day is None or mtime is None:
             issues.append(
-                f"{ven}/{sym}/{d}: no Parquet shards on disk — collector "
+                f"{ven}/{sym}/{d}: no durable upload or local shard — collector "
                 f"has never flushed this dataset"
             )
             continue
@@ -156,6 +175,179 @@ def evaluate_pipeline_health(
             )
 
     return PipelineHealth(ok=not issues, issues=issues, summary=summary)
+
+
+# ---------------------------------------------------------------------------
+# Durable upload: confirm in S3, then delete the local shard
+# ---------------------------------------------------------------------------
+
+
+class DiskFloorError(RuntimeError):
+    """Free space is below ``MIN_FREE_DISK_GB``. The shard was not written."""
+
+
+@dataclass
+class SweepStats:
+    """Result of :func:`sweep_local_shards`."""
+
+    uploaded: int = 0
+    deleted: int = 0
+    kept: int = 0
+    failed: int = 0
+
+
+def watermark_path(root: Path, venue: str, symbol: str, dataset: str) -> Path:
+    return (
+        Path(root)
+        / ".durable"
+        / venue.lower()
+        / symbol.upper()
+        / f"{dataset}.json"
+    )
+
+
+def write_durable_watermark(
+    root: Path,
+    venue: str,
+    symbol: str,
+    dataset: str,
+    *,
+    key: str,
+    rows: int,
+    day: Optional[str],
+    when: Optional[float] = None,
+) -> None:
+    """Record a confirmed upload. Atomic replace so a crash cannot half-write it."""
+    path = watermark_path(root, venue, symbol, dataset)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "last_upload_unix": float(when if when is not None else datetime.now(timezone.utc).timestamp()),
+        "key": key,
+        "rows": int(rows),
+        "day": day,
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_durable_watermark(
+    root: Path, venue: str, symbol: str, dataset: str
+) -> Optional[dict]:
+    path = watermark_path(root, venue, symbol, dataset)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Unreadable watermark %s: %s", path, exc)
+        return None
+    if not isinstance(data, dict) or "last_upload_unix" not in data:
+        logger.warning("Watermark %s missing last_upload_unix — ignoring", path)
+        return None
+    return data
+
+
+def _day_from_shard_path(path: Path) -> Optional[str]:
+    for part in path.parts:
+        if part.startswith("date="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def _dataset_from_shard_path(path: Path) -> Optional[str]:
+    parts = path.parts
+    for i, part in enumerate(parts):
+        if part.startswith("date=") and i >= 1:
+            return parts[i - 1]
+    return None
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    if isinstance(exc, KeyError):
+        return True
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = str(response.get("Error", {}).get("Code", ""))
+        return code in {"404", "NoSuchKey", "NotFound"}
+    return False
+
+
+class S3ShardPublisher:
+    """Upload a closed shard and confirm the stored byte count."""
+
+    def __init__(self, bucket: str, *, prefix: str = "ticks", client: Any = None) -> None:
+        if not bucket:
+            raise ValueError("S3ShardPublisher requires a bucket")
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+        self._client = client
+
+    def client(self):
+        if self._client is None:
+            import boto3
+            self._client = boto3.client("s3")
+        return self._client
+
+    def object_key(self, root: Path, local: Path) -> str:
+        rel = Path(local).resolve().relative_to(Path(root).resolve()).as_posix()
+        return f"{self.prefix}/{rel}"
+
+    def head_size(self, key: str) -> Optional[int]:
+        try:
+            head = self.client().head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:
+            if _is_not_found(exc):
+                return None
+            raise
+        return int(head["ContentLength"])
+
+    def publish(self, local: Path, key: str) -> int:
+        """Upload ``local`` and raise unless S3 reports the same size."""
+        size = Path(local).stat().st_size
+        self.client().upload_file(str(local), self.bucket, key)
+        remote = self.head_size(key)
+        if remote != size:
+            raise RuntimeError(
+                f"S3 size mismatch key={key} local={size} remote={remote}"
+            )
+        return int(remote)
+
+
+def sweep_local_shards(root: Path, publisher: S3ShardPublisher) -> SweepStats:
+    """Upload leftover shards and delete a file only when S3 size matches.
+
+    A size mismatch is kept and counted. Upload errors are counted and the
+    file stays. Every delete is logged.
+    """
+    stats = SweepStats()
+    root = Path(root)
+    if not root.is_dir():
+        logger.warning("Sweep root %s does not exist — nothing to do", root)
+        return stats
+    for path in sorted(root.rglob("part-*.parquet")):
+        try:
+            local_size = path.stat().st_size
+            key = publisher.object_key(root, path)
+            remote = publisher.head_size(key)
+            if remote is None:
+                publisher.publish(path, key)
+                stats.uploaded += 1
+                remote = local_size
+            if remote == local_size:
+                path.unlink()
+                stats.deleted += 1
+                logger.info("Deleted confirmed shard %s (%d bytes)", key, local_size)
+            else:
+                stats.kept += 1
+                logger.error(
+                    "Keeping shard %s — size mismatch local=%d remote=%s",
+                    key, local_size, remote,
+                )
+        except Exception:
+            stats.failed += 1
+            logger.exception("Sweep failed for %s — file kept", path)
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +394,18 @@ class ImmutableShardWriter:
         *,
         flush_interval_s: float = 60.0,
         max_buffer_rows: int = 50_000,
+        publisher: Optional[S3ShardPublisher] = None,
+        min_free_bytes: int = 0,
+        free_bytes: Optional[Callable[[], int]] = None,
     ) -> None:
         self.root = Path(root)
         self.venue = venue.lower()
         self.symbol = symbol.upper()
         self.flush_interval_s = float(flush_interval_s)
         self.max_buffer_rows = int(max_buffer_rows)
+        self._publisher = publisher
+        self.min_free_bytes = int(min_free_bytes)
+        self._free_bytes_fn = free_bytes
         self._lock = threading.Lock()
         self._bufs: Dict[str, List[dict]] = defaultdict(list)
         self._stop = threading.Event()
@@ -215,6 +413,7 @@ class ImmutableShardWriter:
         self._last_event_ms: Dict[str, int] = {}
         self._shards_written = 0
         self._rows_written = 0
+        self._rows_dropped = 0
 
     # -- ingest -------------------------------------------------------------
 
@@ -294,7 +493,14 @@ class ImmutableShardWriter:
     # -- flush --------------------------------------------------------------
 
     def flush(self) -> int:
-        """Write all buffered datasets to shards. Returns rows written."""
+        """Write buffered rows to shards. Returns rows written, not rows dropped.
+
+        Leftover local shards (upload failed, or a crash between write and
+        delete) are retried first. A disk-floor refusal or write error
+        re-queues the rows. Past ``2 * max_buffer_rows`` the overflow is
+        dropped and counted — that flush did not succeed for those rows.
+        """
+        self._publish_leftovers()
         with self._lock:
             snapshot = {k: v for k, v in self._bufs.items() if v}
             self._bufs = defaultdict(list)
@@ -303,19 +509,54 @@ class ImmutableShardWriter:
             try:
                 n = self._write_shard(dataset, rows)
                 written += n
+            except DiskFloorError:
+                logger.error(
+                    "Shard write refused venue=%s symbol=%s dataset=%s rows=%d "
+                    "— free disk below floor; re-buffering",
+                    self.venue, self.symbol, dataset, len(rows),
+                )
+                self._rebuffer(dataset, rows)
             except Exception:
                 logger.exception(
                     "Shard write failed venue=%s symbol=%s dataset=%s rows=%d "
                     "— re-buffering",
                     self.venue, self.symbol, dataset, len(rows),
                 )
-                with self._lock:
-                    self._bufs[dataset] = rows + self._bufs[dataset]
+                self._rebuffer(dataset, rows)
         return written
+
+    def _rebuffer(self, dataset: str, rows: List[dict]) -> None:
+        cap = self.max_buffer_rows * 2
+        with self._lock:
+            merged = list(rows) + self._bufs[dataset]
+            if len(merged) > cap:
+                dropped = len(merged) - cap
+                merged = merged[-cap:]
+                self._rows_dropped += dropped
+                logger.error(
+                    "Dropped %d rows venue=%s symbol=%s dataset=%s buffer_cap=%d "
+                    "— flush did not succeed",
+                    dropped, self.venue, self.symbol, dataset, cap,
+                )
+            self._bufs[dataset] = merged
+
+    def _free_bytes(self) -> int:
+        if self._free_bytes_fn is not None:
+            return int(self._free_bytes_fn())
+        path = self.root if self.root.exists() else self.root.parent
+        if not path.exists():
+            path = Path(".")
+        return shutil.disk_usage(path).free
 
     def _write_shard(self, dataset: str, rows: List[dict]) -> int:
         if not rows:
             return 0
+        free = self._free_bytes()
+        if self.min_free_bytes > 0 and free < self.min_free_bytes:
+            raise DiskFloorError(
+                f"free {free} bytes < floor {self.min_free_bytes} "
+                f"venue={self.venue} symbol={self.symbol} dataset={dataset}"
+            )
         import pyarrow as pa
         import pyarrow.parquet as pq
 
@@ -343,13 +584,68 @@ class ImmutableShardWriter:
             "Wrote shard %s (%d rows, %d–%d ms)",
             final, len(rows), start_ms, end_ms,
         )
+        self._publish_one(final, dataset, len(rows))
         return len(rows)
+
+    def _publish_one(self, final: Path, dataset: str, rows: int) -> bool:
+        """Confirm the shard in S3, record the watermark, then delete it.
+
+        Upload failure leaves the file for the next flush. The watermark is
+        written only after S3 reports the same byte count.
+        """
+        if self._publisher is None or not final.is_file():
+            return False
+        key = self._publisher.object_key(self.root, final)
+        try:
+            self._publisher.publish(final, key)
+        except Exception:
+            logger.exception(
+                "Shard upload failed %s — keeping local file for retry", final,
+            )
+            return False
+        day = _day_from_shard_path(final)
+        try:
+            write_durable_watermark(
+                self.root, self.venue, self.symbol, dataset,
+                key=key, rows=rows, day=day,
+            )
+        except Exception:
+            logger.exception(
+                "Watermark write failed for %s — keeping local file", key,
+            )
+            return False
+        try:
+            final.unlink()
+        except OSError:
+            logger.exception(
+                "Confirmed shard %s but unlink failed — sweeper will retry", key,
+            )
+        else:
+            logger.info("Deleted local shard after confirm %s", key)
+        return True
+
+    def _publish_leftovers(self) -> int:
+        if self._publisher is None:
+            return 0
+        base = self.root / self.venue / self.symbol
+        if not base.is_dir():
+            return 0
+        published = 0
+        for path in sorted(base.rglob("part-*.parquet")):
+            dataset = _dataset_from_shard_path(path)
+            if dataset is None:
+                logger.error("Cannot parse dataset from leftover shard %s — keeping", path)
+                continue
+            if self._publish_one(path, dataset, rows=0):
+                published += 1
+        return published
 
     # -- background flush ---------------------------------------------------
 
     def start(self) -> None:
         if self._thread is not None:
             return
+        self._publish_leftovers()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop, name=f"shard-flush-{self.venue}-{self.symbol}",
@@ -400,8 +696,28 @@ class ImmutableShardWriter:
                                 best_day = part.split("=", 1)[1]
                     elif best_mtime is not None and mt == best_mtime:
                         pass
+            wm = read_durable_watermark(self.root, self.venue, self.symbol, d)
+            if wm is not None:
+                wm_m = float(wm["last_upload_unix"])
+                if best_mtime is None or wm_m >= best_mtime:
+                    best_mtime = wm_m
+                    best_day = wm.get("day") or best_day
             mtimes[d] = best_mtime
             days[d] = best_day
+        return mtimes, days
+
+    def durable_info(self) -> Tuple[Dict[str, Optional[float]], Dict[str, Optional[str]]]:
+        """Return watermark ``(mtime, day)`` per dataset. Missing keys are None."""
+        mtimes: Dict[str, Optional[float]] = {}
+        days: Dict[str, Optional[str]] = {}
+        for d in DATASETS:
+            wm = read_durable_watermark(self.root, self.venue, self.symbol, d)
+            if wm is None:
+                mtimes[d] = None
+                days[d] = None
+            else:
+                mtimes[d] = float(wm["last_upload_unix"])
+                days[d] = wm.get("day")
         return mtimes, days
 
     def stats(self) -> Dict[str, Any]:
@@ -410,6 +726,7 @@ class ImmutableShardWriter:
             "symbol": self.symbol,
             "shards_written": self._shards_written,
             "rows_written": self._rows_written,
+            "rows_dropped": self._rows_dropped,
             "buffered": self.buffered_rows(),
         }
 
@@ -516,11 +833,15 @@ class TickParquetStore:
 
 __all__ = [
     "DATASETS",
+    "DiskFloorError",
     "ImmutableShardWriter",
     "LiveParquetMirror",
     "PipelineHealth",
+    "S3ShardPublisher",
+    "SweepStats",
     "TickParquetStore",
     "evaluate_pipeline_health",
     "shard_dir",
     "shard_filename",
+    "sweep_local_shards",
 ]

@@ -18,8 +18,10 @@ if _ROOT not in sys.path:
 from market_data import EventKind, MarketEvent
 from tick_parquet_store import (
     ImmutableShardWriter,
+    S3ShardPublisher,
     TickParquetStore,
     evaluate_pipeline_health,
+    sweep_local_shards,
 )
 
 _DAY0 = 1_609_459_200_000  # 2021-01-01 UTC
@@ -179,6 +181,179 @@ class TestConcurrentFlush(unittest.TestCase):
             w.flush()
             df = TickParquetStore(tmp).read("binance", "BTCUSDT", "trades")
             self.assertGreater(len(df), 0)
+
+
+class _FakeS3:
+    """Minimal boto3 stand-in: upload_file + head_object."""
+
+    def __init__(self):
+        self.objects = {}
+        self.fail = False
+        self.inflate = False
+
+    def upload_file(self, Filename, Bucket, Key):
+        if self.fail:
+            raise RuntimeError("upload failed")
+        self.objects[(Bucket, Key)] = Path(Filename).read_bytes()
+
+    def head_object(self, Bucket, Key):
+        if (Bucket, Key) not in self.objects:
+            raise KeyError(Key)
+        size = len(self.objects[(Bucket, Key)])
+        if self.inflate:
+            size += 1
+        return {"ContentLength": size}
+
+
+def _publisher(client: _FakeS3) -> S3ShardPublisher:
+    return S3ShardPublisher("test-bucket", client=client)
+
+
+class TestUploadConfirmDelete(unittest.TestCase):
+
+    def test_confirm_then_delete(self):
+        client = _FakeS3()
+        with tempfile.TemporaryDirectory() as tmp:
+            w = ImmutableShardWriter(
+                tmp, "binance", "BTCUSDT", publisher=_publisher(client),
+            )
+            w.add_trade(_DAY0, 100.0, 1.0, False)
+            n = w.flush()
+            self.assertEqual(n, 1)
+            self.assertEqual(list(Path(tmp).rglob("part-*.parquet")), [])
+            self.assertEqual(len(client.objects), 1)
+            key, body = next(iter(client.objects.items()))
+            self.assertTrue(key[1].startswith("ticks/binance/BTCUSDT/trades/"))
+            self.assertGreater(len(body), 0)
+            wm = Path(tmp) / ".durable" / "binance" / "BTCUSDT" / "trades.json"
+            self.assertTrue(wm.is_file())
+            mtimes, days = w.latest_shard_info()
+            self.assertEqual(days["trades"], "2021-01-01")
+            self.assertIsNotNone(mtimes["trades"])
+
+    def test_size_mismatch_keeps_file(self):
+        client = _FakeS3()
+        client.inflate = True
+        with tempfile.TemporaryDirectory() as tmp:
+            w = ImmutableShardWriter(
+                tmp, "binance", "BTCUSDT", publisher=_publisher(client),
+            )
+            w.add_trade(_DAY0, 100.0, 1.0, False)
+            w.flush()
+            parts = list(Path(tmp).rglob("part-*.parquet"))
+            self.assertEqual(len(parts), 1)
+            wm = Path(tmp) / ".durable" / "binance" / "BTCUSDT" / "trades.json"
+            self.assertFalse(wm.exists())
+
+    def test_upload_error_keeps_file_and_retries(self):
+        client = _FakeS3()
+        client.fail = True
+        with tempfile.TemporaryDirectory() as tmp:
+            w = ImmutableShardWriter(
+                tmp, "binance", "BTCUSDT", publisher=_publisher(client),
+            )
+            w.add_trade(_DAY0, 100.0, 1.0, False)
+            w.flush()
+            self.assertEqual(len(list(Path(tmp).rglob("part-*.parquet"))), 1)
+            client.fail = False
+            w.flush()
+            self.assertEqual(list(Path(tmp).rglob("part-*.parquet")), [])
+            self.assertEqual(len(client.objects), 1)
+
+    def test_disk_floor_rebuffers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = ImmutableShardWriter(
+                tmp, "binance", "BTCUSDT",
+                min_free_bytes=1024,
+                free_bytes=lambda: 0,
+            )
+            w.add_trade(_DAY0, 100.0, 1.0, False)
+            w.add_trade(_DAY0 + 1, 101.0, 1.0, False)
+            n = w.flush()
+            self.assertEqual(n, 0)
+            self.assertEqual(list(Path(tmp).rglob("part-*.parquet")), [])
+            self.assertEqual(w.buffered_rows().get("trades"), 2)
+            self.assertEqual(w.stats()["rows_dropped"], 0)
+
+    def test_overflow_is_counted_and_not_reported_as_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = ImmutableShardWriter(
+                tmp, "binance", "BTCUSDT",
+                max_buffer_rows=2,
+                min_free_bytes=1024,
+                free_bytes=lambda: 0,
+            )
+            for i in range(10):
+                w.add_trade(_DAY0 + i, 100.0, 1.0, False)
+            self.assertEqual(list(Path(tmp).rglob("part-*.parquet")), [])
+            self.assertLessEqual(w.buffered_rows().get("trades", 0), 4)
+            self.assertGreater(w.stats()["rows_dropped"], 0)
+            self.assertEqual(w.stats()["rows_written"], 0)
+
+
+class TestDurableHealth(unittest.TestCase):
+
+    def test_ok_from_watermark_after_shard_deleted(self):
+        now = datetime(2021, 1, 1, 12, 0, tzinfo=timezone.utc)
+        report = evaluate_pipeline_health(
+            "BTCUSDT",
+            venue="binance",
+            latest_shard_mtime={"trades": None},
+            latest_shard_day={"trades": None},
+            durable_mtime={"trades": now.timestamp() - 10},
+            durable_day={"trades": "2021-01-01"},
+            now=now,
+            max_staleness_seconds=300,
+            datasets=("trades",),
+        )
+        self.assertTrue(report.ok, report.issues)
+
+    def test_fails_when_watermark_stale(self):
+        now = datetime(2021, 1, 1, 12, 0, tzinfo=timezone.utc)
+        report = evaluate_pipeline_health(
+            "BTCUSDT",
+            venue="binance",
+            latest_shard_mtime={"trades": None},
+            latest_shard_day={"trades": None},
+            durable_mtime={"trades": now.timestamp() - 900},
+            durable_day={"trades": "2021-01-01"},
+            now=now,
+            max_staleness_seconds=300,
+            datasets=("trades",),
+        )
+        self.assertFalse(report.ok)
+        self.assertTrue(any("stale" in i for i in report.issues))
+
+
+class TestSweep(unittest.TestCase):
+
+    def test_deletes_only_size_matched_objects(self):
+        client = _FakeS3()
+        pub = _publisher(client)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            matched = root / "binance" / "BTCUSDT" / "trades" / "date=2021-01-01" / "hour=00"
+            mismatch = root / "binance" / "ETHUSDT" / "trades" / "date=2021-01-01" / "hour=00"
+            fresh = root / "binance" / "BTCUSDT" / "depth_updates" / "date=2021-01-01" / "hour=00"
+            for d in (matched, mismatch, fresh):
+                d.mkdir(parents=True)
+            (matched / "part-1-2-aaa.parquet").write_bytes(b"matched-bytes")
+            (mismatch / "part-1-2-bbb.parquet").write_bytes(b"local-longer-bytes")
+            (fresh / "part-1-2-ccc.parquet").write_bytes(b"not-uploaded-yet")
+            client.objects[("test-bucket", pub.object_key(root, matched / "part-1-2-aaa.parquet"))] = b"matched-bytes"
+            client.objects[("test-bucket", pub.object_key(root, mismatch / "part-1-2-bbb.parquet"))] = b"short"
+            stats = sweep_local_shards(root, pub)
+            self.assertEqual(stats.deleted, 2)  # matched + freshly uploaded
+            self.assertEqual(stats.uploaded, 1)
+            self.assertEqual(stats.kept, 1)
+            self.assertEqual(stats.failed, 0)
+            self.assertFalse((matched / "part-1-2-aaa.parquet").exists())
+            self.assertFalse((fresh / "part-1-2-ccc.parquet").exists())
+            self.assertTrue((mismatch / "part-1-2-bbb.parquet").exists())
+            self.assertIn(
+                ("test-bucket", pub.object_key(root, fresh / "part-1-2-ccc.parquet")),
+                client.objects,
+            )
 
 
 if __name__ == "__main__":

@@ -24,9 +24,8 @@ from typing import List, Optional
 
 from data_service import TickDataCollector
 from tick_parquet_store import (
-    DATASETS,
     ImmutableShardWriter,
-    TickParquetStore,
+    S3ShardPublisher,
     evaluate_pipeline_health,
 )
 
@@ -76,11 +75,14 @@ def run_health_check(
     root = os.path.join(data_dir, "ticks")
     writer = ImmutableShardWriter(root, venue, symbol)
     mtimes, days = writer.latest_shard_info()
+    durable_m, durable_d = writer.durable_info()
     report = evaluate_pipeline_health(
         symbol,
         venue=venue,
         latest_shard_mtime=mtimes,
         latest_shard_day=days,
+        durable_mtime=durable_m,
+        durable_day=durable_d,
         now=datetime.now(timezone.utc),
         max_staleness_seconds=max_staleness_seconds,
         datasets=("trades",),  # depth may be quiet; trades are the heartbeat
@@ -95,6 +97,20 @@ def run_health_check(
     return 1
 
 
+def _min_free_bytes() -> int:
+    """Bytes that must stay free. Default 2 GB. Invalid env fails loud to 2."""
+    raw = os.environ.get("MIN_FREE_DISK_GB", "2")
+    try:
+        gb = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid MIN_FREE_DISK_GB=%r — using 2", raw)
+        gb = 2.0
+    if gb < 0:
+        logger.warning("Negative MIN_FREE_DISK_GB=%r — using 2", raw)
+        gb = 2.0
+    return int(gb * 1024 ** 3)
+
+
 def _run_one(
     *,
     venue: str,
@@ -104,14 +120,18 @@ def _run_one(
     flush_interval: float,
     futures: bool,
     redis_url: Optional[str],
+    s3_bucket: str,
 ) -> int:
     parquet_root = os.path.join(data_dir, "ticks")
     os.makedirs(parquet_root, exist_ok=True)
+    publisher = S3ShardPublisher(s3_bucket) if s3_bucket else None
     writer = ImmutableShardWriter(
         parquet_root,
         venue,
         symbol,
         flush_interval_s=flush_interval,
+        publisher=publisher,
+        min_free_bytes=_min_free_bytes(),
     )
 
     stopping = {"flag": False}
@@ -249,8 +269,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     _setup_logging(args.log_level, args.log_dir, symbol=symbol)
     if args.s3_bucket:
         logger.info(
-            "S3 bucket=%s (sync via host s3_sync / sidecar; collector writes local shards)",
+            "S3 bucket=%s — each closed shard is uploaded, confirmed, then deleted",
             args.s3_bucket,
+        )
+    else:
+        logger.warning(
+            "S3_BUCKET is empty — shards stay on local disk and will fill the volume"
         )
     return _run_one(
         venue=venue,
@@ -260,6 +284,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         flush_interval=args.parquet_flush_interval,
         futures=not args.spot,
         redis_url=args.redis_url or None,
+        s3_bucket=args.s3_bucket or "",
     )
 
 

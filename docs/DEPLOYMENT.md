@@ -1204,39 +1204,23 @@ aws s3 sync /tmp/backfill/binance/BTCUSDT \
 
 ### EC2 disk usage budget
 
-With the rotation + Parquet-cleanup design, expected steady-state local
-disk usage per symbol:
+The collector writes a closed Parquet shard, uploads it to
+`s3://$S3_BUCKET/ticks/...`, and deletes the local file only after `HeadObject`
+reports the same byte count. Local disk holds the open memory buffer plus any
+shard whose upload has not been confirmed. It does not keep a 7-day copy.
 
-| Data | Local retention | Permanent home |
-|------|----------------|----------------|
-| HDF5 live buffer | ≤ 3 GB per symbol (auto-rotated) | S3 archive |
-| Parquet (recent) | 7 days per symbol | S3 (`ticks-parquet/`) |
-| Parquet (older)  | Deleted by `s3_sync.sh` after S3 sync | S3 |
+| Data | On the instance | Permanent home |
+|------|-----------------|----------------|
+| Open buffer | Memory, capped at `2 * max_buffer_rows` | Not durable until a shard is confirmed |
+| Unconfirmed shard | Kept and retried | Deleted locally after S3 size matches |
+| Confirmed shard | Watermark only (tiny JSON) | `s3://…/ticks/{venue}/{SYMBOL}/…` |
 
-For 2 symbols (BTCUSDT + ETHUSDT) peak local usage is ~6 GB HDF5 +
-~1–2 GB Parquet. On a 30 GB root that leaves comfortable headroom, and the
-`MIN_FREE_DISK_GB` floor guarantees the box can never wedge itself full
-(the 2026-06 96%-disk incident).
+`MIN_FREE_DISK_GB` (default 2) is checked in `ImmutableShardWriter` before each
+shard is created. Below that floor the rows stay in the bounded buffer, the
+overflow is counted and logged at ERROR, and the flush is not reported as a
+success. `scripts/s3_sync.sh` is the backstop: it uploads leftovers and deletes
+only size-matched objects. `scripts/pipeline_health.sh` emits `DiskFreeGB`;
+`tick-disk-low` pages when free space is under 5 GB or the metric goes missing.
 
-### HDF5 rotation cadence (`MAX_H5_GB`, `MIN_FREE_DISK_GB`)
-
-Rotation keeps local disk bounded. Since the rearchitecture HDF5 is a
-*secondary, disposable* artifact (Parquet is the durable store), so the bias is
-toward **smaller, more frequent** rotation: smaller files corrupt less and free
-disk faster.
-
-- **Two independent triggers** (`collect_ticks._rotation_reason`): the size cap
-  `MAX_H5_GB`, or the free-disk floor `MIN_FREE_DISK_GB`. Either one archives +
-  deletes the live HDF5 and restarts clean. The floor is the hard guard against
-  a full disk regardless of how the size cap is set.
-- **One knob per deploy path.** `MAX_H5_GB` and `MIN_FREE_DISK_GB` in `.env`
-  drive both `docker compose` (`--max-h5-gb ${MAX_H5_GB:-3}`, `MIN_FREE_DISK_GB`
-  env) and the direct/systemd invocation (`collect_ticks.py` defaults them from
-  `$MAX_H5_GB` / `$MIN_FREE_DISK_GB`). Don't hardcode them in the systemd unit.
-- **Sizing rule.** Keep `n_symbols × MAX_H5_GB × 1.3` below free space (the ×1.3
-  covers Parquet + the snapshot/archive temp copy made during rotation). The
-  collector logs this budget at startup — check `docker compose logs data | grep
-  "Disk budget"` after a deploy.
-- **Defaults: `MAX_H5_GB=3`, `MIN_FREE_DISK_GB=2`** on a 30 GB root with 2
-  symbols. Raise `MAX_H5_GB` only after growing the EBS volume. Because the
-  mirror no longer depends on HDF5, frequent rotation has **no** gap-day cost.
+Build images, then `docker builder prune -af`. The journal is capped at
+`SystemMaxUse=200M`. Do not run the strategy container on this host.

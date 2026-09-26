@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Hourly S3 sync — Parquet shard upload for the greenfield collector.
+# Hourly S3 sync — backstop for the in-process upload-confirm-delete path.
 #
-#   1. Tick shards under data/ticks/{venue}/{SYMBOL}/… → s3://${S3_BUCKET}/ticks/
-#   2. Local Parquet cleanup (older than PARQUET_RETENTION_DAYS) after success
+#   1. Upload any leftover tick shards under data/ticks/ → s3://${S3_BUCKET}/ticks/
+#   2. Delete a local shard only when the S3 object size matches
 #   3. OHLCV tree sync when DATA_STORE != s3
 #
+# The collector deletes a shard as soon as HeadObject confirms it. This cron
+# catches files left behind by a crash or a failed upload. It does not keep a
+# multi-day local copy.
+#
 # No HDF5 path. Environment from ${APP_DIR}/.env:
-#   S3_BUCKET, APP_DIR, PARQUET_RETENTION_DAYS (default 7)
+#   S3_BUCKET, APP_DIR
 
 set -euo pipefail
 
@@ -22,8 +26,6 @@ if [ -f .env ]; then
     source .env
     set +o allexport
 fi
-
-PARQUET_RETENTION_DAYS="${PARQUET_RETENTION_DAYS:-7}"
 
 if [ -z "${S3_BUCKET:-}" ]; then
     msg="S3_BUCKET not set — NOT syncing. Set S3_BUCKET in ${APP_DIR}/.env"
@@ -60,12 +62,42 @@ else
     log "[INFO] no data/ticks/ directory — first run"
 fi
 
-# Local retention after confirmed sync
+# Delete local shards only after S3 size matches. Prefer a running collector
+# container (boto3 + this repo). Fall back to host python3.
 if [ "${PARQUET_SYNC_OK}" -eq 1 ] && [ -d "${APP_DIR}/data/ticks" ]; then
-    n_deleted=$(find "${APP_DIR}/data/ticks" -name 'part-*.parquet' \
-        -mtime "+${PARQUET_RETENTION_DAYS}" -delete -print 2>/dev/null | wc -l | tr -d ' ')
-    if [ "${n_deleted}" -gt 0 ]; then
-        log "[OK] pruned ${n_deleted} local shard files older than ${PARQUET_RETENTION_DAYS}d"
+    SWEEP_PY='import os, sys
+from pathlib import Path
+from tick_parquet_store import S3ShardPublisher, sweep_local_shards
+root = Path(os.environ["TICK_ROOT"])
+stats = sweep_local_shards(root, S3ShardPublisher(os.environ["S3_BUCKET"]))
+print(
+    f"sweep uploaded={stats.uploaded} deleted={stats.deleted} "
+    f"kept={stats.kept} failed={stats.failed}"
+)
+sys.exit(1 if stats.failed or stats.kept else 0)
+'
+    SWEEP_OK=0
+    for c in trading-data-BTCUSDT trading-data-ETHUSDT trading-data; do
+        if docker inspect --format '{{.State.Running}}' "$c" 2>/dev/null | grep -q true; then
+            if docker exec -e S3_BUCKET="${S3_BUCKET}" -e TICK_ROOT=/app/data/ticks \
+                    "$c" python -c "${SWEEP_PY}" >> "${LOG_FILE}" 2>&1; then
+                log "[OK] confirmed-shard sweep via ${c}"
+                SWEEP_OK=1
+                break
+            else
+                log "[FAIL] confirmed-shard sweep via ${c}"
+            fi
+        fi
+    done
+    if [ "${SWEEP_OK}" -eq 0 ]; then
+        if TICK_ROOT="${APP_DIR}/data/ticks" S3_BUCKET="${S3_BUCKET}" \
+                python3 -c "${SWEEP_PY}" >> "${LOG_FILE}" 2>&1; then
+            log "[OK] confirmed-shard sweep via host python3"
+            SWEEP_OK=1
+        else
+            log "[FAIL] confirmed-shard sweep — local shards kept"
+            FAILED=$((FAILED + 1))
+        fi
     fi
 fi
 

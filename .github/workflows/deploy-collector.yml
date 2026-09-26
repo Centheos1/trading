@@ -58,6 +58,7 @@ jobs:
               "git checkout main",
               "git pull --ff-only origin main",
               "docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile ohlcv build",
+              "docker builder prune -af",
               "docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile ohlcv up -d data-btc data-eth ohlcv-collector",
               "docker compose ps"
             ]' \

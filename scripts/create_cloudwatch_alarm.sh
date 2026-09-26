@@ -29,6 +29,8 @@ set -euo pipefail
 CLOUDWATCH_NAMESPACE="${CLOUDWATCH_NAMESPACE:-Trading/Pipeline}"
 SNS_TOPIC_NAME="${SNS_TOPIC_NAME:-trading-pipeline-alarms}"
 ALARM_NAME="${ALARM_NAME:-tick-pipeline-stale}"
+DISK_ALARM_NAME="${DISK_ALARM_NAME:-tick-disk-low}"
+DISK_FREE_GB_THRESHOLD="${DISK_FREE_GB_THRESHOLD:-5}"
 HOST_DIMENSION="${HOST_DIMENSION:-$(hostname)}"
 EVAL_PERIODS="${EVAL_PERIODS:-2}"
 
@@ -71,10 +73,30 @@ aws cloudwatch put-metric-alarm \
     --ok-actions "${TOPIC_ARN}" \
     "${region_args[@]}"
 
+echo "Creating/updating alarm ${DISK_ALARM_NAME}..."
+# DiskFreeGB is emitted hourly by pipeline_health.sh. Page on one sample
+# under the threshold, and when the host stops emitting (box down / disk full).
+aws cloudwatch put-metric-alarm \
+    --alarm-name "${DISK_ALARM_NAME}" \
+    --alarm-description "Collector root volume free space under ${DISK_FREE_GB_THRESHOLD} GB" \
+    --namespace "${CLOUDWATCH_NAMESPACE}" \
+    --metric-name DiskFreeGB \
+    --dimensions "Name=Host,Value=${HOST_DIMENSION}" \
+    --statistic Minimum \
+    --period 3600 \
+    --evaluation-periods 1 \
+    --threshold "${DISK_FREE_GB_THRESHOLD}" \
+    --comparison-operator LessThanThreshold \
+    --treat-missing-data breaching \
+    --alarm-actions "${TOPIC_ARN}" \
+    --ok-actions "${TOPIC_ARN}" \
+    "${region_args[@]}"
+
 cat <<EOF
 
 Done.
   Alarm:     ${ALARM_NAME}
+  Disk:      ${DISK_ALARM_NAME} when DiskFreeGB < ${DISK_FREE_GB_THRESHOLD} (or metric missing)
   Topic:     ${TOPIC_ARN}
   Metric:    ${CLOUDWATCH_NAMESPACE}/PipelineHealthy (Host=${HOST_DIMENSION})
   Fires when: PipelineHealthy < 1 for ${EVAL_PERIODS}h OR the metric goes missing.
