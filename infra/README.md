@@ -4,9 +4,13 @@ Provisions:
 
 - S3 lifecycle (noncurrent version expiry, abort incomplete multipart)
 - Optional ElastiCache Redis (`cache.t4g.small`) when `vpc_id` + `private_subnet_ids` are set
-- CloudWatch `tick-pipeline-stale` alarm on `Trading/Pipeline` / `PipelineHealthy`
-  (dimension `Host` must match `pipeline_health.sh` `Host=$(hostname)` on the
-  collector; default `ip-172-31-10-149`)
+
+CloudWatch alarms `tick-pipeline-stale` and `tick-disk-low` are **not** in this
+stack. `scripts/create_cloudwatch_alarm.sh` is the only writer: it sets `Host`
+from the collector hostname and attaches the SNS actions. A Terraform resource
+with the same alarm name would overwrite that configuration. If state still
+contains `aws_cloudwatch_metric_alarm.tick_pipeline_stale`, the `removed` block
+in `main.tf` drops it from state without deleting the live alarm.
 
 ## Apply
 

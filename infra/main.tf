@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.7.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -22,11 +22,6 @@ variable "bucket_name" {
   default = "trading-data-centheos"
 }
 
-variable "alarm_email" {
-  type    = string
-  default = ""
-}
-
 variable "collector_sg_id" {
   type        = string
   default     = ""
@@ -41,12 +36,6 @@ variable "vpc_id" {
 variable "private_subnet_ids" {
   type    = list(string)
   default = []
-}
-
-variable "alarm_host_dimension" {
-  type        = string
-  default     = "ip-172-31-10-149"
-  description = "Must match pipeline_health.sh Host=$(hostname) on the collector. Replacing the instance changes this."
 }
 
 # ---------------------------------------------------------------------------
@@ -117,23 +106,19 @@ resource "aws_elasticache_cluster" "md" {
   security_group_ids   = [aws_security_group.elasticache[0].id]
 }
 
-# ---------------------------------------------------------------------------
-# CloudWatch alarm — PipelineHealthy missing or 0
-# ---------------------------------------------------------------------------
+# CloudWatch alarms tick-pipeline-stale and tick-disk-low are created only by
+# scripts/create_cloudwatch_alarm.sh. That script sets the live Host dimension
+# and the SNS actions. Declaring the same alarm name here would upsert over
+# those settings (wrong Host, or paging actions dropped).
+#
+# Forget any copy already in state without destroying it, so apply does not
+# delete the alarm the script is paging on. The script's next run reconciles
+# the configuration in place.
+removed {
+  from = aws_cloudwatch_metric_alarm.tick_pipeline_stale
 
-resource "aws_cloudwatch_metric_alarm" "tick_pipeline_stale" {
-  alarm_name          = "tick-pipeline-stale"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "PipelineHealthy"
-  namespace           = "Trading/Pipeline"
-  period              = 3600
-  statistic           = "Minimum"
-  threshold           = 1
-  treat_missing_data  = "breaching"
-  alarm_description   = "Collector Parquet pipeline unhealthy or host down"
-  dimensions = {
-    Host = var.alarm_host_dimension
+  lifecycle {
+    destroy = false
   }
 }
 

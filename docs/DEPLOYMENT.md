@@ -908,6 +908,11 @@ ALERT_EMAIL=you@example.com ./scripts/create_cloudwatch_alarm.sh
 # dead box pages too. This is the real backstop for the 10-day silent freeze.
 ```
 
+This script is the only writer of `tick-pipeline-stale` and `tick-disk-low`.
+Do not add those alarm names to `infra/main.tf`. Both the script and Terraform
+upsert by alarm name, so a later `terraform apply` would replace the live
+`Host` dimension and can remove the SNS actions.
+
 ### Check logs after a restart
 
 ```bash

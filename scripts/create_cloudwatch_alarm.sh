@@ -12,6 +12,11 @@
 #
 # Idempotent: re-running updates the topic/subscription/alarm in place.
 #
+# Sole writer of alarm names tick-pipeline-stale and tick-disk-low. Do not
+# declare those names in Terraform (infra/main.tf). put-metric-alarm and
+# aws_cloudwatch_metric_alarm both upsert by alarm name, so a second writer
+# overwrites Host and can drop the SNS actions below.
+#
 # Usage:
 #   ALERT_EMAIL=you@example.com ./scripts/create_cloudwatch_alarm.sh
 #
