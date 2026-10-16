@@ -10,3 +10,5 @@
 jupyterlab>=4.0,<5
 ipywidgets>=8.1,<9
 plotly>=5.20,<6
+# Ledoit-Wolf and the constrained frontier in notebooks/11_oanda_frontier.ipynb.
+scipy>=1.11,<1.17
