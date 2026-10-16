@@ -14,8 +14,13 @@ from market_data import EventKind, MarketEvent, stream_key
 
 logger = logging.getLogger(__name__)
 
-# Keep roughly this many entries per stream (~minutes of busy depth).
-_DEFAULT_MAXLEN = 200_000
+# Per-stream cap. On 2026-10-01 the depth stream at 200_000 entries was
+# ~1.16 GB (about 6 KB of Redis memory each) and filled the cache.t4g.small
+# node (maxmemory 1.03 GB). Once full, XADD is rejected before its trim runs,
+# so the stream stays stuck. 20_000 depth entries is about 120 MB and, at the
+# observed ~3 events/s, roughly 100 minutes. Do not raise this without
+# rechecking MEMORY USAGE against that node's maxmemory.
+_DEFAULT_MAXLEN = 20_000
 
 
 class RedisMDBus:

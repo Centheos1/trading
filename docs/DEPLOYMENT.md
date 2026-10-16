@@ -408,10 +408,14 @@ aws configure
 # Create
 aws s3 mb s3://trading-data-centheos --region ap-southeast-2
 
-# Enable versioning (protects against accidental overwrites during hourly sync)
+# Versioning stays suspended. The OHLCV writer replaces the same yearly key
+# every hour; with versioning on, each replace kept a full copy of the file
+# (62,745 noncurrent versions, 206 GB, on 2026-09-28) and none of those copies
+# held candles that were missing from the live object. Suspended versioning
+# overwrites that key instead of stacking copies. Do not set Status=Enabled.
 aws s3api put-bucket-versioning \
     --bucket trading-data-centheos \
-    --versioning-configuration Status=Enabled
+    --versioning-configuration Status=Suspended
 
 # Enable SSE-S3 encryption at rest (free, no key management required)
 aws s3api put-bucket-encryption \
