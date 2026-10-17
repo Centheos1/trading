@@ -1,11 +1,14 @@
 # Tide / Wave / Ripple — Implementation Plan
 
+> **Scope — frozen historical V1.** This document governs the archived baseline specified by `docs/history/strategy_v1.md`. It is not the current strategy. The current research programme is the root `strategy.md`. Do not change the V1 baseline to match an unvalidated research hypothesis, and do not treat V1 behaviour as evidence for that programme.
+
+
 ## 1. Purpose
 
-This document translates the strategy design defined in `strategy.md` into a concrete, phased implementation program for the existing mixed C++ / Python application. It specifies module boundaries, language responsibilities, incremental build phases, testing requirements, performance targets, and acceptance criteria.
+This document translates the strategy design defined in `docs/history/strategy_v1.md` into a concrete, phased implementation program for the existing mixed C++ / Python application. It specifies module boundaries, language responsibilities, incremental build phases, testing requirements, performance targets, and acceptance criteria.
 
 **Source of truth hierarchy:**
-1. `strategy.md` — canonical strategy definition
+1. `docs/history/strategy_v1.md` — archived V1 specification for this plan
 2. `implementation_plan.md` — this document; how to build it
 3. Tests — executable specification
 4. `AGENT_STRATEGY_RULES.md` — operational rules for coding agents
@@ -271,7 +274,7 @@ flowchart TB
 
 > **Read this column carefully.** "Needs Work" entries marked **`Phase 14*`**
 > are V1 closure blockers — they must ship before V1 is GA. "Needs Work"
-> entries marked **`(later)`** are V2/V3 scope per `strategy.md` §23 and
+> entries marked **`(later)`** are V2/V3 scope per `docs/history/strategy_v1.md` §23 and
 > are explicitly out-of-scope for V1.
 
 | Component | Exists | Needs Work | Phase |
@@ -414,7 +417,7 @@ flowchart TB
 ```mermaid
 flowchart TB
     subgraph TRUTH ["Source of Truth"]
-        SM[strategy.md]
+        SM[docs/history/strategy_v1.md]
         IP[implementation_plan.md]
         ASR[AGENT_STRATEGY_RULES.md]
         TESTS[Tests]
@@ -436,7 +439,7 @@ flowchart TB
     TESTS -->|validates| PY
 ```
 
-**Rule:** If code behavior contradicts `strategy.md`, the code is wrong. If `implementation_plan.md` contradicts `strategy.md`, the plan must be updated. Tests are executable specifications and must agree with `strategy.md`.
+**Rule:** If code behavior contradicts `docs/history/strategy_v1.md`, the code is wrong. If `implementation_plan.md` contradicts `docs/history/strategy_v1.md`, the plan must be updated. Tests are executable specifications and must agree with `docs/history/strategy_v1.md`.
 
 [↑ Contents](#toc)
 
@@ -446,7 +449,7 @@ flowchart TB
 
 ## 5.1 Pre-Phase Defaults
 
-Before each layer is implemented, downstream consumers use hardcoded defaults. These are defined in `strategy.md` §7.5.
+Before each layer is implemented, downstream consumers use hardcoded defaults. These are defined in `docs/history/strategy_v1.md` §7.5.
 
 **Before Tide is implemented (Phases 2–3):**
 
@@ -480,7 +483,7 @@ Before each layer is implemented, downstream consumers use hardcoded defaults. T
 
 #### 6.1.1 `TradeLifecycleEngine`
 
-Manages the lifecycle of a single trade from SETUP through COOLDOWN. In V1, at most one trade is active per symbol (see strategy.md §12.3).
+Manages the lifecycle of a single trade from SETUP through COOLDOWN. In V1, at most one trade is active per symbol (see docs/history/strategy_v1.md §12.3).
 
 ```
 class TradeLifecycleEngine {
@@ -509,11 +512,11 @@ public:
 };
 ```
 
-**Note:** `LifecycleState` is an enum with values matching strategy.md §12.1: `SETUP`, `ENTRY`, `CONFIRMATION`, `EXPANSION`, `MATURATION`, `EXIT`, `COOLDOWN`, `CANCELLED`.
+**Note:** `LifecycleState` is an enum with values matching docs/history/strategy_v1.md §12.1: `SETUP`, `ENTRY`, `CONFIRMATION`, `EXPANSION`, `MATURATION`, `EXIT`, `COOLDOWN`, `CANCELLED`.
 
 #### 6.1.2 `LiquidityMapEngine`
 
-Maintains a real-time liquidity map combining resting depth, traded volume, aggressive flow, and structural anchors. Maximum tracked levels is bounded (see strategy.md §21.1).
+Maintains a real-time liquidity map combining resting depth, traded volume, aggressive flow, and structural anchors. Maximum tracked levels is bounded (see docs/history/strategy_v1.md §21.1).
 
 ```
 class LiquidityMapEngine {
@@ -540,7 +543,7 @@ public:
 
 #### 6.1.3 `RiskEngine`
 
-Enforces ES budget constraints on the hot path. Uses the parametric ES approximation from strategy.md §15.2 with configurable α (default 0.95).
+Enforces ES budget constraints on the hot path. Uses the parametric ES approximation from docs/history/strategy_v1.md §15.2 with configurable α (default 0.95).
 
 ```
 class RiskEngine {
@@ -593,13 +596,13 @@ class WaveEngine:
 
 ### 6.3 Shared Schemas and Serialization
 
-All data contracts defined in `strategy.md` §17 must have:
+All data contracts defined in `docs/history/strategy_v1.md` §17 must have:
 1. A C++ struct definition in `Types.h` (or a dedicated `Schemas.h`).
 2. A Python dataclass in a shared `schemas.py` module.
 3. pybind11 bindings for cross-language access.
 4. Optional serialization to JSON or MessagePack for storage and diagnostics.
 
-**Required contracts (strategy.md §17):**
+**Required contracts (docs/history/strategy_v1.md §17):**
 
 | Contract | §17 ref | Primary consumer |
 |---|---|---|
@@ -618,7 +621,7 @@ All data contracts defined in `strategy.md` §17 must have:
 | Tide Snapshot | §17.13 | TideEngine, RiskEngine |
 | Execution Intent | §17.14 | TradeLifecycleEngine, Execution Layer |
 
-**Consistency rule:** The C++ struct and Python dataclass must have identical field names, types, and semantics. Changes to one must be reflected in the other and in `strategy.md` §17.
+**Consistency rule:** The C++ struct and Python dataclass must have identical field names, types, and semantics. Changes to one must be reflected in the other and in `docs/history/strategy_v1.md` §17.
 
 ### 6.4 Per-Event Data Flow
 
@@ -680,7 +683,7 @@ flowchart LR
 **Objective:** Formalize the data contracts, feature schema, and configuration surface as code. No behavioral changes.
 
 **Scope:**
-- Define C++ structs for all data contracts (§17 of strategy.md).
+- Define C++ structs for all data contracts (§17 of docs/history/strategy_v1.md).
 - Define Python dataclasses mirroring the C++ structs.
 - Define pybind11 bindings for all new types.
 - Define a `StrategyConfig` struct/class with all configurable parameters organized by layer (tide, wave, ripple, risk, execution).
@@ -699,8 +702,8 @@ flowchart LR
 - pybind11 binding tests (construct in Python, read fields).
 
 **Success criteria:**
-- All data contracts from strategy.md §17 exist as compilable C++ structs and Python dataclasses.
-- All configurable parameters from strategy.md are present in `StrategyConfig` with sensible defaults.
+- All data contracts from docs/history/strategy_v1.md §17 exist as compilable C++ structs and Python dataclasses.
+- All configurable parameters from docs/history/strategy_v1.md are present in `StrategyConfig` with sensible defaults.
 - Feature schema is enumerable and queryable.
 - No existing tests break.
 
@@ -708,10 +711,10 @@ flowchart LR
 - None; this phase is purely structural.
 
 **Completion notes:**
-- All data contracts from `strategy.md` §17 implemented as C++ structs in `Schemas.h` and Python dataclasses in `schemas.py`.
+- All data contracts from `docs/history/strategy_v1.md` §17 implemented as C++ structs in `Schemas.h` and Python dataclasses in `schemas.py`.
 - Canonical enums: `TideBias`, `VolRegime`, `WaveRegime`, `Permission`, `TradeArchetype`, `TradeSide`, `LifecycleState`, `ExitType`, `RippleIntent`, `LiquidityState`, `FeatureCategory`.
 - `StrategyConfig` with full layer-organized parameters and JSON serialization.
-- Feature registry with 54 features matching `strategy.md` §16.
+- Feature registry with 54 features matching `docs/history/strategy_v1.md` §16.
 - `DefaultTideSnapshot` and `DefaultWaveSnapshot` as `static constexpr` structs.
 - `StrategySnapshot` aggregation type with deterministic serialization.
 - pybind11 bindings for all new types.
@@ -726,12 +729,12 @@ flowchart LR
 **Objective:** Implement the core Ripple execution logic: trade archetypes, trade lifecycle state machine, exit taxonomy, and basic scaling.
 
 **Scope:**
-- Implement `TradeLifecycleEngine` in C++ with the state machine from strategy.md §12.
-- Implement bounce and breakout trade archetype detection in `TriggerDecisionEngine` using the pseudocode from strategy.md §11.1.1 and §11.2.1.
-- Implement five exit types using the detection conditions from strategy.md §13.3.
-- Implement scale-in logic per strategy.md §14.1.1 (only after `CONFIRMATION` state, only in `EXPANSION`).
-- Implement scale-out algorithm per strategy.md §14.2.1 (at predefined liquidity destination fractions).
-- Implement trailing stop per strategy.md §14.3.
+- Implement `TradeLifecycleEngine` in C++ with the state machine from docs/history/strategy_v1.md §12.
+- Implement bounce and breakout trade archetype detection in `TriggerDecisionEngine` using the pseudocode from docs/history/strategy_v1.md §11.1.1 and §11.2.1.
+- Implement five exit types using the detection conditions from docs/history/strategy_v1.md §13.3.
+- Implement scale-in logic per docs/history/strategy_v1.md §14.1.1 (only after `CONFIRMATION` state, only in `EXPANSION`).
+- Implement scale-out algorithm per docs/history/strategy_v1.md §14.2.1 (at predefined liquidity destination fractions).
+- Implement trailing stop per docs/history/strategy_v1.md §14.3.
 - Wire `TradeLifecycleEngine` into `RippleEngine` so that Ripple manages open trades.
 - Wire `DefaultTideSnapshot` and `DefaultWaveSnapshot` as upstream inputs (see §5.1).
 - Expose trade state to Python via pybind11.
@@ -748,7 +751,7 @@ flowchart LR
 | `tests/test_trade_lifecycle.cpp` | New: unit tests for all FSM transitions and exit types |
 | `tests/test_trigger_detection.cpp` | New: unit tests for bounce/breakout detection |
 
-**V1 operating assumptions enforced in this phase (see strategy.md §22.1):**
+**V1 operating assumptions enforced in this phase (see docs/history/strategy_v1.md §22.1):**
 - Single symbol at a time.
 - At most one concurrent trade per symbol.
 - Event-time only (no wall-clock in decision logic).
@@ -771,7 +774,7 @@ flowchart LR
 - Trade lifecycle FSM correctly transitions through all states.
 - Bounce and breakout archetypes are detected and managed.
 - All five exit types function correctly.
-- Scale-in/out logic respects the rules in strategy.md §14.
+- Scale-in/out logic respects the rules in docs/history/strategy_v1.md §14.
 - Replay produces identical results.
 
 **Performance considerations:**
@@ -793,7 +796,7 @@ Delivered files:
 | `backtestingCpp/orderflow/CMakeLists.txt` | Extended: new source/header files, `test_trade_lifecycle` target |
 | `backtestingCpp/orderflow/ripple/tests/test_trade_lifecycle.cpp` | New: 99 test checks covering all FSM transitions, exit types, scaling, trailing stop, permissions, intents, determinism |
 
-Post-review consistency fixes (strategy.md cross-reference):
+Post-review consistency fixes (docs/history/strategy_v1.md cross-reference):
 - TARGET exit now uses LIMIT order with `limit_price = target_price_` per §13.3.2 (was MARKET).
 - EXHAUSTION exit now uses LIMIT order with `limit_price = last_microprice_` per §13.3.3 (was MARKET).
 - `unrealized_pnl` now computed in `get_snapshot()` as `(microprice - entry) * side_sign * qty` per §17.7 (was always 0).
@@ -913,7 +916,7 @@ Key design decisions:
 - VP and CVD are optional (non-owning pointers on RippleEngine); system degrades gracefully when not available.
 - Session VWAP computed incrementally from trade flow (price × quantity accumulator).
 
-Post-review consistency fixes (strategy.md cross-reference):
+Post-review consistency fixes (docs/history/strategy_v1.md cross-reference):
 - `collect_wall_levels` now filters by `wall_min_quality` config per §10.2.1 (was accepting all active walls regardless of quality).
 - First scale-out target's `new_stop` is updated to `entry_price` on entry fill per §14.2.1 (was using microprice at setup time, which may differ from actual fill price).
 - Scale-out plan now adds remainder quantity to last target when fewer destinations than `scale_out_count`, per §14.2.1 pseudocode.
@@ -958,8 +961,8 @@ Tests: 112 C++ checks (`test_liquidity_map`) covering:
 **Objective:** Implement the risk engine, ES throttle, and Tide sizing interface.
 
 **Scope:**
-- Implement `RiskEngine` in C++ with simple global ES throttle (strategy.md §15.2).
-- Implement position sizing formula (strategy.md §14.4).
+- Implement `RiskEngine` in C++ with simple global ES throttle (docs/history/strategy_v1.md §15.2).
+- Implement position sizing formula (docs/history/strategy_v1.md §14.4).
 - Wire risk checks into order submission path.
 - Implement `TideEngine` in Python with basic risk multiplier and ES budget computation.
 - Wire Tide outputs into Ripple via `RiskEngine`.
@@ -1016,14 +1019,14 @@ Key design decisions:
 - Fills are now routed to both `TradeLifecycleEngine` and `RiskEngine` through `RippleEngine::on_fill`.
 - Entry path now uses `compute_position_size()` instead of `cfg_.max_position`, with risk check gating via `check_new_order`.
 
-Post-review consistency fixes (strategy.md cross-reference):
+Post-review consistency fixes (docs/history/strategy_v1.md cross-reference):
 - `check_new_order` rejects zero/negative price and quantity per §20.7 boundary requirements.
 - Vol ratio clamp bounds match §14.4 exactly: [0.25, 2.0].
 - Budget exit threshold matches `cfg_.budget_exit_threshold` (default 0.90) per §13.3.5.
 
 Tests: 190 C++ checks (`test_risk_engine`) + 19 Python tests (`test_tide_engine.py`) + 11 Python tests (`test_risk_bindings.py`) covering:
 - Default construction, budget/volatility setters, clamp validation
-- ES parametric formula against strategy.md §15.2 example (notional=100, vol=0.80 → ES≈8.63)
+- ES parametric formula against docs/history/strategy_v1.md §15.2 example (notional=100, vol=0.80 → ES≈8.63)
 - ES updates on price change, ES zero with no position
 - `check_new_order`: within budget, ES exceeded, notional exceeded, zero risk mult, cumulative fills
 - `get_allowed_size`: within budget, clipped by ES, clipped by notional
@@ -1052,7 +1055,7 @@ Tests: 190 C++ checks (`test_risk_engine`) + 19 Python tests (`test_tide_engine.
 - Implement `WaveEngine` in Python.
 - Compute trend efficiency, dispersion, and absorption ratio from L1 data.
 - Implement deterministic threshold-based regime classification.
-- Implement the permissions matrix (strategy.md §18).
+- Implement the permissions matrix (docs/history/strategy_v1.md §18).
 - Wire Wave permissions into Ripple: Ripple checks permissions before creating setups.
 - Implement distance-to-structure features.
 - Expose Wave state to UI.
@@ -2512,8 +2515,8 @@ Validation results:
 
 ### Status
 
-V1 (per `strategy.md` §22.2) is **GA as of 2026-05-11**. The 2026-05
-audit cross-referencing `strategy.md` §22.2 ("What V1 Must Include")
+V1 (per `docs/history/strategy_v1.md` §22.2) is **GA as of 2026-05-11**. The 2026-05
+audit cross-referencing `docs/history/strategy_v1.md` §22.2 ("What V1 Must Include")
 and AGENT_STRATEGY_RULES.md §5 ("Tide/Wave/Ripple Boundary Rules")
 against the live runtime paths at the time (`ui/live_trading_session.py`
 and `execution/live_runner.py` — both since removed/replaced) originally
@@ -2557,7 +2560,7 @@ closed:
 > contracts on the deployed `strategy` service; each row's "Wired live?" status
 > is maintained on the new path.
 
-| `strategy.md` requirement | Phase that built it | Wired live? | Evidence |
+| `docs/history/strategy_v1.md` requirement | Phase that built it | Wired live? | Evidence |
 |---|---|---|---|
 | §22.2 #8 — Simple global ES throttle | Phase 4 (`RiskEngine`) | ✅ Yes (Phase 14B + **Phase 21**) | Originally: `execution/live_runner.py` called `ripple.set_risk_budget(...)` on 60 s cadence. **Phase 21:** `strategy/engine/live_engine.py::_run_layered_push_loop` calls the same setter from the deployed `strategy` service. Pinned by `tests/test_strategy_live_engine.py`. |
 | §22.2 #9 — Wave permissions matrix | Phase 5 (`WaveEngine`) | ✅ Yes (Phase 14B + **Phase 21**) | Originally: `execution/live_runner.py` called `ripple.set_wave_snapshot(...)` on 5 s cadence. **Phase 21:** `_run_layered_push_loop` in the `strategy` service pushes the same snapshot; `WaveEngine.on_price` fed from Redis trade stream. Pinned by `tests/test_strategy_live_engine.py`. |
@@ -2727,7 +2730,7 @@ a trade internally.
 
 1. ✅ 8 new end-to-end acceptance tests pass, plus 7 unit + 2 wiring tests (18 total).
 2. ✅ `grep -nE "@(pytest\.mark\.skip\|unittest\.skip)\(" tests/test_live_execution_v1_compliance.py` returns zero hits.
-3. ✅ All six failure modes from `strategy.md` §22.2 / §5.5 pinned:
+3. ✅ All six failure modes from `docs/history/strategy_v1.md` §22.2 / §5.5 pinned:
    - ES budget exhausted (`consumed_es >= es_budget`)
    - Wave `DISABLED` permission for the (archetype, side) of the intent
    - Tide `CRISIS` (`risk_multiplier <= 0.0`)
@@ -2780,7 +2783,7 @@ sharpe, cagr) only, but `BacktestResult.num_trades` was already
 populated by `evaluate_population`. Including it as a Pareto axis
 lets the optimiser distinguish "20 trades earning 1% PnL" from
 "1 trade earning 1% PnL" — a core robustness signal per
-`strategy.md` §22.2 #15.
+`docs/history/strategy_v1.md` §22.2 #15.
 
 **Scope (as shipped).**
 
@@ -2843,12 +2846,12 @@ Phase 14F closes all five without re-opening V2/V3 scope.
 V2 extends the deterministic V1 baseline with probabilistic inference,
 faithful order-type routing, hierarchical risk decomposition, and
 calibrated liquidity models. All V2 phases target the items explicitly
-listed as V2 scope in `strategy.md` §23.
+listed as V2 scope in `docs/history/strategy_v1.md` §23.
 
 **V2 guard rails (apply to every phase 15–20):**
 
-- `strategy.md` is the source of truth. If a phase spec conflicts with
-  `strategy.md`, update the spec, not the strategy.
+- `docs/history/strategy_v1.md` is the source of truth. If a phase spec conflicts with
+  `docs/history/strategy_v1.md`, update the spec, not the strategy.
 - V2 features are **opt-in only**. Every new capability must be behind
   a config flag whose default preserves V1 behaviour identically.
 - The Tide → Wave → Ripple boundary is inviolable: Tide allocates risk
@@ -2865,7 +2868,7 @@ listed as V2 scope in `strategy.md` §23.
 (`CampaignVerdict.promote`) must be recorded in this document and
 evaluated before Phase 17 work begins.
 
-| Phase | Name | Status | strategy.md ref | Dependency |
+| Phase | Name | Status | docs/history/strategy_v1.md ref | Dependency |
 |---|---|---|---|---|
 | [**21**](#phase21) | ✅ Re-wire Live Execution into the Distributed Strategy Service | `DONE — 2026-06-01` (see [§1A](#s1a) + [§7.2](#s72)) | §22.2 #4/#8/#9/#12 | [Phase 14](#s71) (re-used) |
 | [**15**](#phase15) | LIMIT / OCO Order Type Support | `DONE` | §13.3, §14.2 | [Phase 14A](#phase14a) (DONE) |
@@ -2975,7 +2978,7 @@ satisfied. This checklist is derived from the V1 lesson that
 
 | # | Requirement | How to Verify |
 |---|---|---|
-| 1 | **Docs updated** | `strategy.md` unchanged (or updated if spec drifts); `implementation_plan.md` phase status updated to `DONE`; `TESTING_GUIDE.md §19.1` table updated. |
+| 1 | **Docs updated** | `docs/history/strategy_v1.md` unchanged (or updated if spec drifts); `implementation_plan.md` phase status updated to `DONE`; `TESTING_GUIDE.md §19.1` table updated. |
 | 2 | **Unit tests added** | New test file(s) in `tests/` and/or `backtestingCpp/.../tests/` covering all new code paths. |
 | 3 | **Wiring tests added** | A test that instantiates `live_runner.py` or `live_trading_session.py` (or a stub equivalent) and asserts the new API surface is called on the engine. |
 | 4 | **Runtime wiring proven** | `grep -r "<new_api>" execution/` returns ≥ 1 production-code hit outside `tests/`. |
@@ -3013,7 +3016,7 @@ FastAPI) replaced the monolith's in-process live loop. The deployed
 Redis and **only logged signals** via the deprecated `set_signal_callback`.
 All of Phase 14's V1-compliant execution machinery (`execution/`) still
 existed and passed its unit tests, but **nothing called it on the deployed
-path**. This was a V1 contract regression: per `strategy.md` §22.2 the
+path**. This was a V1 contract regression: per `docs/history/strategy_v1.md` §22.2 the
 live path must be Ripple-driven (#4/#12), enforce the ES throttle (#8),
 and enforce Wave permissions (#9). None of that ran on the service.
 
@@ -3088,7 +3091,7 @@ fills depend on trade ticks (wired via `PaperEngine.on_trade`).
 
 ### Phase 15 — LIMIT / OCO Order Type Support `[DONE — 2026-05-12]`
 
-**Objective.** `strategy.md` §13.3 specifies that bounce entries use
+**Objective.** `docs/history/strategy_v1.md` §13.3 specifies that bounce entries use
 LIMIT orders; target and exhaustion exits use LIMIT orders; invalidation,
 time, and risk-budget exits use MARKET orders. Currently `BinanceBroker`
 sends only MARKET orders regardless of urgency, and `PaperEngine`
@@ -3096,7 +3099,7 @@ simulates all fills at market price. Phase 15 makes order-type routing
 faithful to the spec, adds partial-fill simulation in `PaperEngine`, and
 enables OCO pairs for simultaneous stop-loss + target exits.
 
-**Intent → order-type routing table** (canonical per `strategy.md` §13.3):
+**Intent → order-type routing table** (canonical per `docs/history/strategy_v1.md` §13.3):
 
 | Intent source | Urgency | Order type | Notes |
 |---|---|---|---|
@@ -3250,7 +3253,7 @@ aws s3 ls s3://trading-data-centheos/ticks-parquet/binance/BTCUSDT/ --recursive 
 
 **Why S3 and not direct cloud HDF5.** The C++ `TickStore` writes to a local HDF5 file via `libhdf5`. Rewriting it for direct S3 I/O would require significant C++ work and is out of scope. The correct pattern is: write to a local EBS volume → sync the HDF5 file to S3 hourly via cron → download to the developer machine before running the HMM campaign locally.
 
-**Phase 16P is not a strategy change.** Nothing in `strategy.md`, the Tide/Wave/Ripple pipeline, or any execution path is touched. This phase is purely operational infrastructure.
+**Phase 16P is not a strategy change.** Nothing in `docs/history/strategy_v1.md`, the Tide/Wave/Ripple pipeline, or any execution path is touched. This phase is purely operational infrastructure.
 
 **Scope.**
 
@@ -3734,7 +3737,7 @@ from permanently boosting evidence scores when the Oanda feed lags.
 ### Phase 19 — Hierarchical ES / Euler Decomposition `[NOT STARTED]`
 
 **Objective.** Replace the single global ES bucket with the Euler risk
-decomposition described in `strategy.md` §7.4.5. Tide publishes per-cell
+decomposition described in `docs/history/strategy_v1.md` §7.4.5. Tide publishes per-cell
 risk contributions `RC_i = w_i · ∂ρ/∂w_i`; `RiskEngine` enforces per-cell
 limits in addition to the global throttle. V1 single-cell behavior is the
 default when `euler_cells=[]`.
@@ -3788,7 +3791,7 @@ this before publishing `EulerBudgetSnapshot`.
 `LiquidityMapEngine` hold/break/destination scores with a calibrated
 logistic model trained on V1 backtest labelled outcomes. The deterministic
 path is the default (`logistic_enabled=False`) and must be byte-identical
-to V1 when enabled flag is not set. See `strategy.md` §10.3.
+to V1 when enabled flag is not set. See `docs/history/strategy_v1.md` §10.3.
 
 **V1 preservation rule.** `logistic_enabled=False` must produce
 `LiquidityMapEngine` hold/break/destination scores byte-identical to V1
@@ -3843,7 +3846,7 @@ If `logistic_fail_fast=True` is set, process exits with code 1.
 
 ## 7.4 V3 Forward Visibility
 
-Per `strategy.md` §23, V3 items depend on V2 HMM posteriors and
+Per `docs/history/strategy_v1.md` §23, V3 items depend on V2 HMM posteriors and
 multi-asset data. None of these are V2 closure work; they exist for
 forward visibility only.
 
@@ -3946,7 +3949,7 @@ forward visibility only.
 | **15** `[DONE 2026-05-12]` | ✅ Bounce entry (urgency=NORMAL, valid `reference_price`) → `place_order(LIMIT, price=reference_price)`. Breakout entry (urgency=IMMEDIATE) → MARKET. `ExitType.TARGET` / `ExitType.EXHAUSTION` → LIMIT. `ExitType.INVALIDATION` / `ExitType.RISK_BUDGET` → MARKET with `urgency=IMMEDIATE`. `reference_price=NaN\|0` on entry → MARKET + `LIMIT_FALLBACK` log; exit never blocked. `PaperEngine` LIMIT BUY fills at limit price when trade crosses; no fill when market stays above. Timeout-cancels OPEN orders after `limit_timeout_ms`. Partial fill: `fill_quantity < order.quantity` when simulated volume insufficient; residual remains as `PARTIAL`. OCO sibling cancelled after one leg fills. All existing Phase 14 acceptance tests pass byte-identically. `grep -r "place_order.*LIMIT\|OrderType\.LIMIT" execution/` returns ≥ 1 production-code hit. |
 | **21** `[DONE 2026-06-01]` | ✅ (1) `grep "set_ripple_callback" strategy/` → `strategy/engine/live_engine.py`. (2) `grep "intent_risk_block_reason" strategy/` → `strategy/engine/execution_bridge.py`. (3) Tide/Wave/RV pushes wired via `_run_layered_push_loop` (imported from `execution/live_runner.py`) — setters call at 60 s / 5 s / 1 s cadence. (4) Six failure modes pinned on service path: ES exhausted / Wave DISABLED / Tide CRISIS / max_position / cooldown / two-trades-concurrent. (5) `ARM_EXECUTION=false` → OBSERVE: zero broker orders. (6) ☐ **TESTNET soak** (`docker compose up` with `ARM_EXECUTION=true BINANCE_TESTNET=true`) — manual deploy step, not CI-automatable; required before mainnet arming. (7) Single live path: `execution/live_runner.py` primitives imported by service — no forked gate logic. 21 tests in `tests/test_strategy_live_engine.py` pass. |
 | **16R** `[DONE 2026-05-14]` | ✅ `tools/feed_health.py --report tick` prints staleness; `--report ohlcv --exchange binance` detects gaps; `--report all --json` produces valid JSON; symbols with gaps flagged; running with `DATA_STORE=s3` reads from S3. All new tests pass. |
-| **V1 GA** | **All Phase 14 acceptance rows green; full regression sweep (Phases 1–13B + 14A–14E + 21) green; `tests/test_live_execution_v1_compliance.py` is the executable form of the V1 §22.2 #12 contract on the `execution/live_runner.py` (in-process WS) path. Phase 21 re-closes the same contract on the deployed `strategy` service; `tests/test_strategy_live_engine.py` is the matching executable specification for the distributed path. Phase 15 ships LIMIT/OCO order routing faithful to `strategy.md` §13.3.** |
+| **V1 GA** | **All Phase 14 acceptance rows green; full regression sweep (Phases 1–13B + 14A–14E + 21) green; `tests/test_live_execution_v1_compliance.py` is the executable form of the V1 §22.2 #12 contract on the `execution/live_runner.py` (in-process WS) path. Phase 21 re-closes the same contract on the deployed `strategy` service; `tests/test_strategy_live_engine.py` is the matching executable specification for the distributed path. Phase 15 ships LIMIT/OCO order routing faithful to `docs/history/strategy_v1.md` §13.3.** |
 
 [↑ Contents](#toc)
 
@@ -3956,9 +3959,9 @@ forward visibility only.
 
 ## 11. Documentation Synchronization Rules
 
-1. **Before implementing a phase:** re-read the relevant sections of `strategy.md` and this plan.
-2. **If implementation reveals a design issue:** update `strategy.md` first, then code.
-3. **If a schema changes:** update `strategy.md` §17, then C++ structs, then Python dataclasses, then pybind11 bindings, then tests.
+1. **Before implementing a phase:** re-read the relevant sections of `docs/history/strategy_v1.md` and this plan.
+2. **If implementation reveals a design issue:** update `docs/history/strategy_v1.md` first, then code.
+3. **If a schema changes:** update `docs/history/strategy_v1.md` §17, then C++ structs, then Python dataclasses, then pybind11 bindings, then tests.
 4. **After completing a phase:** update this plan's status table and `AGENT_STRATEGY_RULES.md` if any rules changed.
 5. **Never let code drift from docs silently.** If you change behavior, document it.
 
@@ -3972,7 +3975,7 @@ forward visibility only.
 
 > **2026-05 correction.** The previous version of this section labelled
 > Phases 1–6 as "V1" and Phase 7 as "V2". That mapping does not match
-> `strategy.md` §22 / §23 (the source of truth). V1 per the strategy
+> `docs/history/strategy_v1.md` §22 / §23 (the source of truth). V1 per the strategy
 > spec includes the live execution path with full risk checks (§22.2
 > #12), all five exit types (§22.2 #4), Wave permissions enforcement
 > (§22.2 #9), and ES risk throttle (§22.2 #8) — all wired end-to-end,
@@ -4027,7 +4030,7 @@ config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 **Status: PARTIALLY DELIVERED — Phases 15, 16P, 16Q, 16R delivered; Phases 16–20 pending.**
 
 **Delivered (V1 pre-req + V2 execution infrastructure):**
-- LIMIT / OCO order routing faithful to `strategy.md` §13.3 (Phase 15, 2026-05-12).
+- LIMIT / OCO order routing faithful to `docs/history/strategy_v1.md` §13.3 (Phase 15, 2026-05-12).
 - EC2 / S3 tick data collection infrastructure (Phase 16P — **re-architected 2026-06-28** after the 2026-06 data-durability incident; durable Parquet mirror decoupled from HDF5; clean 30-day clock restarts on redeploy, BTCUSDT + ETHUSDT on t3.medium).
 - Cross-asset OHLCV historical collection (Phase 16Q — deployed 2026-05-13; Binance backfill complete; Oanda in progress).
 - Feed Health Monitor (Phase 16R, 2026-05-14).
@@ -4056,7 +4059,7 @@ config-driven (§20); `num_trades` is a Pareto objective (§22.2 #15).
 
 **Status: NOT STARTED.**
 
-- Multi-symbol portfolio management (V1 enforces single-symbol per `strategy.md` §22.1).
+- Multi-symbol portfolio management (V1 enforces single-symbol per `docs/history/strategy_v1.md` §22.1).
 - Multi-factor PCA for Wave (needs multi-asset L1 data).
 - Adaptive Kelly-like position sizing (depends on V2 HMM posteriors).
 - Live model retraining pipeline (depends on V2 HMM + optimisation framework).
@@ -4146,7 +4149,7 @@ Each phase adds benchmarks for its new components to a shared benchmark suite.
 
 Coding agents working on this codebase must:
 
-1. **Read `strategy.md` and this plan before starting work on any phase.**
+1. **Read `docs/history/strategy_v1.md` and this plan before starting work on any phase.**
 2. **Keep changes small.** One logical unit per commit. No multi-phase changes in a single PR.
 3. **Keep the system compile-safe.** Every commit must compile. Every commit must pass existing tests.
 4. **Avoid introducing HMM/ML before Phase 7.** The deterministic baseline must be complete and validated first.

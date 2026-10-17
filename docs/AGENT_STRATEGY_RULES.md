@@ -1,10 +1,13 @@
 # Agent Strategy Rules
 
+> **Scope — frozen historical V1.** This document governs the archived baseline specified by `docs/history/strategy_v1.md`. It is not the current strategy. The current research programme is the root `strategy.md`. Do not change the V1 baseline to match an unvalidated research hypothesis, and do not treat V1 behaviour as evidence for that programme.
+
+
 ## 1. Purpose
 
 This document is the **operational instruction manual** for coding agents working on the Tide / Wave / Ripple strategy codebase. It summarizes the critical implementation rules, guardrails, and conventions that must be followed at all times.
 
-This document does **not** replace `strategy.md`. For full mathematical definitions, state machine specifications, and design rationale, consult the source-of-truth hierarchy below.
+This document does **not** replace `docs/history/strategy_v1.md`. For full mathematical definitions, state machine specifications, and design rationale, consult the source-of-truth hierarchy below.
 
 ---
 
@@ -14,12 +17,12 @@ When in doubt, consult these documents in priority order:
 
 | Priority | Document | Role |
 |---|---|---|
-| 1 | `strategy.md` | Canonical strategy design, math, contracts |
+| 1 | `docs/history/strategy_v1.md` | Canonical strategy design, math, contracts |
 | 2 | `implementation_plan.md` | Build plan, phases, module mapping |
 | 3 | Tests | Executable specification |
 | 4 | This document | Operational rules and guardrails |
 
-**Rule:** If code behavior contradicts `strategy.md`, the code is wrong. If `implementation_plan.md` contradicts `strategy.md`, the plan must be updated first. If a test contradicts `strategy.md`, the test is wrong (update the test, not the strategy, unless the strategy has a bug).
+**Rule:** If code behavior contradicts `docs/history/strategy_v1.md`, the code is wrong. If `implementation_plan.md` contradicts `docs/history/strategy_v1.md`, the plan must be updated first. If a test contradicts `docs/history/strategy_v1.md`, the test is wrong (update the test, not the strategy, unless the strategy has a bug).
 
 ---
 
@@ -43,7 +46,7 @@ When in doubt, consult these documents in priority order:
 
 ### 3.3 Documentation
 
-- **Update `strategy.md`** if any strategy assumption, interface, or contract changes.
+- **Update `docs/history/strategy_v1.md`** if any strategy assumption, interface, or contract changes.
 - **Update `implementation_plan.md`** if any phase scope, dependency, or acceptance criteria changes.
 - **Update this document** if any operational rule changes.
 - **Never let code drift from docs silently.**
@@ -123,7 +126,7 @@ Roadmap (Phase 14 series).
 
 ### 4.3 Property-Based Tests
 
-For mathematical computations, add property invariants (see strategy.md §20.6):
+For mathematical computations, add property invariants (see docs/history/strategy_v1.md §20.6):
 - $ \text{ES} \geq \text{VaR} \geq 0 $
 - $ Q_{\text{final}} \in [0, Q_{\max}] $
 - $ I_t \in [-1, 1] $
@@ -132,7 +135,7 @@ For mathematical computations, add property invariants (see strategy.md §20.6):
 
 ### 4.4 Adversarial Tests
 
-Test with malformed inputs (see strategy.md §20.7):
+Test with malformed inputs (see docs/history/strategy_v1.md §20.7):
 - NaN prices, negative quantities, zero timestamps
 - Empty / single-level / crossed order books
 - Duplicate trade IDs, out-of-order events
@@ -199,14 +202,14 @@ These rules are **non-negotiable**. They define the architectural invariants of 
 
 ### 6.2 Adding Features
 
-1. Define the feature in `strategy.md` §16 first (name, type, cadence, category).
+1. Define the feature in `docs/history/strategy_v1.md` §16 first (name, type, cadence, category).
 2. Implement in the appropriate module.
 3. Add a unit test with known input → expected output.
 4. Update the feature schema registry if one exists.
 
 ### 6.3 Changing Features
 
-1. Update `strategy.md` §16 first.
+1. Update `docs/history/strategy_v1.md` §16 first.
 2. Audit all consumers of the changed feature.
 3. Update implementation and tests.
 4. If the change breaks backward compatibility with stored data, document a migration path.
@@ -284,7 +287,7 @@ grep -n "time\.time()" execution/execution_manager.py
 Every live runtime entry point (`execution/live_runner.py`,
 `main.py:execute`) MUST push the latest
 Tide budget, Wave snapshot, and realized volatility into the C++
-engine on every tick at the cadences specified in `strategy.md` §5.3
+engine on every tick at the cadences specified in `docs/history/strategy_v1.md` §5.3
 (Tide 60 s, Wave 5 s, RV 1 s).
 
 The setters that MUST be called:
@@ -395,17 +398,17 @@ grep -nE "@(pytest\.mark\.skip|unittest\.skip)\(" tests/test_live_execution_v1_c
 
 | Trigger | What to update |
 |---|---|
-| New feature added | `strategy.md` §16 + implementation code + tests |
-| Schema change | `strategy.md` §17 + C++ structs + Python dataclasses + bindings + tests |
-| New state machine state or transition | `strategy.md` §8/§9/§12 + code + tests |
+| New feature added | `docs/history/strategy_v1.md` §16 + implementation code + tests |
+| Schema change | `docs/history/strategy_v1.md` §17 + C++ structs + Python dataclasses + bindings + tests |
+| New state machine state or transition | `docs/history/strategy_v1.md` §8/§9/§12 + code + tests |
 | Phase completed | `implementation_plan.md` status |
 | New operational rule | This document |
-| Interface change | `strategy.md` + `implementation_plan.md` + consuming code + tests |
+| Interface change | `docs/history/strategy_v1.md` + `implementation_plan.md` + consuming code + tests |
 
 ### 8.2 Documentation Style
 
-- Use the same terminology as `strategy.md`. Do not invent synonyms.
-- Use the same notation as `strategy.md` §6.
+- Use the same terminology as `docs/history/strategy_v1.md`. Do not invent synonyms.
+- Use the same notation as `docs/history/strategy_v1.md` §6.
 - Keep mathematical precision. Do not hand-wave.
 
 ---
@@ -426,11 +429,11 @@ grep -nE "@(pytest\.mark\.skip|unittest\.skip)\(" tests/test_live_execution_v1_c
 
 ### 9.1.1 Bounded Data Structure Limits
 
-Every rolling buffer, history, or map must have an explicit maximum size (see strategy.md §21.1 for defaults). When adding a new data structure, you must:
+Every rolling buffer, history, or map must have an explicit maximum size (see docs/history/strategy_v1.md §21.1 for defaults). When adding a new data structure, you must:
 1. Declare its `maxlen` or capacity.
 2. Specify its eviction policy (FIFO, LRU, or lowest-score).
 3. Document what happens when capacity is exceeded (silent drop is **not** acceptable — count drops).
-4. Add it to the memory constraints table in strategy.md §21.1.
+4. Add it to the memory constraints table in docs/history/strategy_v1.md §21.1.
 
 ### 9.2 Latency Targets
 
@@ -456,8 +459,8 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 
 ### 10.1 Adding a New Trade Archetype
 
-1. Define it in `strategy.md` §11 (setup, confirmation, entry, target, stop).
-2. Add it to the permissions matrix in `strategy.md` §18.
+1. Define it in `docs/history/strategy_v1.md` §11 (setup, confirmation, entry, target, stop).
+2. Add it to the permissions matrix in `docs/history/strategy_v1.md` §18.
 3. Implement in `TriggerDecisionEngine`.
 4. Wire into `TradeLifecycleEngine`.
 5. Add unit and integration tests.
@@ -465,7 +468,7 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 
 ### 10.2 Adding a New Exit Type
 
-1. Define it in `strategy.md` §13.
+1. Define it in `docs/history/strategy_v1.md` §13.
 2. Assign a priority.
 3. Implement in `TradeLifecycleEngine`.
 4. Add tests.
@@ -473,14 +476,14 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 
 ### 10.3 Changing Risk Logic
 
-1. Update `strategy.md` §15.
+1. Update `docs/history/strategy_v1.md` §15.
 2. Implement in `RiskEngine`.
 3. Verify all position sizing formulas.
 4. Run backtest to validate no unintended position sizing changes.
 
 ### 10.4 Changing the Permissions Matrix
 
-1. Update `strategy.md` §18.
+1. Update `docs/history/strategy_v1.md` §18.
 2. Update `WaveEngine` or the lookup table.
 3. Test that permissions are enforced.
 4. Run backtest to validate impact.
@@ -532,7 +535,7 @@ Every rolling buffer, history, or map must have an explicit maximum size (see st
 |---|---|---|
 | Naive S/R entries | Using support/resistance as entry signals | S/R in Ripple is for exits and destination modeling |
 | Scale-in before confirmation | Adding to a losing position | Scale-in only in `EXPANSION` state |
-| Overcomplicated V1 | Too many features, too many states | Stick to V1 boundaries in `strategy.md` §22 |
+| Overcomplicated V1 | Too many features, too many states | Stick to V1 boundaries in `docs/history/strategy_v1.md` §22 |
 | Multiple concurrent trades in V1 | State machine complexity, risk accounting | V1 enforces max 1 trade per symbol (§5.5) |
 | Using `float` instead of `double` | Precision loss, non-deterministic replay | All hot-path numerics must be `double` (§9.1) |
 | Feature leakage | Using future information in backtest | Strict causal features, lookback windows |
@@ -572,7 +575,7 @@ A change is **done** when **all** of the following are true. Every criterion is 
 | Accuracy verified | Outputs are numerically correct against known inputs or reference data; no silent approximation |
 | Replay deterministic | Same events + config → same outputs |
 | Linter clean | No new linter warnings in changed files |
-| Docs updated | `strategy.md` / `implementation_plan.md` / this file updated if needed |
+| Docs updated | `docs/history/strategy_v1.md` / `implementation_plan.md` / this file updated if needed |
 | Performance acceptable | No regression > 20% on key metrics; C++ hot-path changes benchmarked |
 | Change is narrow | One logical unit; no unrelated modifications |
 | Review-ready | Changed files clearly identified; rationale documented |
@@ -583,7 +586,7 @@ A change is **done** when **all** of the following are true. Every criterion is 
 
 ## 13. Quick Reference: All Enum Values
 
-Canonical enum names from `strategy.md` §29. C++ and Python must use these exact identifiers.
+Canonical enum names from `docs/history/strategy_v1.md` §29. C++ and Python must use these exact identifiers.
 
 ```
 TideBias:       LONG | SHORT | NEUTRAL
@@ -609,7 +612,7 @@ EventType:      TRADE | DEPTH_UPDATE | DEPTH_SNAPSHOT
 
 ## 14. Quick Reference: Pre-Phase Defaults
 
-Before Tide/Wave are built, use these hardcoded defaults (see `strategy.md` §7.5):
+Before Tide/Wave are built, use these hardcoded defaults (see `docs/history/strategy_v1.md` §7.5):
 
 ```
 DefaultTideSnapshot:
@@ -631,7 +634,7 @@ Define as `static constexpr` in C++ `Schemas.h` and as constants in Python `sche
 
 ## 15. Quick Reference: Detection Algorithm Cross-References
 
-| Algorithm | strategy.md Section | Inputs | Output |
+| Algorithm | docs/history/strategy_v1.md Section | Inputs | Output |
 |---|---|---|---|
 | Wall detection | §9.6.1 | OrderBook levels, config | `vector<Wall>` with quality scores |
 | Cancellation rate | §9.6.2 | Wall depth changes, trade volume | `wall.cancellation_rate` |

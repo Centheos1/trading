@@ -662,7 +662,7 @@ in the markdown report so you can spot churn at a glance.
 ### Multi-Asset Dispersion & Absorption Ratio (V2/V3)
 V1 uses single-symbol proxies for dispersion (rolling return std) and absorption
 ratio (vol-of-vol ratio). True cross-sectional metrics require a panel of
-correlated assets — planned for V2/V3 per `strategy.md` roadmap.
+correlated assets — planned for V2/V3 per the archived `docs/history/strategy_v1.md` roadmap.
 
 ### Phase 10 — Feed Hardening `[COMPLETED]`
 

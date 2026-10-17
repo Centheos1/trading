@@ -1,2399 +1,2451 @@
-# Tide / Wave / Ripple — Multi-Layer Crypto Strategy Design
+# Tide / Wave / Ripple — Strategy, Research, and Implementation Roadmap
 
-## 1. Title and Purpose
+## Status of this document
 
-This document is the **canonical source of truth** for the Tide / Wave / Ripple hierarchical crypto strategy. It defines the architecture, mathematics, data contracts, state machines, trade lifecycle, risk framework, and implementation boundaries. All code, tests, and agent behavior must conform to this document.
+This file is the **canonical strategy, research, and implementation roadmap** for the Tide / Wave / Ripple programme.
 
-## 2. Audience and Scope
+It defines:
 
-**Primary audience:** quantitative developers and coding agents implementing, testing, optimizing, and operating the strategy within the existing mixed C++ / Python application.
+- strategy architecture
+- research hypotheses
+- research sequencing
+- experiment methodology
+- component dependencies
+- notebook and workstream mapping
+- implementation progression
+- validation gates
+- integration gates
+- paper-trading promotion criteria
 
-**Scope:** This document covers the full strategy design from macro risk allocation (Tide) through meso-scale regime classification (Wave) to microstructure execution (Ripple). It specifies V1 deterministic baselines, deferred probabilistic extensions, and the boundary between the two.
+It is the document that answers both **what the strategy is** and **how it will be built and validated**. Research and software progress together (§30). The intended path is:
 
-**Out of scope:** Retail-oriented explanation, marketing material, or exchange-specific operational procedures (API key management, deployment infrastructure).
-
-## 3. Strategy Philosophy
-
-The strategy is built on these principles:
-
-1. **Markets exhibit hierarchical structure.** Macro conditions, meso-scale regimes, and micro-scale execution environments each have distinct information sets, time horizons, and optimal decision frameworks.
-2. **Liquidity is a first-class observable.** The order book is not decoration — it encodes resting intent, aggressive demand, and the interaction dynamics that create price movement.
-3. **Execution quality dominates.** A mediocre signal executed well outperforms a superior signal executed poorly. Ripple exists to maximize execution quality.
-4. **Risk is allocated top-down, consumed bottom-up.** Tide allocates risk budget. Wave filters permission. Ripple decides when and how to enter and exit. No layer may exceed the budget granted by the layer above it.
-5. **Determinism before probability.** Every component must have a deterministic, testable, replayable baseline before probabilistic or ML-based extensions are layered on.
-6. **Observability over opacity.** Every state, transition, and decision must be loggable, replayable, and diagnosable.
-
-## 4. System Overview
-
-```mermaid
-flowchart TB
-    subgraph TIDE ["TIDE — Macro"]
-        direction LR
-        T1[Macro Bias]
-        T2[Capital Allocation]
-        T3[Risk Budget]
-        T4[Position Sizing Throttle]
-    end
-
-    subgraph WAVE ["WAVE — Regime Filter"]
-        direction LR
-        W1[Regime Classification]
-        W2[Factor / PCA Models]
-        W3[Structure Context]
-        W4[Permission Matrix]
-    end
-
-    subgraph RIPPLE ["RIPPLE — Execution"]
-        direction LR
-        R1[Wall Detection]
-        R2[Liquidity Map]
-        R3[Trade Archetypes]
-        R4[Trade Management]
-    end
-
-    TIDE -->|bias + budget| WAVE
-    WAVE -->|regime + permissions| RIPPLE
-    RIPPLE -->|position requests| EXECUTION[Execution Layer]
-    EXECUTION -->|fills + state| RIPPLE
-    RIPPLE -->|consumed budget| TIDE
-
-    L2[Binance L2 Data] --> RIPPLE
-    L1[L1 Price Data] --> WAVE
-    L1 --> TIDE
-    MACRO[Macro Indicators] --> TIDE
+```text
+DATA
+  → RESEARCH NOTEBOOK
+  → HYPOTHESIS TEST
+  → RESEARCH RESULT
+  → VALIDATION GATE
+  → REUSABLE CODE
+  → UNIT / INTEGRATION TESTS
+  → BACKTEST / EVENT-TIME REPLAY
+  → COMPOSED STRATEGY
+  → PAPER TRADING
+  → LIVE ELIGIBILITY
 ```
 
-## 5. Tide / Wave / Ripple Architecture
+Live eligibility is a review state. It is not a commitment to place real orders.
 
-### 5.1 Layer Summary
+| Status | Meaning in this document |
+|---|---|
+| **Current design** | Architectural commitments that subsequent research, data, implementation, and testing documents must respect. |
+| **Candidate hypothesis** | A falsifiable claim. Not a fact. May be rejected. |
+| **Validated component** | A claim that has survived its declared experiment protocol **and** the promotion state in §23. None of H1–H19 is validated at the time of writing. |
+| **Future extension** | Intentionally deferred. Must not become a hidden assumption of the initial research programme. |
+| **Lifecycle state** | Where a hypothesis sits on the path in §23. Economic hypotheses are **Proposed** unless a registered experiment says otherwise. |
 
-| Property | Tide | Wave | Ripple |
-|---|---|---|---|
-| **Horizon** | Hours to days | Minutes to hours | Seconds to minutes |
-| **Update cadence** | Minutes | Seconds to minutes | Per-event (trade, depth) |
-| **Data requirements** | L1 prices, macro, funding, volatility | L1 prices, cross-asset | Binance L2, trades, CVD, VP |
-| **Primary output** | Risk budget, bias, sizing throttle | Regime label, permission set | Trade decisions, management actions |
-| **Triggers trades?** | No | No | Yes |
-| **Owns risk budget?** | Yes (allocates) | No (filters) | No (consumes) |
+The historical design document `docs/history/strategy_v1.md` records an earlier, implementation-oriented V1 (deterministic Tide bias, Wave permission matrix, Ripple bounce/breakout). It may be used for terminology, feature definitions, and engineering history. **It is not the current strategy specification.** Do not treat its defaults, state machines, or trade archetypes as established truth. Existing notebooks `notebooks/00`–`09` walk through that V1. They are not the hypothesis notebooks in §27, and their outputs are not confirmatory evidence for H1–H19. The frozen V1 application remains runnable as a benchmark. New research lives in `research/` and `notebooks/research/`; it does not modify V1 behaviour.
 
-### 5.2 Information Flow
+This document is **not**:
+
+- a detailed API contract
+- a complete production configuration catalogue
+- a database schema
+- a broker-specific implementation manual
+- a claim that the strategy is profitable
+
+Detailed technical contracts may still be maintained separately. If those documents contradict this roadmap, this roadmap wins until it is deliberately revised.
+
+---
+
+## 1. Dual objectives
+
+The programme has two connected objectives.
+
+### 1.1 Academic
+
+Complete a Master's quantitative finance research project with a defensible programme:
+
+- explicit hypotheses and nulls
+- declared information sets
+- nested benchmarks and ablations
+- out-of-sample validation
+- statistical *and* economic evaluation
+- calibration of probabilistic forecasts and risk measures
+
+A formal research proposal will be finalised **after** initial experimentation shows which hypotheses are worth concentrating on. Early work is exploratory in *topic selection*, not sloppy in *protocol*.
+
+### 1.2 Practical
+
+Develop a genuinely profitable autonomous trading strategy spanning:
+
+data ingestion → market/portfolio state → opportunity modelling → decision/allocation → execution → fills / P&L / risk → feedback.
+
+Profitability is an **empirical objective**, not an assumption. A well-specified system that cannot beat nested benchmarks after costs is a valid research outcome.
+
+### 1.3 Coupling
+
+Research experiments validate *components*. Validated components may be composed into the autonomous system. Composition is itself a hypothesis: independently useful modules need not remain useful together.
 
 ```mermaid
 flowchart LR
-    T[Tide] -->|"risk_budget, bias, max_position"| W[Wave]
-    W -->|"regime, permissions, context"| R[Ripple]
-    R -->|"execution_intent"| E[Execution]
-    E -->|"fills, position_state"| R
-    R -->|"consumed_risk, pnl"| T
+    subgraph research [Research experiments]
+        H[Hypotheses]
+        E[Isolated tests]
+        V[Validated components]
+    end
+    subgraph live [Autonomous system]
+        C[Composed pipeline]
+        X[Execution under constraints]
+        F[Realised P and L]
+    end
+    H --> E --> V --> C --> X --> F
+    F -.->|feedback / new hypotheses| H
 ```
-
-**Invariant:** information flows downward (Tide → Wave → Ripple) for allocation and permission. Consumed risk and position state flow upward for accounting. No layer may override the constraints set by the layer above it.
-
-### 5.3 Update Cadence and Clock
-
-All layers share a common monotonic event clock for replay determinism. In live mode, this is wall-clock milliseconds. In replay mode, it is reconstructed from stored event timestamps.
-
-| Layer | Minimum update interval | Triggered by |
-|---|---|---|
-| Tide | 60 000 ms | Timer or significant market move |
-| Wave | 5 000 ms | Timer or structural change |
-| Ripple | Per event | Trade, depth update, timer tick |
 
 ---
 
-## 6. Mathematical Notation and Conventions
+## 2. Architectural principles
 
-Unless otherwise specified:
+### 2.1 Three layers of information and responsibility
 
-| Symbol | Meaning |
+| Layer | Role | Typical horizon |
+|---|---|---|
+| **Tide** | Market and portfolio *state*: risk, capital, budgets, tails, factors, regime probabilities, hedges | Hours to days (slow state) |
+| **Wave** | Conditional *opportunity*: market-state modelling, return/first-passage distributions | Minutes to hours (meso) |
+| **Ripple** | Microstructure *and execution of authorised actions*: order flow, liquidity, timing, method, fill/impact | Event scale (fast) |
+
+The hierarchy is **information and responsibility**, not unquestioned causal superiority. Tide does not “know the truth” about Wave; Wave does not render Ripple irrelevant. Lower layers may contain incremental information after conditioning on higher layers. That increment is a research question, not a design axiom.
+
+### 2.2 Prediction ≠ decision ≠ execution
+
+This is the central operating principle.
+
+1. **Models estimate distributions** (or functionals of distributions).
+2. The **decision layer** asks whether an action has sufficient expected economic value subject to risk, capacity, and execution constraints.
+3. **Ripple** determines how an *authorised* entry, management action, or exit
+   should be executed given current microstructure. It may supply evidence and
+   feasible actions to the decision layer, but it does not authorise exposure.
+
+A high probability of a favourable first passage is not a trade. A trade is not a fill. A fill is not a realised economic outcome after risk.
+
+Nor does the decision process end at an entry fill. Once exposure exists, new
+Tide, Wave, and Ripple information may justify holding, reducing, scaling,
+repricing, hedging, exiting, or emergency-exiting. A reversal is a new exposure
+and requires independent authorisation by the decision framework; it is not an
+implicit consequence of closing the prior position.
+
+Wave must **not** be reduced to `{LONG, SHORT, NEUTRAL}`. Those labels may appear as *derived summaries* of a distribution; they are not the Wave object.
+
+### 2.3 Complexity is not progress
+
+Each modelling extension is a hypothesis to be tested against a simpler nested model. Additional complexity is justified only by incremental statistical or economic value after costs, leakage controls, and multiple-testing discipline.
+
+### 2.4 Deterministic baselines remain useful
+
+Rule-based Tide/Wave/Ripple artefacts from the historical V1 are **baselines and candidate policies**, not the destination. They exist to be beaten, matched, or retained if they survive comparison.
+
+---
+
+## 3. System overview
+
+### 3.1 Fundamental flow
+
+```mermaid
+flowchart TB
+    MD[Market data] --> T[Tide: market / portfolio / risk state]
+    T --> W[Wave: opportunity distribution]
+    W --> D[Decision / allocation]
+    T --> D
+    D --> R[Ripple]
+    R --> RE[Entry execution]
+    R --> RP[Management execution]
+    R --> RX[Exit execution]
+    R --> RM[Execution method]
+    RE --> P[Realised position]
+    RP --> P
+    RX --> P
+    RM --> RE
+    RM --> RP
+    RM --> RX
+    P --> Y[Realised / unrealised P and L / risk]
+    Y --> T
+    Y --> W
+    Y --> D
+    MD --> W
+    MD --> R
+```
+
+News/event state, if used, enters as structured information into Tide/Wave/Ripple — never as a direct order (see §12).
+
+The complete authorised lifecycle, which may iterate while a position is open, is:
+
+1. opportunity identification (Wave);
+2. exposure authorisation (Decision, subject to Tide);
+3. entry execution (Ripple);
+4. open-position state;
+5. position-management decision (Decision, informed by Tide/Wave/Ripple);
+6. exit decision, when one is authorised (Decision);
+7. execution of the authorised action (Ripple);
+8. realised outcome (fills, P&L, inventory);
+9. portfolio-risk re-evaluation (Tide) and return to (1)–(5).
+
+An open position is a **closed-loop control problem**: the system repeatedly
+observes state, updates beliefs, evaluates constraints, and chooses among
+authorised actions. This is the conceptual structure for subsequent research,
+not a deterministic trading rule.
+
+$$
+\text{opportunity}
+\rightarrow \text{exposure authorisation}
+\rightarrow \text{entry execution}
+\rightarrow \text{open position}
+\rightarrow \text{management / exit decision}
+\rightarrow \text{execution of authorised action}
+\rightarrow \text{realised P\&L / risk}
+\rightarrow \text{Tide/Wave/Ripple update}
+\rightarrow \text{Decision re-authorisation}.
+$$
+
+Position management is a research problem, not a bag of arbitrary rules.
+Actions such as hold, scale, reduce, reprice, hedge, or exit require the same
+discipline of conditional evidence, costs, risk constraints, and nested
+comparison as the original entry.
+
+### 3.2 Layer questions
+
+| Layer | Question it answers |
 |---|---|
-| $ P_t $ | Mid-price at time $ t $ |
-| $ P^b_t, P^a_t $ | Best bid and ask prices |
-| $ V^b_t, V^a_t $ | Aggregate quantity at best bid and ask |
-| $ V^b_{t,j} $ | Bid quantity at level $ j $ at time $ t $ (analogously for ask) |
-| $ r_t $ | Log return: $ r_t = \ln(P_t / P_{t-1}) $ |
-| $ r_{i,t} $ | Log return of asset $ i $ at time $ t $ |
-| $ \Delta P_i $ | Price increment: $ P_i - P_{i-1} $ |
-| $ \sigma $, $ \hat{\sigma} $ | Realized volatility (hat denotes an estimate) |
-| $ \Delta t $ | Time interval (milliseconds unless stated) |
-| $ N $ | Window length (number of observations) or number of assets (context-dependent) |
-| $ Q $ | Quantity (base asset units) |
-| $ I_t $ | Order book imbalance at time $ t $ |
-| $ P_\mu $ | Microprice |
-| $ W_p $ | Wall quality score at price level $ p $ |
-| $ \mathcal{D}_p $ | Resting depth (quantity) at price level $ p $ |
-| $ D_t $ | Cross-sectional return dispersion at time $ t $ (Wave context only) |
-| $ \lambda_t $ | Price impact per unit aggressive volume |
-| $ F_t $ | Normalized aggressive flow rate |
-| $ \pi_p $ | Wall persistence at price $ p $ |
-| $ c_p $ | Wall cancellation rate at price $ p $ |
-| $ \eta $ | Directional efficiency ratio |
-| $ \alpha $ | Confidence level for VaR/ES (default $ \alpha = 0.95 $ throughout) |
-| $ \mathbb{1}[\cdot] $ | Indicator function |
-| $ \sigma(\cdot) $ | Logistic function: $ \sigma(z) = 1/(1+e^{-z}) $ |
-| $ \text{EMA}_\alpha(x) $ | Exponential moving average with decay $ \alpha $ |
-| $ \lfloor \cdot \rfloor $ | Floor function |
-| $ \text{clip}(x, a, b) $ | $ \max(a, \min(x, b)) $ |
+| Tide | What is the current market and *portfolio* situation, and how much risk may be taken? |
+| Wave | Conditional on $\mathcal{F}_t$, what is the distribution of future returns / first-passage outcomes? |
+| Decision | Does any feasible action $a$ have sufficient expected utility after costs, subject to Tide constraints? |
+| Ripple | Given an authorised entry, management action, or exit, what is the microstructure state and how should that action be executed? |
 
-**Disambiguation note:** $ \mathcal{D}_p $ always denotes resting depth at a price level. $ D_t $ always denotes cross-sectional dispersion. These are deliberately distinguished by font (calligraphic vs. italic) and subscript (price vs. time).
+Ripple is the only layer that **submits** orders. Tide and Wave do not trade.
 
-**Time units:** all timestamps are in milliseconds since Unix epoch unless a suffix indicates otherwise.
+### 3.3 Operational and information architectures
 
-**Price precision:** all prices are in quote currency (e.g., USDT for BTC-USDT perpetual).
+The **operational architecture** is ordered:
 
-**Signed convention for flow:** buy-initiated flow is positive; sell-initiated flow is negative.
+$$
+\text{Tide} \rightarrow \text{Wave} \rightarrow \text{Decision}
+\rightarrow \text{Ripple} \rightarrow \text{Execution}.
+$$
 
-**Confidence level convention:** Unless stated otherwise, $ \alpha = 0.95 $ for both VaR and ES throughout this document. The parametric multiplier for the one-sided normal at 95% is $ z_{0.95} \approx 1.645 $, and at 99% is $ z_{0.99} \approx 2.326 $. Sections that override the default will state so explicitly.
+It identifies authority: models describe, the decision layer authorises every
+change in exposure, and Ripple translates each authorised action into order
+timing and method while maintaining operational position integrity.
+
+The **information architecture** is not purely downstream. Tide, Wave, and
+Ripple may each contain information with incremental predictive value. For
+example, order flow may refine first-passage probabilities even though Ripple
+cannot independently authorise portfolio risk. Such incremental value must be
+tested by nested conditioning and ablation; operational authority must not be
+confused with predictive content.
+
+### 3.4 Three clocks
+
+The programme distinguishes three conceptual clocks. They need not coincide.
+
+| Clock | Question | Typical grain |
+|---|---|---|
+| **Forecast clock** | Over what horizon $h$ does Wave predict outcomes? | Meso: the Wave object’s $h$ |
+| **Position-management clock** | How often does Decision reassess an existing position? | Slower than event time; not necessarily equal to $h$ |
+| **Execution clock** | When may Ripple reassess fills, quotes, and cancellations? | Event-time order-book and trade updates |
+
+Wave may estimate a multi-minute opportunity while Ripple reacts to individual
+book events. The event-time backtester must not collapse these clocks into a
+single bar. Numerical frequencies are experimental, not architecture.
+
+### 3.5 Strategy control hierarchy
+
+Authority is hierarchical. Information is not.
+
+```text
+HARD SAFETY CONSTRAINTS
+        ↓
+TIDE PORTFOLIO RISK CONSTRAINTS
+        ↓
+DECISION / EXPOSURE AUTHORISATION
+        ↓
+WAVE OPPORTUNITY MODEL          ← informational, not an authority layer
+        ↓
+POSITION-MANAGEMENT DECISION    ← still Decision, with position state
+        ↓
+RIPPLE EXECUTION / MICROSTRUCTURE
+        ↓
+ORDER / FILL
+        ↓
+REALISED POSITION
+        ↓
+FEEDBACK → Tide, Wave, Decision
+```
+
+Hard safety and Tide constraints can forbid exposure even when Wave is
+favourable. Wave and Ripple may still supply incremental *information* to
+Decision. Ripple never creates unapproved risk.
 
 ---
 
-## 7. Tide Layer
+## 4. Mathematical foundation
 
-### 7.1 Purpose
+### 4.1 Price convention
 
-Tide is the **macro bias, capital allocation, and risk budgeting layer**. It answers: *"Given current macro conditions, how much risk should the strategy take, in which direction, and on which assets?"*
-
-Tide does **not** trigger trades. It produces directional bias, position sizing throttles, and risk budgets that constrain Wave and Ripple.
-
-### 7.2 Responsibilities
-
-1. Compute and publish a directional bias per asset (long, short, neutral).
-2. Allocate capital across strategy sleeves and assets.
-3. Set position sizing throttles (maximum notional, maximum units).
-4. Compute expected shortfall budgets per sleeve and per asset.
-5. Publish a risk multiplier that Ripple uses to scale position size.
-6. Detect macro regime changes (risk-on, risk-off, crisis).
-
-### 7.3 Candidate Features
-
-| Feature | Namespace | Description | Cadence |
-|---|---|---|---|
-| Crypto beta return | `tide.crypto_beta_return` | Return of a synthetic crypto index (e.g., cap-weighted BTC+ETH basket) | 60s |
-| Realized volatility | `tide.realized_vol` | Annualized realized vol of the index over a rolling window | 60s |
-| Funding rate | `tide.funding_rate` | Perpetual funding rate for the asset | 8h (Binance cadence) |
-| Open interest change | `tide.oi_change_pct` | Percentage change in aggregate open interest | 60s |
-| Volatility regime | `tide.vol_regime` | Categorical: low / normal / high / crisis | 60s |
-| Macro sentiment | `tide.macro_sentiment` | Composite score from available macro indicators | 300s |
-| Liquidity stress | `tide.liquidity_stress` | Aggregate liquidity stress index (see §7.4.3) | 60s |
-
-### 7.4 Mathematical Formalization
-
-#### 7.4.1 Realized Volatility
-
-Given a window of $ N $ log returns $ \{r_1, \ldots, r_N\} $ sampled at interval $ \Delta t $:
+Work in log price:
 
 $$
-\hat{\sigma}_{\text{realized}} = \sqrt{ \frac{1}{N} \sum_{i=1}^{N} r_i^2 } \cdot \sqrt{\frac{T}{\Delta t}}
+X_t = \ln P_t
 $$
 
-where $ T $ is the annualization factor (e.g., $ 365 \times 24 \times 3600 \times 1000 $ ms for continuous crypto markets).
-
-#### 7.4.2 Directional Efficiency Ratio
-
-Measures how efficiently price moves in one direction over a window:
+Log returns over horizon $h$:
 
 $$
-\eta = \frac{ \left| \sum_{i=1}^{N} \Delta P_i \right| }{ \sum_{i=1}^{N} |\Delta P_i| }
+R_{t:t+h} = X_{t+h} - X_t
 $$
 
-where $ \Delta P_i = P_i - P_{i-1} $. Values near 1 indicate trending; values near 0 indicate mean-reverting.
+### 4.2 Initial stochastic model
 
-#### 7.4.3 Liquidity Stress Index (Tide-Level)
-
-A composite of spread, depth, and impact metrics aggregated over a longer horizon:
+The starting continuous-time description is a diffusion
 
 $$
-\text{LSI}_{\text{tide}} = w_1 \cdot \frac{s_t - \bar{s}}{\sigma_s} + w_2 \cdot \frac{\bar{d} - d_t}{\sigma_d} + w_3 \cdot \frac{\lambda_t - \bar{\lambda}}{\sigma_\lambda}
+dX_t = \mu_t\, dt + \sigma_t\, dW_t
 $$
 
-where:
-- $ s_t $ = current spread normalized by tick size
-- $ d_t $ = current top-of-book depth (sum of best bid and ask quantity)
-- $ \lambda_t $ = estimated price impact per unit aggressive volume (see §9.5.5)
-- Barred quantities ($ \bar{s}, \bar{d}, \bar{\lambda} $) are rolling means over the Tide window; $ \sigma_s, \sigma_d, \sigma_\lambda $ are rolling standard deviations
-- $ w_1, w_2, w_3 $ are configurable weights (see `tide.lsi_weights` in §27.1, default: equal)
-- **Sign convention:** each term is positive when conditions are stressed (wider spread, thinner depth, higher impact)
+with drift and diffusion that may later be conditioned on slow state $Z_t$ (Tide/Wave) and microstructure $O_t$ (Ripple).
 
-Higher LSI indicates stress; the Tide layer uses LSI to reduce risk allocation.
+This is a **working model**, not a claim that prices are Gaussian, continuous, or Markov.
 
-#### 7.4.4 Expected Shortfall
+### 4.3 Fokker–Planck equation
 
-Let $ L $ denote portfolio **loss** (positive values = losses). Value at Risk at confidence level $ \alpha $:
+If $p(x,t)$ is the density of $X_t$, the Fokker–Planck (forward Kolmogorov) equation associated with the diffusion is
 
 $$
-\text{VaR}_\alpha = \inf\{x : \Pr(L > x) \leq 1 - \alpha\}
+\frac{\partial p}{\partial t}
+= -\frac{\partial}{\partial x}(\mu p)
++ \frac{1}{2}\frac{\partial^2}{\partial x^2}(\sigma^2 p)
 $$
 
-Expected Shortfall is the conditional tail expectation beyond VaR:
+Probability flux (useful for first-passage and barrier problems):
 
 $$
-\text{ES}_\alpha = \mathbb{E}[L \mid L > \text{VaR}_\alpha]
+J(x,t) = \mu p - \frac{1}{2}\frac{\partial}{\partial x}(\sigma^2 p)
 $$
 
-By construction, $ \text{ES}_\alpha \geq \text{VaR}_\alpha \geq 0 $ for a portfolio with any positive loss probability. ES is sub-additive and therefore a coherent risk measure, unlike VaR.
+Flux is a **research object**: it may clarify how probability mass moves toward a target or stop. It is not required for the initial experiments.
 
-**V1 parametric approximation:** Under a Gaussian assumption for portfolio returns:
+### 4.4 Wave objects
 
-$$
-\text{ES}_\alpha \approx \sigma_{\text{portfolio}} \cdot \frac{\phi(z_\alpha)}{1 - \alpha}
-$$
-
-where $ \phi $ is the standard normal PDF and $ z_\alpha = \Phi^{-1}(\alpha) $. For the default $ \alpha = 0.95 $, $ z_{0.95} \approx 1.645 $ and $ \phi(1.645)/(1-0.95) \approx 2.063 $.
-
-In later versions, historical simulation or Monte Carlo methods may replace the parametric approximation.
-
-#### 7.4.5 Euler Decomposition of Risk Contributions
-
-For a portfolio with weights $ \mathbf{w} $ and a homogeneous risk measure $ \rho(\mathbf{w}) $:
+Wave may estimate one or both of:
 
 $$
-\rho(\mathbf{w}) = \sum_{i} w_i \frac{\partial \rho}{\partial w_i}
+p(R_{t:t+h} \mid \mathcal{F}_t)
 $$
 
-The **risk contribution** of component $ i $ is:
-
 $$
-\text{RC}_i = w_i \frac{\partial \rho}{\partial w_i}
+\mathbb{P}(\tau_{\text{target}} < \tau_{\text{stop}} \mid \mathcal{F}_t)
 $$
 
-This decomposition applies to ES and allows Tide to budget risk across strategy sleeves and assets such that:
+For target barrier $B_T$ and stop barrier $B_S$, the long-side convention is:
 
 $$
-\sum_{i} \text{RC}_i \leq \text{ES}_{\text{budget}}
+\tau_T = \inf\{u>t:X_u\ge B_T\},
+\qquad
+\tau_S = \inf\{u>t:X_u\le B_S\}.
 $$
 
-#### 7.4.6 Risk Budget Constraint
+For a short exposure the inequalities reverse: the target is reached below
+the entry region and the stop above it. More generally, “target” and “stop”
+are trade-relative labels on an ordered barrier pair, not assumptions that the
+strategy is long.
 
-Tide publishes a risk budget snapshot with:
-
-$$
-\text{budget}_k = \text{ES}_{\text{total}} \cdot \frac{\text{RC}_k^{\text{target}}}{\sum_j \text{RC}_j^{\text{target}}}
-$$
-
-where $ k $ indexes the strategy × asset cell.
-
-#### 7.4.7 V1 Risk Multiplier Computation
-
-The risk multiplier is a single scalar ∈ [0, 1] that Tide publishes to throttle Ripple sizing. In V1, it is a deterministic function of `vol_regime` and `liquidity_stress`:
-
-```
-function compute_risk_multiplier(vol_regime, lsi_tide, config):
-    # Base multiplier from volatility regime
-    base = config.tide.risk_mult_by_regime[vol_regime]
-    #   LOW    → 1.0
-    #   NORMAL → 0.8
-    #   HIGH   → 0.5
-    #   CRISIS → 0.0
-
-    # Stress adjustment: reduce further if LSI is elevated
-    if lsi_tide > config.tide.lsi_reduce_threshold:
-        stress_penalty = clip(
-            (lsi_tide - config.tide.lsi_reduce_threshold) * config.tide.lsi_reduce_slope,
-            0.0, base
-        )
-        base = base - stress_penalty
-
-    return clip(base, 0.0, 1.0)
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `tide.risk_mult_by_regime` | float64[4] | [1.0, 0.8, 0.5, 0.0] | Base multiplier for LOW, NORMAL, HIGH, CRISIS |
-| `tide.lsi_reduce_threshold` | float64 | 1.5 | LSI above this triggers additional reduction |
-| `tide.lsi_reduce_slope` | float64 | 0.2 | Multiplier penalty per LSI unit above threshold |
-
-**Invariant:** `risk_multiplier == 0` forces an immediate risk-budget exit on all open trades.
-
-### 7.5 V1 Pre-Phase Defaults
-
-Before Tide is implemented (Phases 2–3), Ripple and Wave use these hardcoded Tide defaults:
-
-| Output | V1 Default | Rationale |
-|---|---|---|
-| `tide.bias` | `NEUTRAL` | No directional opinion |
-| `tide.risk_multiplier` | `1.0` | Full sizing allowed |
-| `tide.max_position_usd` | `config.tide.max_position_usd` | From config file |
-| `tide.es_budget` | `config.tide.es_budget_global` | From config file |
-| `tide.vol_regime` | `NORMAL` | Assume normal conditions |
-| `tide.update_ts` | `0` | Never updated |
-
-Before Wave is implemented (Phases 2–4), Ripple uses these hardcoded Wave defaults:
-
-| Output | V1 Default | Rationale |
-|---|---|---|
-| `wave.regime` | `NEUTRAL` | No regime filter |
-| `wave.permissions` | All `FULL` | All archetypes allowed |
-| `wave.trend_efficiency` | `0.5` | Midpoint |
-| `wave.dispersion` | `0.0` | No dispersion data |
-| `wave.absorption_ratio` | `0.5` | Midpoint |
-| `wave.update_ts` | `0` | Never updated |
-
-These defaults must be defined as `static constexpr` in a `DefaultTideSnapshot` and `DefaultWaveSnapshot` in C++, and as constants in Python, so that phases can be developed and tested independently.
-
-### 7.6 Outputs
-
-| Output | Type | Description |
-|---|---|---|
-| `tide.bias` | `{LONG, SHORT, NEUTRAL}` | Directional bias |
-| `tide.risk_multiplier` | `float ∈ [0, 1]` | Scaling factor for position sizing |
-| `tide.max_position_usd` | `float` | Maximum notional exposure allowed |
-| `tide.es_budget` | `float` | Expected shortfall budget for the sleeve |
-| `tide.vol_regime` | `{LOW, NORMAL, HIGH, CRISIS}` | Volatility regime |
-| `tide.update_ts` | `int64` | Timestamp of last Tide update |
-
-### 7.7 Relationship to Risk and Sizing
-
-Ripple computes a raw desired position size based on microstructure signal strength. The actual size is throttled:
+The unrestricted target-before-stop object is
 
 $$
-Q_{\text{final}} = Q_{\text{raw}} \cdot \text{tide.risk\_multiplier} \cdot \text{clip}\!\left(\frac{\text{tide.es\_budget} - \text{consumed\_es}}{\text{tide.es\_budget}},\; 0,\; 1\right)
+\mathbb{P}(\tau_T<\tau_S\mid\mathcal{F}_t),
 $$
 
-This ensures:
-1. Tide's risk multiplier directly scales exposure.
-2. As consumed ES approaches the budget, sizing decreases to zero.
-3. Ripple can never exceed Tide's constraints.
+while a finite usable execution horizon $H$ gives
 
-### 7.8 Capital Allocation Hierarchy
+$$
+\mathbb{P}(\tau_T<\tau_S,\;\tau_T-t\le H\mid\mathcal{F}_t).
+$$
 
-```mermaid
-flowchart TD
-    TOTAL[Total Capital] --> STRAT1[Strategy Sleeve 1]
-    TOTAL --> STRAT2[Strategy Sleeve 2]
-    TOTAL --> RESERVE[Reserve / Unallocated]
-    STRAT1 --> A1[Asset A]
-    STRAT1 --> A2[Asset B]
-    STRAT2 --> A3[Asset A]
-    STRAT2 --> A4[Asset C]
-    A1 --> CELL1["Cell: Sleeve1 × AssetA\nES budget, max position, bias"]
-    A2 --> CELL2["Cell: Sleeve1 × AssetB\nES budget, max position, bias"]
-    A3 --> CELL3["Cell: Sleeve2 × AssetA\nES budget, max position, bias"]
-    A4 --> CELL4["Cell: Sleeve2 × AssetC\nES budget, max position, bias"]
-```
+Barrier definition, horizon, target/stop distance, and whether barriers are
+state-dependent are experimental choices. The programme must distinguish:
 
-**Why both strategy-level and asset-level risk matter:**
+- terminal return probability, such as $\mathbb{P}(X_{t+H}>X_t)$;
+- first-passage probability;
+- the distribution of first-passage time;
+- target-before-stop probability; and
+- the probability that an actionable opportunity occurs within the usable
+  execution horizon.
 
-- **Strategy-level risk** prevents one strategy sleeve from consuming the entire ES budget (diversification across strategies).
-- **Asset-level risk** prevents concentration in a single asset regardless of which strategy holds it (diversification across assets).
-- **Cell-level risk** (strategy × asset) prevents a single cell from dominating both axes simultaneously.
+None of these is automatically an **executable** opportunity after costs,
+liquidity, risk, and latency (§6.3).
 
-Tide owns the top-down allocation. Ripple consumes the budget granted to its cell.
+Terminal probability is not equivalent to first-passage probability: the path
+may cross one or both barriers before ending elsewhere.
+
+Expected-return and risk functionals are derived from these objects, not substitutes for them.
+
+### 4.5 Ripple conditioning
+
+A candidate microstructure-conditioned diffusion is
+
+$$
+\mu_t = f_\theta(Z_t, O_t), \qquad
+\sigma_t = g_\theta(Z_t, O_t)
+$$
+
+where $Z_t$ is slow/meso state (Tide/Wave) and $O_t$ is order-book / order-flow information.
+
+The formal conditioning question is whether $O_t$ changes
+$p(R\mid\mathcal{F}_t)$, first-passage objects, post-entry decision quality, or
+execution-quality distributions after Tide/Wave information is already known.
+Section 7.5 decomposes this into testable Ripple targets.
+
+### 4.6 Model progression (hypotheses, not a ladder of truth)
+
+1. Gaussian baseline  
+2. Student-$t$ return model  
+3. Regime-conditioned Student-$t$  
+4. Conditional diffusion ($\mu_t,\sigma_t$ functions of $\mathcal{F}_t$)  
+5. Microstructure-conditioned diffusion  
+6. Jump-diffusion / Lévy extensions **if justified by evidence**
+
+Do not assume that every extension improves decisions. Nested comparison is mandatory.
+
+### 4.7 Schrödinger representation
+
+A Schrödinger-equation rewriting of the diffusion is an **experimental analogy only**. It is not a foundational assumption of the strategy, not a claim about quantum markets, and not a prerequisite for any other workstream.
 
 ---
 
-## 8. Wave Layer
+## 5. Tide — market and portfolio state
 
-### 8.1 Purpose
+### 5.1 Current design
 
-Wave is the **meso-scale regime classification and structural context layer**. It answers: *"What kind of market environment is this, and what types of execution should be permitted or suppressed?"*
+Tide owns **portfolio-level state and constraints**. It does not originate trades.
 
-Wave does **not** trigger trades. It produces regime labels and a permission matrix that modulates Ripple's behavior.
+Responsibilities:
 
-### 8.2 Responsibilities
+- market and portfolio state
+- risk estimation
+- capital allocation
+- risk budgeting
+- tail-risk estimation
+- factor exposure
+- regime probabilities (as *inputs* to risk, not as trade signals)
+- hedge requirements (including later FX; see §13)
 
-1. Classify the current market regime (mean-reversion friendly, breakout friendly, unstable, neutral).
-2. Compute factor and cross-sectional features from L1 data.
-3. Detect structural context (distance to key levels, trend efficiency, dispersion).
-4. Publish a permission set that enables or disables Ripple trade archetypes.
+Tide should evolve from simple deterministic controls toward **probabilistic portfolio risk**. Hard LONG/SHORT “macro bias” as a primary Tide output is a historical V1 device, not the current target.
 
-### 8.3 Data Requirements
+### 5.2 Risk-model progression
 
-Wave explicitly does **not** require L2 (order book depth) data. It operates on:
+Again nested hypotheses:
 
-- L1 prices from Binance and potentially other venues (Oanda, etc.)
-- Derived features: returns, volatility, correlations, factor loadings
-- VWAP and range context at the Wave horizon
+Gaussian risk → Student-$t$ → regime-conditioned Student-$t$ → Monte Carlo / conditional simulation → jump models if evidence requires them.
 
-This separation ensures Wave can run on assets and venues where L2 data is unavailable.
+Candidate metrics (none is mandatory until evaluated):
 
-### 8.4 Factor and PCA Concepts
+- volatility
+- VaR
+- Expected Shortfall (ES)
+- stress ES
+- factor exposure
+- Euler risk contribution
+- RORAC (evaluated at opportunity/allocation time; not a Tide “signal”)
+- drawdown
+- margin / liquidation risk
 
-#### 8.4.1 Single-Factor Model
-
-Let $ r_{i,t} $ be the return of asset $ i $ at time $ t $. A single-factor model:
-
-$$
-r_{i,t} = \alpha_i + \beta_i \cdot r_{M,t} + \varepsilon_{i,t}
-$$
-
-where $ r_{M,t} $ is the return of the crypto market factor (synthetic index) and $ \varepsilon_{i,t} $ is the idiosyncratic residual.
-
-#### 8.4.2 PCA-Based Factor Extraction
-
-Given a cross-sectional return matrix $ \mathbf{R} \in \mathbb{R}^{T \times N} $ (T time steps, N assets), PCA extracts principal components:
+VaR and ES of a loss $L$ at level $\alpha$:
 
 $$
-\mathbf{R} = \mathbf{U} \boldsymbol{\Sigma} \mathbf{V}^\top
+\mathrm{VaR}_\alpha = \inf\{x:\mathbb{P}(L>x)\le 1-\alpha\}
 $$
 
-The first $ k $ columns of $ \mathbf{V} $ define factor loadings. The factor returns are the corresponding columns of $ \mathbf{U} \boldsymbol{\Sigma} $.
-
-In V1, a single factor (cap-weighted crypto beta) suffices. Multi-factor PCA is a later extension.
-
-#### 8.4.3 Synthetic Crypto Index
-
-A simple cap-weighted index of liquid crypto assets:
-
 $$
-r_{M,t} = \sum_{i=1}^{N} w_i \cdot r_{i,t}, \quad w_i = \frac{\text{mcap}_i}{\sum_j \text{mcap}_j}
+\mathrm{ES}_\alpha = \mathbb{E}[L \mid L > \mathrm{VaR}_\alpha]
 $$
 
-In V1, this can be a simple BTC-dominated basket with fixed weights.
+ES is preferred as a *constraint* object because it is coherent (subadditive) under standard conditions; VaR remains useful for diagnostics and regulatory-style backtests.
 
-### 8.5 Structural Features
+### 5.3 Risk budget
 
-#### 8.5.1 Residual Dislocation
-
-The deviation of an asset's return from its factor-predicted return:
+Decisions are constrained by a live budget $B_t$:
 
 $$
-\delta_{i,t} = r_{i,t} - \hat{\beta}_i \cdot r_{M,t}
+\mathrm{ES}_\alpha(R_p) \le B_t
 $$
 
-Large positive $ \delta_{i,t} $ suggests the asset is outperforming its factor exposure (potential mean-reversion short). Large negative $ \delta_{i,t} $ suggests underperformance (potential mean-reversion long).
-
-The rolling z-scored dislocation provides a regime-independent signal:
+Euler contributions for a homogeneous risk measure $\rho$:
 
 $$
-\hat{\delta}_{i,t} = \frac{\delta_{i,t} - \bar{\delta}_i}{\sigma_{\delta_i}}
+\rho(\mathbf{w}) = \sum_i w_i \frac{\partial \rho}{\partial w_i}, \qquad
+\mathrm{RC}_i = w_i \frac{\partial \rho}{\partial w_i}
 $$
 
-where the bar and sigma are computed over a trailing window (e.g., 60 minutes at Wave cadence).
+Hierarchical budgeting (strategy sleeve × asset × cell) remains a **candidate design** from the historical programme: it is conceptually sound diversification accounting, not yet a validated allocation policy.
 
-#### 8.5.2 Cross-Sectional Dispersion
+### 5.4 Allocation as a research design decision
 
-$$
-D_t = \sqrt{ \frac{1}{N} \sum_{i=1}^{N} (r_{i,t} - \bar{r}_t)^2 }
-$$
-
-where $ \bar{r}_t = \frac{1}{N}\sum_i r_{i,t} $ is the cross-sectional mean return and $ N $ is the number of assets in the universe.
-
-**Note:** $ D_t $ here denotes dispersion (a Wave concept), not depth. See §6 disambiguation note.
-
-High dispersion suggests idiosyncratic moves dominate; low dispersion suggests correlated moves (risk-on/off).
-
-#### 8.5.3 Correlation Stability
-
-Rolling pairwise correlation matrix $ \mathbf{C}_t $ with eigenvalues $ \lambda_1 \geq \lambda_2 \geq \ldots \geq \lambda_N $.
-
-**Absorption ratio:**
+The eventual problem may be written
 
 $$
-\text{AR}_t = \frac{\sum_{i=1}^{k} \lambda_i}{\sum_{i=1}^{N} \lambda_i}
+\max_a \mathbb{E}[U(R_p \mid a)]
+\quad\text{s.t.}\quad
+\mathrm{ES}_\alpha(R_p \mid a) \le B_t
 $$
 
-High AR indicates systemic co-movement (fragile). Low AR indicates diversified dynamics (stable).
+plus margin, liquidity, maximum exposure, and execution-feasibility constraints.
 
-#### 8.5.4 Trend Efficiency (Wave Scale)
+**Do not hard-code $U$.** Utility, including mean–ES, growth-optimal, or constraint-only (feasibility) formulations, is a research design decision. RORAC-like ratios may appear as *evaluation* or as *one candidate* objective, not as Tide’s native output.
 
-Same formula as §7.4.2 but computed over a Wave-appropriate window (e.g., 15–60 minutes):
+### 5.5 Uncertainty in risk
+
+Tide estimates must distinguish (see §11):
+
+1. market uncertainty (the random $R_p$)
+2. parameter uncertainty
+3. model uncertainty
+
+Point ES with no interval or stress overlay implies false precision.
+
+### 5.6 Continuous portfolio-risk re-evaluation
+
+Tide is not merely an entry gate. While a position is open it continually
+reassesses candidate measures including portfolio ES, volatility, factor
+exposure, regime probabilities, correlation, margin, liquidation risk,
+liquidity, and hedge requirement.
+
+The feedback loop is
 
 $$
-\eta_{\text{wave}} = \frac{ \left| \sum_{i} \Delta P_i \right| }{ \sum_{i} |\Delta P_i| }
+\text{position}
+\rightarrow \text{realised / unrealised risk}
+\rightarrow \text{Tide update}
+\rightarrow \text{revised risk budget}
+\rightarrow \text{position-management decision}.
 $$
 
-#### 8.5.5 Distance to Structure
-
-For key structural levels $ S_1, S_2, \ldots $ (e.g., session VWAP, rolling high/low, prior day close):
-
-$$
-\delta_j = \frac{P_t - S_j}{P_t}
-$$
-
-Wave publishes the distances to the nearest structural levels.
-
-### 8.6 Regime Classification
-
-Wave classifies the environment into one of four states:
-
-| Regime | Label | Description |
-|---|---|---|
-| Mean-reversion friendly | `MEAN_REVERSION` | Low trend efficiency, contained range, stable correlations |
-| Breakout / continuation | `BREAKOUT` | High trend efficiency, expanding range, directional momentum |
-| Structural breakdown | `BREAKDOWN` | High dispersion, unstable correlations, elevated AR |
-| Neutral / balanced | `NEUTRAL` | No strong signal in either direction |
-
-In V1, regime classification is a deterministic rule-based system using thresholds on trend efficiency, dispersion, and absorption ratio. In later versions, this may become an HMM or classifier.
-
-### 8.7 Regime Outputs
-
-| Output | Type | Description |
-|---|---|---|
-| `wave.regime` | `{MEAN_REVERSION, BREAKOUT, BREAKDOWN, NEUTRAL}` | Current regime |
-| `wave.trend_efficiency` | `float` | Trend efficiency at Wave scale |
-| `wave.dispersion` | `float` | Cross-sectional dispersion |
-| `wave.absorption_ratio` | `float` | Correlation absorption ratio |
-| `wave.distance_to_structure` | `map<string, float>` | Distances to key structural levels |
-| `wave.permissions` | `PermissionSet` | Allowed/disallowed trade archetypes |
-| `wave.update_ts` | `int64` | Timestamp of last Wave update |
-
-### 8.8 Wave State Machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> NEUTRAL
-    NEUTRAL --> MEAN_REVERSION : η < η_mr AND D < D_thresh
-    NEUTRAL --> BREAKOUT : η > η_bo AND range expanding
-    NEUTRAL --> BREAKDOWN : AR > AR_crit OR D > D_crit
-    MEAN_REVERSION --> NEUTRAL : η rises above η_neutral
-    MEAN_REVERSION --> BREAKOUT : η > η_bo
-    MEAN_REVERSION --> BREAKDOWN : AR > AR_crit
-    BREAKOUT --> NEUTRAL : η falls below η_neutral
-    BREAKOUT --> BREAKDOWN : AR > AR_crit
-    BREAKDOWN --> NEUTRAL : AR < AR_recover AND D < D_recover
-```
+A deterioration in portfolio risk may force reduction, hedging, exit, or a
+prohibition on additional exposure. These are portfolio constraints on the
+decision layer, not entry alpha and not discretionary Ripple overrides.
 
 ---
 
-## 9. Ripple Layer
+## 6. Wave — conditional opportunity
 
-### 9.1 Purpose
+### 6.1 Current design
 
-Ripple is the **execution and microstructure layer**. It answers: *"Given current order book state, trade flow, and liquidity dynamics, should I enter, scale, manage, or exit a trade right now?"*
+Wave models **conditional market state and the opportunity distribution**. It does not trade.
 
-Ripple is the **only layer that triggers trades**.
+It should ultimately publish probabilistic objects, for example:
 
-### 9.2 Responsibilities
+- $p(R_{t:t+h}\mid\mathcal{F}_t)$ or a parametric family
+- $\mathbb{P}(\tau_{\text{target}}<\tau_{\text{stop}}\mid\mathcal{F}_t)$
+- $\mathbb{P}(\tau_{\text{target}}<\tau_{\text{stop}},
+  \tau_{\text{target}}-t\le H\mid\mathcal{F}_t)$
+- $\mathbb{E}[R_{t:t+h}\mid\mathcal{F}_t]$, $\mathrm{ES}_\alpha(R_{t:t+h}\mid\mathcal{F}_t)$
+- regime probability vector $\pi_t$
+- factor / residual state
 
-1. Detect and track order book walls (resting liquidity concentrations).
-2. Model wall dynamics: persistence, refill, cancellation, absorption.
-3. Classify liquidity transitions: absorption, exhaustion, withdrawal, refill.
-4. Maintain a real-time liquidity map of key levels.
-5. Generate bounce and breakout trade setups.
-6. Manage open trades through a lifecycle state machine.
-7. Execute scaling and exit logic.
-8. Integrate CVD and Volume Profile signals.
-9. Respect Wave permissions and Tide risk budgets.
+Hard regime labels (`MEAN_REVERSION`, `BREAKOUT`, …) may exist as *argmax summaries* of $\pi_t$. Relying solely on a hard label is a degraded interface.
 
-### 9.3 Data Requirements
+HMM (or similar latent-state) output:
 
-Ripple requires **Binance L2 data**:
-- Full order book depth snapshots (top N levels)
-- Incremental depth updates
-- Individual trade events with aggressor flag
-- Derived: CVD, Volume Profile, microprice, imbalance
+$$
+\pi_t = \bigl[\mathbb{P}(S_1\mid\mathcal{F}_t),\ldots,\mathbb{P}(S_K\mid\mathcal{F}_t)\bigr]
+$$
 
-### 9.4 Liquidity Transitions
+State count $K$, emission family, and whether states are economically named are experimental.
 
-Ripple models four fundamental liquidity transitions:
+Regime probabilities $\pi_t$ are not entry-only information. They may inform
+expected opportunity, expected holding time, barrier probabilities, portfolio
+risk, execution conditions, and management policy. They must **not** be
+hard-mapped as `REGIME X → EXIT`. Regime state is an input to probabilistic
+decision-making.
 
-| Transition | Description | Observable Signature |
-|---|---|---|
-| **Absorption** | Aggressive flow is absorbed by resting liquidity at a wall. Price stalls despite heavy aggression. | High aggressive volume at price, wall maintains depth, CVD diverges from price. |
-| **Exhaustion** | Aggressive flow weakens. The move runs out of fuel without hitting a wall. | Declining trade rate, declining CVD slope, trades shrinking. |
-| **Withdrawal** | Resting liquidity vanishes (wall pulled). Price can gap through the vacated level. | Rapid depth decrease at level without proportional trading. |
-| **Refill** | Resting liquidity reappears after a withdrawal or consumption event. Price stabilizes. | Depth rebuilding at or near the prior wall level. |
+### 6.2 Candidate information
 
-The system has **five states** (STABLE, ABSORPTION, EXHAUSTION, WITHDRAWAL, REFILL) and the four named transition types describe the dominant dynamics in the non-STABLE states.
+Potential $\mathcal{F}_t$ contents (include only with evidence of incremental information):
 
-#### 9.4.1 State Machine
+- OHLCV and returns
+- realised volatility and volatility clustering
+- market-structure / session features
+- trend efficiency
+- VWAP and other statistical anchors
+- classical technicals (Bollinger / RSI / MACD) **only if they add information beyond simpler features**
+- cross-asset returns
+- PCA / factor exposures and residuals
+- HMM regime probabilities
+- macro variables
+- structured news/event state (§12)
 
-```mermaid
-stateDiagram-v2
-    [*] --> STABLE
-    STABLE --> ABSORPTION : sustained wall interaction
-    ABSORPTION --> EXHAUSTION : wall eroded
-    ABSORPTION --> WITHDRAWAL : wall pulled
-    EXHAUSTION --> WITHDRAWAL : remaining depth pulled
-    EXHAUSTION --> REFILL : depth rebuilds
-    WITHDRAWAL --> REFILL : new depth appears
-    REFILL --> STABLE : liquidity restored
+Avoid indicator accumulation. Each feature class is an ablation candidate.
 
-    ABSORPTION --> STABLE : pressure fades
-    EXHAUSTION --> STABLE : new resting liquidity
-    WITHDRAWAL --> STABLE : price stabilizes
-```
+Useful structural quantities from the historical programme, retained as *candidates*:
 
-**Dwell behavior:** Each state has an implicit self-transition (state remains unchanged if no trigger fires). The `RippleStateTracker` in C++ deduplicates consecutive emissions of the same state and tracks dwell time.
+- trend efficiency $\eta = |\sum \Delta P_i| / \sum |\Delta P_i|$
+- factor residual dislocation $\delta_{i,t} = r_{i,t} - \hat\beta_i r_{M,t}$
+- cross-sectional dispersion $D_t$
+- absorption ratio of the correlation spectrum
 
-### 9.5 Mathematical Formalization (Ripple)
+### 6.3 Executable opportunity
 
-#### 9.5.1 Order Book Imbalance
+A favourable first-passage object is not automatically a tradable opportunity.
+The programme ultimately cares about something closer to
 
-At the top of book:
+$$
+\mathbb{P}(\text{profitable executable opportunity}\mid\mathcal{F}_t)
+$$
+
+rather than only $\mathbb{P}(\tau_T<\tau_S\mid\mathcal{F}_t)$.
+
+Spread, commission, slippage, impact, fill probability, latency, liquidity,
+margin, portfolio ES, and the remaining opportunity horizon can eliminate
+economic value. This is a conceptual bridge among Wave, Tide, Decision, and
+Ripple—not a new model and not a prescribed formula.
+
+### 6.4 Wave research question
+
+Does conditional probabilistic modelling improve **decision quality** — not merely in-sample likelihood — relative to unconditional or simple rule-based Wave?
+
+Decision quality is measured after Tide constraints and a declared cost model, on untouched test data.
+
+---
+
+## 7. Ripple — microstructure and execution of authorised actions
+
+### 7.1 Current design
+
+Ripple models **how the market is trading right now** and **how an authorised
+entry, position-management action, or exit should be executed**. It may
+inform Decision with incremental microstructure information. It cannot
+independently authorise portfolio exposure. Its conceptual scope is:
+
+- market microstructure state;
+- execution of authorised entry, management, and exit actions;
+- execution-method selection; and
+- candidate liquidity-state information for Decision.
+
+Candidate information and mechanisms include:
+
+- bid/ask depth and spread
+- order-book imbalance, microprice
+- OFI, CVD, aggressive trade flow
+- wall persistence, cancellation, replenishment, absorption, and exhaustion
+- liquidity withdrawal and refill
+- volume profile, liquidity voids
+- expected slippage, fill probability, adverse selection, latency, and market impact
+- passive versus aggressive execution; limit versus market orders
+- order cancellation and repricing; partial fills; scaling in and out
+- first-passage *refinement* given $O_t$
+
+This is a candidate information set, not a required feature list. Each item
+must justify itself by incremental value relative to a nested simpler model.
+
+Ripple is not merely “the layer that fires bounce and breakout.” Those archetypes are **historical baselines and candidate policies**.
+
+### 7.2 Candidate observables
+
+Notation retained from the historical programme where still useful:
 
 $$
 I_t = \frac{V^b_t - V^a_t}{V^b_t + V^a_t}
 $$
 
-Generalized to $ k $ levels:
-
 $$
-I_t^{(k)} = \frac{\sum_{j=1}^{k} V^b_{t,j} - \sum_{j=1}^{k} V^a_{t,j}}{\sum_{j=1}^{k} V^b_{t,j} + \sum_{j=1}^{k} V^a_{t,j}}
+P_\mu = P^a_t \frac{V^b_t}{V^b_t+V^a_t} + P^b_t \frac{V^a_t}{V^b_t+V^a_t}
 $$
 
-$ I_t \in [-1, 1] $. Positive values indicate bid-heavy imbalance (buying pressure); negative values indicate ask-heavy (selling pressure).
+OFI, CVD, impact per unit aggressive volume, and wall-quality scores are **candidate features**. Their incremental value after Wave/Tide conditioning is the scientific question.
 
-#### 9.5.2 Microprice
+Liquidity-state labels (stable, absorption, exhaustion, withdrawal, refill) are a **candidate latent taxonomy**, not a required ontology.
 
-$$
-P_\mu = P^a_t \cdot \frac{V^b_t}{V^b_t + V^a_t} + P^b_t \cdot \frac{V^a_t}{V^b_t + V^a_t}
-$$
+### 7.3 Dynamic wall and liquidity interaction
 
-The microprice gives a size-weighted fair value that is more informative than mid for imbalanced books.
-
-#### 9.5.3 Order Flow Imbalance (OFI)
-
-The net change in top-of-book resting liquidity:
+A liquidity wall is not defined solely by displayed depth exceeding a static
+threshold. A candidate dynamic wall-strength object is
 
 $$
-\text{OFI}_t = \Delta V^b_t - \Delta V^a_t
+W_t=f(
+\text{displayed depth},
+\text{aggressive flow},
+\text{cancellation},
+\text{replenishment},
+\text{trade intensity},
+\text{distance from price},
+\text{absorption behaviour},
+\text{time persistence}
+).
 $$
 
-where $ \Delta V^b_t = V^b_t - V^b_{t-1} $ and similarly for asks. OFI captures the net directional pressure from resting order changes.
+The functional form, memory, normalisation, and whether a scalar score is even
+adequate are research questions. Distinguish at least these candidate
+outcomes:
 
-#### 9.5.4 Cumulative Volume Delta (CVD)
-
-$$
-\text{CVD}_t = \sum_{\tau=1}^{t} \left( Q_\tau^{\text{buy}} - Q_\tau^{\text{sell}} \right)
-$$
-
-where $ Q_\tau^{\text{buy}} $ and $ Q_\tau^{\text{sell}} $ are buy-initiated and sell-initiated trade volumes at time $ \tau $.
-
-**CVD divergence** from price is a key signal:
-- Price rising + CVD falling = bearish divergence (potential exhaustion).
-- Price falling + CVD rising = bullish divergence (potential absorption).
-
-#### 9.5.5 Impact per Unit Aggressive Volume
+1. **penetration** — aggressive trading consumes displayed liquidity;
+2. **rejection** — price approaches and is turned away while liquidity remains;
+3. **absorption** — flow is taken without a durable barrier breach;
+4. **replenishment** — consumed or cancelled size is replaced;
+5. **withdrawal / disappearance** — displayed liquidity leaves before being
+   consumed.
 
 $$
-\lambda_t = \frac{\Delta P_t}{Q_t^{\text{aggressor}}}
+\text{wall failure} \neq \text{wall disappearance}.
 $$
 
-where $ Q_t^{\text{aggressor}} $ is the signed aggressive volume over interval $ \Delta t $. High $ \lambda $ means the book is thin (easy to move price); low $ \lambda $ means the book is deep (absorptive).
+A wall may fail because aggressive trading consumes it, or because displayed
+liquidity withdraws. Those are different microstructure states. Cancellation
+behaviour must not be labelled spoofing without evidence of intent.
 
-#### 9.5.6 VPIN-Like Toxicity Measure
+### 7.4 Dynamic walls as candidate first-passage barriers
 
-Volume-synchronized probability of informed trading (simplified):
-
-$$
-\text{VPIN}_t = \frac{1}{n} \sum_{i=1}^{n} \frac{|Q_i^{\text{buy}} - Q_i^{\text{sell}}|}{Q_i^{\text{buy}} + Q_i^{\text{sell}}}
-$$
-
-where the sum is over the most recent $ n $ volume-time bars, each containing fixed total volume $ V_{\text{bar}} $. Within each bar, trade volume is classified as buy- or sell-initiated using the aggressor flag.
-
-**Range:** $ \text{VPIN}_t \in [0, 1] $. A value of 1 means all flow in every bucket was one-sided (maximally toxic). A value near 0 means flow was balanced in every bucket. In practice, liquid crypto markets show VPIN between 0.1 and 0.5.
-
-High VPIN indicates informed / toxic flow; low VPIN indicates balanced flow.
-
-#### 9.5.7 Wall Quality Score
-
-For a detected wall at price level $ p $ with current depth $ \mathcal{D}_p $:
+For a candidate wall at $x_w$, define
 
 $$
-W_p = w_{\mathcal{D}} \cdot \frac{\mathcal{D}_p}{\text{median}(\mathcal{D})} + w_\pi \cdot \pi_p + w_c \cdot (1 - c_p) + w_{\text{prox}} \cdot \frac{1}{1 + |p - P_t| / \hat{\sigma}_P}
+\tau_w=\inf\{u>t:X_u\text{ reaches }x_w\}.
 $$
 
-where:
-- $ \mathcal{D}_p $ = resting depth (quantity) at the wall price level
-- $ \text{median}(\mathcal{D}) $ = median depth across all non-trivial price levels in the visible book
-- $ \pi_p \in [0, 1] $ = wall persistence (fraction of time the wall has been present over a rolling window)
-- $ c_p \in [0, 1] $ = cancellation rate (fraction of depth removed by cancellation vs. by trading)
-- $ \hat{\sigma}_P $ = recent price standard deviation (controls proximity weighting)
-- $ w_{\mathcal{D}}, w_\pi, w_c, w_{\text{prox}} $ = configurable weights (defaults: all equal at 0.25)
-
-**Range:** $ W_p \geq 0 $. A wall with $ W_p < W_{\min} $ (configurable, default 0.5) is not considered significant enough to trade against.
-
-#### 9.5.8 Ripple Liquidity Stress Index
-
-A faster, microstructure-level stress measure:
+Conditional on order-book state $O_t$, candidate objects include:
 
 $$
-\text{LSI}_{\text{ripple}} = w_s \cdot \hat{s}_t + w_d \cdot (1 - \hat{d}_t) + w_\lambda \cdot \hat{\lambda}_t + w_c \cdot \hat{c}_t
+\mathbb{P}(\text{penetration}\mid O_t),\quad
+\mathbb{P}(\text{rejection}\mid O_t),\quad
+\mathbb{P}(\text{withdrawal}\mid O_t),
 $$
 
-where all hatted quantities are z-scored against recent rolling statistics (mean and standard deviation computed over a configurable Ripple-scale window, e.g., 60 seconds):
-- $ \hat{s}_t $ = z-scored spread: $ (s_t - \bar{s}) / \sigma_s $
-- $ \hat{d}_t $ = z-scored top-of-book depth (inverted: the $ (1 - \hat{d}_t) $ term makes low depth correspond to high stress)
-- $ \hat{\lambda}_t $ = z-scored price impact
-- $ \hat{c}_t $ = z-scored cancellation rate
+and, where identification permits,
 
-**Range:** LSI is unbounded but typically in $ [-2, 4] $ for z-scored inputs. Values above 2 indicate significant microstructure stress.
+$$
+\mathbb{E}[\tau_{\text{event}}\mid O_t].
+$$
 
-### 9.6 Wall Detection Algorithm
+These are candidate conditional outcomes, not assumptions. The research
+question is whether dynamic liquidity state improves prediction of barrier
+outcomes after conditioning on Wave/Tide information. A limit-order-book wall
+is not a physical Fokker–Planck boundary; flux toward $x_w$ is one
+representation among others.
 
-Before walls can participate in trade logic, they must be detected and tracked. This section defines the V1 wall detection algorithm implemented in `WallDetector`.
+### 7.5 Central Ripple research question
 
-#### 9.6.1 Wall Detection
+Does microstructure information provide incremental information about:
 
-A price level is classified as a wall if its resting depth significantly exceeds the local median:
+1. short-horizon price movement,
+2. first-passage / target-vs-stop probability,
+3. post-entry position-management decisions, and
+4. execution quality (fill, slippage, impact)
+
+after conditioning on Wave and Tide information?
+
+A feature that predicts mid-price ticks but does not improve post-cost allocation or execution may still be scientifically interesting; it is not automatically a trading edge.
+
+### 7.6 Execution method as a separate problem
+
+Even a correctly signed Wave distribution can be destroyed by costs. Model execution cost as a research object:
+
+$$
+C_{\text{execution}}
+= \text{spread}
++ \text{commission}
++ \text{slippage}
++ \text{market impact}
++ \text{funding}
++ \text{latency effects}
+$$
+
+The final strategy is evaluated **after** a realistic $C_{\text{execution}}$. Optimistic fills are not results.
+
+Candidate execution actions include
+
+$$
+a_t^{\mathrm{exec}}
+\in
+\{
+\text{MARKET},\;
+\text{AGGRESSIVE LIMIT},\;
+\text{PASSIVE LIMIT},\;
+\text{WAIT},\;
+\text{CANCEL},\;
+\text{REPRICE},\;
+\text{SCALE}
+\}.
+$$
+
+These are candidate actions, not fixed rules. The conceptual execution-value
+problem is of the form
+
+$$
+V(a_t^{\mathrm{exec}})
+=
+\mathbb{E}[\text{fill value}]
+-
+\mathbb{E}[\text{adverse selection}]
+-
+\mathbb{E}[\text{market impact}]
+-
+\mathbb{E}[\text{opportunity cost}]
+-
+\mathbb{E}[\text{inventory cost}],
+$$
+
+subject to parent exposure authorisation, risk limits, liquidity constraints,
+latency, and partial-fill uncertainty.
+
+Ripple’s research question is not merely “market versus limit.” It is: given
+an authorised exposure change, which feasible execution action has the best
+expected economic outcome conditional on current microstructure?
+
+**WAIT** is a genuine economic action, not a miscellaneous fallback.
+Conceptually,
+
+$$
+V_{\mathrm{wait}}
+=
+\mathbb{E}[V_{t+\Delta t}]
+-
+C_{\mathrm{opportunity}}
+-
+C_{\mathrm{adverse movement}}.
+$$
+
+This is a research formulation, not a claimed optimum. Waiting has economic
+value only if expected improvement from future information or liquidity
+exceeds opportunity cost and the risk of adverse movement. Delay is not a
+rule-based timeout.
+
+Full autonomous market making or continuous two-sided quoting remains a
+distinct deferred strategy (§20); conditional market-maker-style execution is
+in scope because it affects entry, management, and exit economics.
+
+### 7.7 Inventory and asymmetric execution outcomes
+
+Any passive or scaling policy must model, or conservatively bound:
+
+- inventory risk and unwanted accumulation;
+- partial fills and queue position;
+- fill uncertainty and cancellation probability;
+- adverse selection and price moving away after a passive fill;
+- liquidity disappearing before completion; and
+- asymmetric execution outcomes across entry and exit.
+
+These considerations are necessary to test conditional liquidity provision;
+they do not establish a full market-making thesis.
+
+---
+
+## 8. Decision layer and position sizing
+
+### 8.1 Current design
+
+The decision layer sits between Wave’s distribution and Ripple’s expression.
+
+It maps
+
+$$
+\bigl(p(\cdot\mid\mathcal{F}_t),\; \text{Tide state},\; \text{position state},\;
+\widehat{C}_{\text{execution}},\; \text{constraints}\bigr)
+\;\to\;
+a_t
+$$
+
+where $a_t$ may be “do nothing.” Doing nothing is a first-class action. Before
+entry, $a_t$ may authorise or reject exposure; after entry, it may authorise
+hold, reduce, scale in/out, reprice, hedge, exit, or emergency exit. Execution
+method remains Ripple’s responsibility within that authorisation.
+
+### 8.2 Conceptual trade state
+
+Open-position control requires a conceptual **trade state**: the information
+needed to manage an existing exposure. This is not a production schema. It
+exists so the system can answer:
+
+> Given what I currently hold, what do I currently believe, what risk remains,
+> what opportunity remains, and what would it cost to change the position?
+
+Conceptually it includes ideas such as:
+
+- current position quantity and direction;
+- entry price, current mark, and entry timestamp;
+- elapsed holding time;
+- remaining risk budget;
+- current target/stop or barrier state;
+- current Wave opportunity distribution;
+- current target-before-stop and finite-horizon opportunity probabilities;
+- current Tide portfolio-risk state;
+- current Ripple microstructure state;
+- estimated execution cost;
+- liquidity / capacity state;
+- current working orders;
+- realised and unrealised P&L.
+
+Exact production fields are an implementation concern.
+
+### 8.3 The NO-TRADE region
+
+Forecasting a movement is not sufficient to trade. A conceptual economic
+hurdle of the form
+
+$$
+\mathbb{E}[V_{\mathrm{trade}}]
+\le
+C_{\mathrm{execution}} + C_{\mathrm{risk}}
+$$
+
+may imply
+
+$$
+a_t = \text{NO TRADE}.
+$$
+
+This is not a numerical threshold. The system does not need to predict every
+market movement. It needs to identify situations where expected economic
+value is sufficient relative to risk and implementation cost. That is the
+distinction between forecasting and decision-making.
+
+### 8.4 Position sizing is a decision problem
+
+Sizing is not a fixed formula (fixed fractional, raw signal strength, historical V1 ES throttle) unless that formula wins a nested comparison.
+
+Candidate inputs:
+
+- expected return / expected utility
+- $\mathbb{P}(\tau_{\text{target}}<\tau_{\text{stop}}\mid\mathcal{F}_t)$
+- the probability that target-first opportunity occurs within usable horizon $H$
+- ES of the candidate position
+- liquidity and estimated execution cost
+- regime probabilities $\pi_t$
+- model confidence / calibration
+- margin
+- hedge cost
+
+RORAC-like quantities belong **here** (opportunity vs risk capital), not as a Tide broadcast that Ripple blindly follows.
+
+### 8.5 Permissions vs probabilities
+
+The historical Wave “permission matrix” (enable/disable bounce vs breakout) is a crude decision policy. A probabilistic Wave plus an explicit utility/constraint problem is the intended replacement. Permissions may remain as hard safety interlocks (e.g. flatten-only under Tide crisis), which is an operational constraint, not a market model.
+
+### 8.6 Exit and position management
+
+The trading decision does not end when an entry order fills. Exit and
+position-management policies are separate research objects with nested
+baselines. Management actions should be associated with **reasons for
+change**, not a single generic post-entry signal.
+
+**Opportunity deterioration.** The Wave distribution or first-passage
+opportunity becomes less favourable. Possible responses: hold, reduce, exit.
+
+**Portfolio-risk deterioration.** Tide risk or portfolio constraints
+deteriorate. Possible responses: reduce, hedge, prohibit scaling, exit, or
+emergency exit if a hard safety constraint is breached.
+
+**Microstructure deterioration.** Ripple detects worsening execution or
+liquidity. Possible responses: wait, reprice, change execution method, reduce,
+or exit if the execution environment materially changes expected economics.
+
+**Opportunity improvement.** The conditional opportunity improves after entry.
+Possible responses may include hold, scale, adjust target, or continue
+exposure. Improvement does **not** automatically justify scaling.
+
+**Opposite opportunity.** A new opposing opportunity appears. Closing the
+existing exposure and opening the opposite exposure are **separate
+decisions**. A reversal must not be an implicit consequence of an exit.
+
+**Static exit.** Fixed targets and stops are transparent baselines, not assumed
+optima. Time-based and trailing-stop exits are additional simple comparators.
+
+**Distribution-aware exit.** Wave may re-estimate
+
+$$
+\mathbb{P}(\tau_T<\tau_S\mid\mathcal{F}_t)
+$$
+
+and its finite-horizon counterpart throughout the life of the position. The
+distribution at entry need not remain the distribution later. Regime
+probabilities $\pi_t$ may inform these objects without implying a
+regime-to-exit rule.
+
+The programme tests whether sequential, live-compatible re-evaluation while
+exposure is open improves on executing the entry plan unchanged until a
+static barrier.
+
+### 8.7 Conceptual position state machine
+
+The operational lifecycle is:
+
+```text
+FLAT → ENTRY_PENDING → OPEN → EXIT_PENDING → FLAT
+```
+
+While `OPEN`, authorised management actions may include:
+
+```text
+HOLD | SCALE_IN | SCALE_OUT | REPRICE | RISK_REDUCTION |
+HEDGE | EXIT | EMERGENCY_EXIT
+```
+
+This linear representation is a conceptual control-flow simplification, not a
+claim that operational quantities are mutually exclusive. Partial fills may
+leave entry, open-position, and exit quantities coexisting; actual reconciled
+broker inventory and working orders are authoritative, not the state label or
+intent. Reversal requires closing or otherwise accounting for the existing
+position and obtaining a separately authorised new exposure.
+
+The state machine is an engineering and execution-integrity mechanism, not the
+trading strategy. Models and the decision layer determine *why* a transition
+is appropriate; the state machine makes the authorised transition
+deterministic, reconcilable, and fail-closed.
+
+### 8.8 Entry, management, and exit are different research problems
+
+Information useful for entry need not be useful for management or exit. At
+entry, Wave may identify a favourable opportunity distribution and Ripple may
+confirm feasible liquidity. After entry, Wave’s distribution, Ripple’s
+microstructure, and Tide’s portfolio risk may all change.
+
+Entry quality, trade-management quality, and exit quality must therefore be
+tested separately.
+
+Continuously reassessing a position creates a risk of **post-entry selection
+bias**. Repeatedly observing the path and selecting the best-looking exit
+retrospectively would contaminate the result with hindsight. Live-compatible
+policies must use only information available at each decision time,
+$\mathcal{F}_t$. Post-entry decisions must be evaluated sequentially, not by
+using the future path to choose an optimal exit after the fact. Estimators
+remain a later methodological choice; the principle is information-set
+integrity.
+
+---
+
+## 9. Data
+
+### 9.1 Current design
+
+**1-minute research dataset.** Approximately five years of 1-minute price data are available now. This is the starting information set for Wave/Tide statistical work (H1–H6 and the non-L2 branches of later hypotheses) and for simple execution-cost *proxies*. The 1-minute programme does not wait for L2.
+
+**Prospective L2 / order-flow collection is an active parallel workstream.** The collector is operational and accumulating raw events. That does **not** mean the L2 sample is already sufficient for validation. Historical L2 remains scarce. Confirmatory tests that require true books, queue position, or own-order outcomes (H7, H9, H16–H18, and the microstructure branches of H8, H14, and H19) may use only the prospective archive that exists at test time, with its quality record. They cannot be backdated through unavailable history. Do not invent synthetic books and then treat them as historical truth. Do not report a 1-minute proxy and an L2 result as one sample.
+
+**Raw events are retained** so derived datasets (books, CVD, OFI, bars) can be regenerated. Derived products are not the source of truth.
+
+### 9.2 What must be preserved
+
+- exchange timestamp
+- local receipt timestamp
+- sequence / update IDs where available
+- raw depth updates
+- snapshots
+- trades
+- instrument identity
+- session / connection metadata
+- data-quality information
+
+Two clocks matter: **exchange event time** and **local receipt time**. Latency, staleness, and look-ahead errors are undefined if only one exists.
+
+### 9.3 Data quality is a research concern
+
+Detect and count, at minimum:
+
+- missing events
+- sequence gaps
+- duplicates
+- out-of-order events
+- stale books
+- reconnects
+- timestamp anomalies
+
+Quality filters change the sample. Every skip/quarantine must be counted. “Clean data” without a quality paper is a specification of a different process than live trading.
+
+Survivorship, listing/delisting, and contract specification changes (tick size, fees, funding) are part of the data generating process.
+
+---
+
+## 10. Research methodology
+
+### 10.1 Experiment contract
+
+Every experiment defines:
+
+| Field | Content |
+|---|---|
+| Hypothesis | What is claimed |
+| Null | What would count as no effect |
+| Dataset | Universe, venue, frequency, quality filters |
+| Information set $\mathcal{F}_t$ | Features allowed at decision time |
+| Training period | Fit / estimate |
+| Validation period | Model selection, early stopping, calibration |
+| Untouched test period | Final evaluation only |
+| Benchmark | Nested simpler alternative |
+| Model | Family and estimation method |
+| Parameters | Free vs frozen |
+| Evaluation metrics | Statistical |
+| Statistical tests | Including multiple-testing handling |
+| Economic metrics | After declared costs, risk, capacity |
+| Result | What was observed |
+| Decision | Adopt / reject / revise / defer |
+
+Exploratory analysis that violates this contract may generate hypotheses. It may not be reported as a confirmatory result.
+
+### 10.2 Explicit controls
+
+The programme must control for:
+
+- look-ahead bias
+- survivorship bias
+- data leakage (including label leakage and same-bar features)
+- multiple testing
+- parameter overfitting
+- model-selection bias
+- non-stationarity
+- transaction costs, slippage, market impact
+- latency
+- capacity
+
+Event timestamps for news must be the **earliest available** timestamp, not publication scrape time if that is later (see §12).
+
+### 10.3 Calibration
+
+Probabilistic predictions are evaluated for **calibration**, not only directional accuracy.
+
+Relevant diagnostics:
+
+- log-likelihood
+- Brier score (for unrestricted and finite-horizon target-before-stop events)
+- reliability diagrams
+- probability calibration
+- distributional calibration (PIT, interval coverage)
+- VaR exceedance tests
+- ES backtesting
+
+A sharp but miscalibrated model is not a risk model.
+
+### 10.4 Benchmark hierarchy
+
+Compare increasing complexity. A suggested forecasting / allocation ladder
+(items may be added or skipped; none is sacred):
+
+1. Random / unconditional baseline  
+2. Buy-and-hold  
+3. Simple momentum  
+4. Simple mean reversion  
+5. Volatility targeting  
+6. Simple regime strategy  
+7. Simple ML model  
+8. Hierarchical (Tide/Wave) model without microstructure  
+9. Full Tide / Wave / Ripple system after costs  
+
+Trade-management baselines include:
+
+- entry-only management (execute the initial plan without information updates);
+- fixed target/stop;
+- trailing stop;
+- time-based exit;
+- distribution-aware exit; and
+- microstructure-aware exit.
+
+Execution baselines include:
+
+- market-on-signal;
+- fixed passive limit;
+- fixed aggressive limit; and
+- dynamic execution selection.
+
+Liquidity-interaction baselines include:
+
+- no-wall model;
+- static wall threshold; and
+- dynamic wall model.
+
+When evaluating exit, management, or execution, use the same parent trade
+decisions wherever the estimand permits.
+
+### 10.5 Ablation
+
+Support staged information sets, for example:
 
 ```
-function detect_walls(book, side, config, tracked_walls):
-    levels = book.get_levels(side, config.ripple.wall_scan_depth)
-    depths = [level.quantity for level in levels]
-    median_depth = median(depths)
-    threshold = median_depth * config.ripple.wall_depth_multiple
-
-    new_walls = []
-    for level in levels:
-        if level.quantity >= threshold:
-            existing = tracked_walls.find(level.price)
-            if existing:
-                # Update existing wall
-                existing.depth = level.quantity
-                existing.last_update_ts = book.timestamp
-                # Persistence: fraction of snapshots where wall was present
-                existing.persistence = existing.present_count / existing.total_snapshots
-                new_walls.append(existing)
-            else:
-                # New wall
-                wall = Wall(
-                    price            = level.price,
-                    depth            = level.quantity,
-                    initial_depth    = level.quantity,
-                    side             = side,
-                    first_seen_ts    = book.timestamp,
-                    last_update_ts   = book.timestamp,
-                    persistence      = 1.0,
-                    cancellation_rate = 0.0,
-                    present_count    = 1,
-                    total_snapshots  = 1,
-                )
-                new_walls.append(wall)
-
-    # Compute quality score for each wall
-    for wall in new_walls:
-        wall.quality = compute_wall_quality(wall, median_depth, book.mid_price,
-                                            ripple.recent_sigma_P, config)
-    return new_walls
+market data only
+  → + technical / structural features
+  → + HMM
+  → + PCA / factors
+  → + Tide risk state
+  → + news/event state
+  → + order flow
+  → + dynamic trade management
+  → + execution selection
 ```
 
-#### 9.6.2 Cancellation Rate Tracking
+Do not assume every layer adds value. Negative ablations are first-class results.
+
+### 10.6 Statistical vs economic significance
+
+A significant likelihood-ratio improvement that does not survive costs, capacity, or ES constraints does not promote a component into the autonomous system. Conversely, a noisy economic edge without a coherent statistical story is treated as provisional, not validated.
+
+### 10.7 Separate sources of economic value
+
+The research programme contains at least three distinct potential sources of
+economic value:
+
+1. **Forecast / alpha value:** does Wave predict future opportunity?
+2. **Trade-management value:** conditional on the same entry, does dynamic
+   management improve the realised trade distribution?
+3. **Execution value:** conditional on the same approved exposure and
+   management decision, can Ripple improve fills, costs, and impact?
+
+These must be tested separately before composition. Realised trade P&L cannot
+automatically be attributed to one layer merely by looking at live outcomes.
+A conceptual decomposition such as
+
+$$
+\mathrm{P\&L}_{\mathrm{trade}}
+\approx
+\mathrm{P\&L}_{\mathrm{forecast}}
++
+\mathrm{P\&L}_{\mathrm{management}}
++
+\mathrm{P\&L}_{\mathrm{execution}}
+-
+C
+$$
+
+is an **experimental attribution framework**, not a uniquely identifiable
+accounting identity. Attribution uses nested counterfactuals (§10.8). Isolated
+gains may interact or disappear, so the composed system still requires an
+end-to-end test.
+
+### 10.8 Counterfactual principle
+
+When estimating the incremental value of a downstream component, **hold
+upstream decisions fixed wherever possible**. This is an experimental
+control, not necessarily how the final autonomous system operates. The fully
+composed system must still undergo an independent end-to-end test.
+
+Examples:
+
+- H14: same entries, different exit policy.
+- H15: same entries, risk-authorisation policy changed.
+- H16: same parent decisions, wall information added.
+- H17: same authorised exposure, execution policy changed.
+- H19: same entries and parent dynamic-exit policy, scaling/partial-exit
+  policy changed.
+
+A schematic nested experiment:
+
+```text
+Same parent entry
+       │
+       ├── Static TP/SL
+       ├── Dynamic binary exit
+       └── Dynamic management
+                 │
+                 ├── Fixed execution
+                 └── Dynamic execution
+```
+
+Downstream components should be evaluated while freezing upstream decisions
+wherever the estimand permits. This prevents an execution model from
+receiving credit for alpha, or a trade-management model from receiving credit
+for changing the parent entry set.
+
+---
+
+## 11. Non-stationarity and model uncertainty
+
+### 11.1 Two different failures
+
+Distinguish:
+
+| Phenomenon | Meaning |
+|---|---|
+| **Regime change** | The latent market state $S_t$ moves; the *same* model family remains appropriate. |
+| **Structural / model change** | The mapping from $\mathcal{F}_t$ to outcomes itself changes (new microstructure, fee regime, participant mix, product spec). |
+
+HMM $\pi_t$ addresses the first only if the emission model is stable. Walk-forward degradation, concept-drift diagnostics, and explicit “model break” tests address the second.
+
+The system must investigate whether performance degrades when market structure changes — not only whether average OOS metrics look acceptable.
+
+### 11.2 Three uncertainties
+
+1. **Market uncertainty** — irreducible randomness of $R$ given a true model.  
+2. **Parameter uncertainty** — $\theta$ is estimated.  
+3. **Model uncertainty** — the family is wrong.
+
+Risk numbers used for live limits should not be presented as if only (1) existed.
+
+---
+
+## 12. News / LLM (experimental information layer)
+
+**Current design:** optional, experimental, structured.
 
 ```
-function update_cancellation_rate(wall, prev_depth, current_depth, trade_volume_at_price):
-    depth_change = prev_depth - current_depth
-    if depth_change <= 0:
-        return  # depth increased or unchanged; no cancellation
-
-    consumed_by_trading = trade_volume_at_price  # volume traded at this price since last update
-    cancelled = max(0, depth_change - consumed_by_trading)
-    total_removed = depth_change
-
-    wall.cancel_history.append(cancelled / total_removed if total_removed > 0 else 0)
-    wall.cancellation_rate = mean(wall.cancel_history[-config.ripple.wall_cancel_window:])
+news → structured event extraction → event state → Tide / Wave / Ripple
 ```
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `ripple.wall_scan_depth` | int32 | 50 | Number of book levels to scan per side |
-| `ripple.wall_depth_multiple` | float64 | 3.0 | Depth must exceed median × this to be a wall |
-| `ripple.wall_cancel_window` | int32 | 20 | Rolling window for cancellation rate |
+The LLM **must not** output trading instructions, sizes, or “buy/sell” recommendations.
 
-### 9.7 V1 Evidence-to-State Mapping
+Candidate event-state fields:
 
-The `RippleEvidenceEngine` computes a set of evidence scores, and the `ScoreBasedInference` engine maps them to one of the five liquidity states. In V1 this is a deterministic rule-based system.
+- event type
+- entities
+- direction
+- magnitude
+- confidence
+- novelty
+- surprise
+- horizon
+- persistence
+- event timestamp (earliest available)
 
-#### 9.7.1 Evidence Scores
+Look-ahead is the default failure mode. If the timestamp protocol is not watertight, the layer is invalid for confirmatory tests.
 
-The evidence engine computes these intermediate scores on each tick:
+---
 
-| Score | Formula | Range | Meaning |
-|---|---|---|---|
-| `absorption_score` | $ \sigma(w_1 \cdot W_{p,\text{near}} + w_2 \cdot F_t - \frac{w_3 \cdot \mid \Delta P \mid} {\hat{\sigma}_P}) $ | [0, 1] | High when wall absorbs flow |
-| `exhaustion_score` | $ \sigma(-w_4 \cdot \text{CVD\_slope} \cdot \text{sign}(\text{trend}) + w_5 \cdot (1 - F_t/F_{\text{peak}})) $ | [0, 1] | High when flow dying |
-| `withdrawal_score` | $ \sigma(w_6 \cdot \Delta\mathcal{D}_{\text{wall}} / \mathcal{D}_{\text{wall,prev}} - w_7 \cdot \text{trade\_vol\_at\_wall}) $ | [0, 1] | High when wall pulled |
-| `refill_score` | $ \sigma(w_8 \cdot \Delta\mathcal{D}_{\text{wall}} / \mathcal{D}_{\text{wall,prev}} + w_9 \cdot \pi_p) $ | [0, 1] | High when depth rebuilding |
+## 13. Options and FX hedging (deferred)
 
-All $ w_i $ are configurable. The logistic function $ \sigma(\cdot) $ maps scores to [0, 1].
+**Future extension**, not a foundation of the initial programme.
 
-#### 9.7.2 State Inference Rules
+The book may be AUD-based while BTC is quoted/traded in USD. Distinguish:
 
-```
-function infer_liquidity_state(evidence, config):
-    scores = {
-        ABSORPTION: evidence.absorption_score,
-        EXHAUSTION: evidence.exhaustion_score,
-        WITHDRAWAL: evidence.withdrawal_score,
-        REFILL:     evidence.refill_score,
-    }
+- BTC/USD market risk  
+- USD/AUD currency risk  
 
-    # Find the highest-scoring non-STABLE state
-    best_state = argmax(scores)
-    best_score = scores[best_state]
-
-    # Must exceed activation threshold to leave STABLE
-    if best_score < config.ripple.state_activation_threshold:
-        return STABLE
-
-    # Must exceed runner-up by margin to avoid flickering
-    second_best = sorted(scores.values(), reverse=True)[1]
-    if best_score - second_best < config.ripple.state_margin:
-        return current_state  # stay in current state (hysteresis)
-
-    return best_state
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `ripple.state_activation_threshold` | float64 | 0.6 | Min score to leave STABLE |
-| `ripple.state_margin` | float64 | 0.15 | Min lead over runner-up |
-
-**Hysteresis:** The margin requirement prevents rapid oscillation between states. Once a state is entered, it persists until another state exceeds it by the margin, or it falls below the activation threshold.
-
-### 9.8 Dual-Mode Wall Logic
-
-Walls create two distinct setups depending on whether they hold or fail:
-
-#### 9.6.1 Wall Holds → Bounce Trade
-
-When price approaches a wall and the wall absorbs aggressive flow:
-
-1. **Detection:** Wall quality score $ W_p > W_{\min} $, price within proximity zone.
-2. **Confirmation:** Aggressive flow rate decreasing (exhaustion beginning), CVD diverging, microprice shifting away from wall.
-3. **Entry:** On confirmed reversal away from wall.
-4. **Target:** Opposite liquidity destination on the liquidity map.
-5. **Invalidation:** Wall breaks (depth drops below threshold while price trades through).
-
-#### 9.6.2 Wall Fails → Breakout Trade
-
-When price approaches a wall and the wall withdraws or is consumed:
-
-1. **Detection:** Wall depth declining rapidly (withdrawal) or being traded through (consumption).
-2. **Confirmation:** Aggressive flow accelerating through the level, CVD accelerating, trades enlarging.
-3. **Entry:** On confirmed break through wall level.
-4. **Target:** Next liquidity destination beyond the broken wall.
-5. **Invalidation:** Price reverses back through the broken level and it re-forms (failed breakout).
-
-#### 9.6.3 Hold vs Break Score
-
-For a wall at price $ p $ under pressure, estimate the probability of holding:
+Options, if used later, transform the portfolio distribution, conceptually
 
 $$
-P(\text{hold} \mid \mathbf{x}) = \sigma\!\left( \beta_0 + \beta_1 W_p + \beta_2 F_t + \beta_3 R_p + \beta_4 I_t \right)
+R_p = R_{\mathrm{BTC}} + H(\mathrm{FX}_T) - C_{\text{option}}
 $$
 
-where:
-- $ \sigma(\cdot) $ is the logistic function
-- $ W_p $ = wall quality score
-- $ F_t $ = normalized aggressive flow rate (negative: high flow, harder to hold)
-- $ R_p $ = refill rate at the wall
-- $ I_t $ = order book imbalance
+(or an analogous decomposition). Physical measure $P$ (forecasting, decisions) and risk-neutral measure $Q$ (option valuation, implied surfaces) **must remain distinct**.
 
-In V1, this is implemented as a deterministic threshold system. The logistic form is a later calibration target.
+Do not turn the initial project into an options-pricing thesis. FX hedging is a later portfolio-risk experiment.
 
-### 9.9 CVD and Volume Profile Integration
+---
 
-**CVD role in Ripple:**
-- CVD slope confirms or contradicts price direction.
-- CVD divergences (price vs. CVD) are primary signals for absorption and exhaustion.
-- CVD level resets are tracked for session context.
+## 14. Operational safety (autonomous system)
 
-**Volume Profile role in Ripple:**
-- Point of Control (POC) acts as a structural anchor.
-- Value Area boundaries provide context for mean-reversion vs. breakout.
-- Low-volume nodes identify potential void corridors (areas price may move through quickly).
-- High-volume nodes identify potential absorption zones.
+The eventual live system is not a research notebook. It must support:
 
-### 9.10 HMM Framing for Latent-State Inference (V2+ Extension)
+- stale-data detection
+- broker/exchange disconnection handling
+- position reconciliation
+- duplicate-order protection
+- model-failure fallback
+- risk-limit enforcement
+- emergency flattening
+- a defined safe state (no new risk, flatten or hold per policy)
 
-This section defines the mathematical framework that will replace the V1 rule-based Ripple inference in later versions. It is included here for forward-compatibility: V1 code should structure its state outputs to be compatible with the HMM observation model below.
+Research models that cannot fail closed are not deployable components, regardless of backtest Sharpe.
 
-**Latent states:** The Ripple liquidity environment is modeled as a Hidden Markov Model with $ K $ latent states $ z_t \in \{1, \ldots, K\} $. In the simplest formulation, these correspond to the five named states (STABLE, ABSORPTION, EXHAUSTION, WITHDRAWAL, REFILL), so $ K = 5 $.
+Replay and live decision logic must be **event-time**. Wall-clock may exist for operations; it must not leak into simulated decisions.
 
-**Transition matrix:** $ \mathbf{A} \in \mathbb{R}^{K \times K} $ where $ A_{ij} = \Pr(z_t = j \mid z_{t-1} = i) $. Rows sum to 1. The structure of $ \mathbf{A} $ should be sparse, reflecting the allowed transitions in §9.4.1 (disallowed transitions have $ A_{ij} = 0 $ or near-zero).
+---
 
-**Observation model:** At each time step, the system emits an observation vector $ \mathbf{x}_t $ drawn from a state-conditional distribution:
+## 15. Relationship to the historical V1 and the existing platform
 
-$$
-\mathbf{x}_t \mid z_t = k \sim \mathcal{N}(\boldsymbol{\mu}_k, \boldsymbol{\Sigma}_k)
-$$
+| Historical V1 (see `docs/history/strategy_v1.md`) | Current specification |
+|---|---|
+| Tide: LONG/SHORT/NEUTRAL bias + scalar risk multiplier | Tide: probabilistic portfolio/risk state and constraints |
+| Wave: hard regime + permission matrix | Wave: conditional distributions and $\pi_t$ |
+| Ripple: bounce/breakout lifecycle as the strategy | Ripple: microstructure information and execution of authorised actions; archetypes are hypotheses |
+| Determinism before probability as a *build* rule | Deterministic policies as *baselines* in a research ladder |
+| Prediction, permission, and firing collapsed in practice | Prediction ≠ decision ≠ execution |
 
-where $ \mathbf{x}_t = [I_t, \; \text{OFI}_t, \; \text{CVD\_slope}_t, \; \lambda_t, \; W_{p,\text{nearest}}, \; F_t]^\top $ is the Ripple feature vector.
+The existing mixed C++/Python platform, collectors, replay harness, and HMM tooling are **engineering substrate**. Their existence does not validate the economic hypotheses in §18.
 
-**Forward algorithm (filtering):** The posterior $ \gamma_t(k) = \Pr(z_t = k \mid \mathbf{x}_{1:t}) $ is computed recursively:
+---
 
-$$
-\alpha_t(k) = \left[\sum_{j=1}^{K} \alpha_{t-1}(j) \cdot A_{jk}\right] \cdot b_k(\mathbf{x}_t)
-$$
+## 16. Current architecture
 
-$$
-\gamma_t(k) = \frac{\alpha_t(k)}{\sum_{j=1}^{K} \alpha_t(j)}
-$$
+**Commitments (current design):**
 
-where $ b_k(\mathbf{x}_t) $ is the emission probability (Gaussian PDF evaluated at $ \mathbf{x}_t $ with parameters $ \boldsymbol{\mu}_k, \boldsymbol{\Sigma}_k $).
+- An operational hierarchy (Tide → Wave → Decision → Ripple → Execution)
+  alongside a three-layer Tide/Wave/Ripple information architecture.
+- Models output distributions (or well-defined functionals); they do not fire orders.
+- Tide constrains and continually reassesses portfolio risk; Wave describes and
+  continually updates opportunity; Decision authorises exposure changes; Ripple
+  executes authorised entry, management, and exit actions using current
+  microstructure.
+- An entry fill begins the position-management lifecycle; it does not terminate
+  the decision process.
+- Forecast horizon $h$, position-management reassessment, and execution
+  event-time are conceptually distinct clocks.
+- Initial empirical work uses ~five years of 1-minute prices.
+- L2/order-flow research depends on prospective capture of raw events with dual timestamps and quality telemetry.
+- Nested baselines, ablations, calibration, and after-cost evaluation are mandatory.
+- News/LLM, options, and FX hedging are optional/deferred layers with the interfaces above.
 
-**Complexity:** $ O(K^2) $ per event for the forward step. With $ K = 5 $, this is 25 multiply-adds plus a Gaussian PDF evaluation — well within the 50 µs target.
+**Not yet architecture (still research):**
 
-**Training:** Baum-Welch (EM) on labeled data from V1 backtests. Model selection via BIC across $ K \in \{3, 4, 5, 6\} $.
-
-**V1 compatibility requirement:** V1's `ScoreBasedInference` must output the same state labels that the HMM will use, so that training data from V1 backtest runs can directly serve as HMM training labels.
-
-### 9.11 Support and Resistance in Ripple
-
-**Critical distinction:** Support and resistance in Ripple are used **primarily for exits, target selection, and liquidity destination modeling** — not as naive entry signals.
-
-| S/R Type | Layer | Usage |
-|---|---|---|
-| Structural S/R (session high/low, prior POC) | Wave | Context, distance-to-structure |
-| Order-book walls | Ripple | Entry setups (bounce/breakout), targets |
-| Statistical anchors (VWAP, rolling mean) | Wave/Ripple | Target modeling, fair-value reference |
-| Volume profile levels (HVN, LVN) | Ripple | Destination modeling, void detection |
+- the utility $U$
+- the production emission family (Gaussian vs $t$ vs jumps)
+- bounce/breakout as the live policy
+- the live feature set
+- the claim of profitability
 
 ```mermaid
-flowchart LR
-    subgraph SR_SOURCES ["S/R Sources"]
-        S1[Session H/L, Prior POC]
-        S2[Order Book Walls]
-        S3[VWAP, Rolling Mean]
-        S4[VP HVN / LVN]
+flowchart TB
+    subgraph ingest [Ingest]
+        P1[1-minute archive]
+        P2[Prospective L2 / trades / quality]
+        P3[Optional news events]
     end
-
-    subgraph SR_USAGE ["S/R Usage in Ripple"]
-        U1[Target Selection]
-        U2[Liquidity Destination Model]
-        U3[Invalidation Levels]
-        U4[Setup Context]
+    subgraph models [Estimation]
+        Tide
+        Wave
+        Ripple
     end
-
-    S1 -->|Wave provides distance| U4
-    S2 -->|Ripple detects| U1
-    S2 -->|Ripple detects| U3
-    S3 --> U1
-    S3 --> U2
-    S4 --> U2
-    S4 --> U1
+    subgraph act [Action]
+        Dec[Decision / sizing]
+        Entry[Entry execution]
+        Manage[Management execution]
+        Exit[Exit execution]
+        Ex[Execution selection]
+        Pos[Realised position / P and L / risk]
+        Ops[Safety / reconcile]
+    end
+    P1 --> Tide
+    P1 --> Wave
+    P2 --> Ripple
+    P3 --> Tide
+    P3 --> Wave
+    P3 --> Ripple
+    Tide --> Dec
+    Wave --> Dec
+    Dec --> Ripple
+    Ripple --> Entry
+    Ripple --> Manage
+    Ripple --> Exit
+    Ripple --> Ex
+    Ex --> Entry
+    Ex --> Manage
+    Ex --> Exit
+    Entry --> Pos
+    Manage --> Pos
+    Exit --> Pos
+    Pos --> Ops
+    Pos --> Tide
+    Pos --> Wave
+    Pos --> Dec
 ```
 
-Ripple uses identified S/R levels to:
-1. Set profit targets (scale-out destinations).
-2. Model where price is likely to travel (liquidity destination).
-3. Set invalidation levels for risk management.
-4. Contextualize whether a setup is a fade or a momentum play.
+Operationally, authority flows from Tide/Wave through Decision to Ripple and
+Execution. Informationally, Tide, Wave, and Ripple are all candidate sources of
+incremental predictive content (§3.3). The diagram therefore shows both
+downstream authority and post-entry feedback without granting Ripple authority
+to create unapproved risk.
 
-### 9.12 Ripple Decision Pipeline
+---
 
-The following diagram shows the complete per-event decision path within Ripple:
+## 17. Research progression
+
+### 17.1 Modelling depth (apply per layer as relevant)
+
+1. Unconditional / Gaussian baseline  
+2. Heavy tails (Student-$t$)  
+3. Regime-conditioned tails ($\pi_t$)  
+4. Conditional diffusion in $X_t$  
+5. Microstructure-conditioned $\mu_t,\sigma_t$  
+6. Jumps / Lévy only if residuals demand them  
+
+### 17.2 Tide depth
+
+Gaussian risk → $t$ → regime-conditioned $t$ → conditional simulation → jumps if needed.
+
+### 17.3 Information depth (ablation)
+
+Use the single staged information-set ladder in §10.5. This section does not
+define a second ablation order.
+
+### 17.4 Decision depth
+
+No-trade / buy-and-hold → simple rules → distribution-aware entries under ES
+→ static exit baselines → distribution-aware management → microstructure-aware
+management → dynamic execution selection.
+
+### 17.5 Proposal timing
+
+Concentrate the formal Master’s proposal on the hypotheses that survive this early ladder — not on the full stack a priori. Sequencing, notebooks, and promotion states for that ladder are in §23–§39. Exploration that chooses which hypotheses to emphasise is not confirmatory evidence.
+
+---
+
+## 18. Explicit research hypotheses
+
+Each is a **candidate**. The family null is “no incremental value relative to
+the nested simpler model” on the declared test set and under the declared
+multiple-testing rule. Economic hypotheses are evaluated after declared costs;
+pure forecast/information hypotheses are evaluated on their declared
+predictive target before any separate economic promotion test.
+
+**H1 (tails).** A Student-$t$ model of $R_{t:t+h}$ is better calibrated than Gaussian for VaR/ES and density, at 1-minute-derived horizons.
+
+*Implementation.* Hard prerequisite: versioned 1-minute dataset. Notebook: `02_return_distributions`. Component: distribution / tail estimator consumed by Tide risk and Wave densities. Gate: statistical and calibration gates before any sizing use. Registry: `EXP-H01`. Status: **Proposed**.
+
+**H2 (regimes).** Regime probabilities $\pi_t$ improve density/first-passage forecasts relative to the unconditional distribution retained by H1. That benchmark is Student-$t$ only if H1 retains it; otherwise it is Gaussian.
+
+*Implementation.* Hard prerequisite: the unconditional distribution retained by the H1 experiment. Rejection of Student-\(t\) leaves Gaussian as that benchmark and does not block H2. Filtered \(\pi_{t\mid t}\) only. Notebook: `03_regime_models`. Component: regime-state estimator consumed by Wave and Tide. Gate: forecast gate against the retained unconditional model, not an economic promotion by itself. Registry: `EXP-H02`. Status: **Proposed**.
+
+**H3 (factors).** PCA/factor residuals contain incremental information about $R_{t:t+h}$ beyond own-price history.
+
+*Implementation.* Hard prerequisite: own-price baseline (H1). Useful prerequisite: a frozen cross-asset panel. Notebook: `04_factor_models`. Component: factor-state estimator consumed by Wave and Tide. Contemporaneous factor returns are not an implementable forecast unless lagged. Registry: `EXP-H03`. Status: **Proposed**.
+
+**H4 (Wave decisions).** Decisions using $p(R\mid\mathcal{F}_t)$,
+unrestricted target-before-stop probability, or its finite-horizon counterpart
+improve after-cost risk-adjusted outcomes versus hard-label Wave or
+always-in-market baselines.
+
+*Implementation.* Hard prerequisite: a declared forecast object (H1; H2/H3 only if retained) and a frozen dumb sizer so the test is not a joint search over utility. Notebook: `05_wave_probability`. Component: Wave forecast and a decision experiment, not yet the live sizer. Downstream: H5, H14. Registry: `EXP-H04`. Status: **Proposed**.
+
+**H5 (Tide constraints).** Imposing $\mathrm{ES}_\alpha(R_p)\le B_t$ (and liquidation/margin constraints) improves left-tail outcomes without fully destroying mean performance relative to unconstrained Wave.
+
+*Implementation.* Hard prerequisite: an unconstrained parent decision (H4 or an explicitly declared simpler parent). Notebook: `06_tide_risk`. Component: ES / risk-budget constraint consumed by Decision. Registry: `EXP-H05`. Status: **Proposed**.
+
+**H6 (RORAC allocation).** Allocation using an opportunity/risk ratio evaluated at decision time outperforms naive equal or volatility-targeted sizing under the same ES budget.
+
+*Implementation.* Hard prerequisite: H5’s budget, with the ratio defined in the experiment protocol before fitting. Notebook: `07_allocation`. Component: candidate allocator. A vol-targeted or fixed-notional sizer remains the nested control and the default sizer until H6 is retained. Registry: `EXP-H06`. Status: **Proposed**.
+
+**H7 (Ripple increment).** $O_t$ improves short-horizon forecasts or first-passage probabilities after conditioning on Wave/Tide.
+
+*Implementation.* Hard prerequisites: prospective L2 with dual timestamps, and a frozen Wave/Tide conditioning set. Parallel workstream: the running L2 collector. Notebook: `08_ripple_information`. Component: order-flow feature engine. This is an information hypothesis; economic use is a separate after-cost test. Registry: `EXP-H07`. Status: **Proposed**. Confirmatory sample is prospective only.
+
+**H8 (execution).** The best declared fixed execution policy with realistic
+fill mechanics reduces $C_{\text{execution}}$ or improves fill quality versus
+naive market-on-signal, holding the parent decision fixed.
+
+*Implementation.* Hard prerequisite: a frozen parent decision stream. 1-minute cost proxies may support exploration only and must be labelled as proxies. Confirmatory fill mechanics need prospective L2 and a declared fill model. Notebook: `09_execution_baselines`. Component: fixed-policy execution simulator consumed by H17. Registry: `EXP-H08`. Status: **Proposed**.
+
+**H9 (archetypes).** Bounce and/or breakout policies beat nested non-microstructure policies after costs. Either or both may fail.
+
+*Implementation.* Hard prerequisite: prospective L2 sufficient to define walls without synthetic books, plus frozen archetype parameters or a pre-registered search. Notebook: `10_archetypes`. Component: candidate policy only if retained. Not the default product. Registry: `EXP-H09`. Status: **Proposed**.
+
+**H10 (complexity).** The full hierarchical system beats the best simpler rung on the benchmark ladder after costs and on untouched data.
+
+*Implementation.* Hard prerequisite: a composed event-time pipeline whose retained pieces have passed their own gates, plus the untouched test set still unused for selection. Notebook: `11_composition`. Component: the composed strategy under test, not an automatic paper system. Registry: `EXP-H10`. Status: **Proposed**. Rejection stops live eligibility; it does not invalidate a completed Tide/Wave thesis.
+
+**H11 (non-stationarity).** Predictive maps degrade across identified structural breaks more than across ordinary regime switches; monitoring for model change has value.
+
+*Implementation.* Useful prerequisite: at least one retained or candidate predictive map (H1–H4). Independent as a diagnostic; it does not block H1. Notebook: `12_nonstationarity`. Component: drift / model-break monitor consumed by safety and by any later paper protocol. Registry: `EXP-H11`. Status: **Proposed**.
+
+**H12 (news).** Structured event state improves Wave/Tide forecasts after timestamp-safe construction. The LLM-as-trader null is that unconstrained LLM actions add only noise or leakage.
+
+*Implementation.* Independent of the 1-minute ladder. Hard prerequisite: a timestamp-safe corpus. Without it, the hypothesis stays proposed and produces no Wave features. Notebook: `13_news`. Component: structured event state only; never an order. Registry: `EXP-H12`. Status: **Proposed**. Data-blocked for confirmatory tests.
+
+**H13 (FX, deferred).** Separating USD/AUD from BTC/USD risk improves AUD-denominated ES relative to ignoring FX.
+
+*Implementation.* Not on the initial critical path. Immediate accounting need is a declared numeraire for P&L, not a hedge book. Notebook: `14_fx`, only if the hypothesis is later un-deferred. Registry: `EXP-H13`. Status: **Deferred**.
+
+**H14 (dynamic binary exit; candidate).** Sequential binary hold/full-exit
+decisions, using only information in $\mathcal{F}_t$ at each management
+clock, improve after-cost risk-adjusted outcomes relative to fixed
+target/stop, trailing, and time-based exits, **holding position size fixed
+until a full exit**. This is an exit-policy hypothesis, not a scaling or Tide
+re-authorisation hypothesis. **Null:** no incremental value relative to those
+nested static-exit controls. The microstructure-conditioned branch is
+confirmatory only after sufficient prospective L2 exists.
+
+*Implementation.* Hard prerequisite: a frozen entry stream. Useful prerequisite: H4. Size stays fixed; H15 and H19 are not part of this test. Notebook: `15_dynamic_exit`. Component: binary exit policy. 1-minute sequential tests may proceed now; the L2-conditioned branch waits on the collector. Registry: `EXP-H14`. Status: **Proposed**.
+
+**H15 (continuous Tide risk authorisation; candidate).** Re-evaluating Tide
+risk while a position is open, and allowing only risk reduction, hedge
+requirement, or prohibition of added exposure, improves risk-adjusted
+outcomes relative to entry-only risk approval. This is **not** alpha-timed
+exit (H14), **not** scaling (H19), and **not** execution selection (H17).
+**Null:** no incremental value relative to the nested entry-only
+risk-authorisation model.
+
+*Implementation.* Hard prerequisite: an entry-only Tide authorisation model (H5 or a declared simpler budget). Not an exit model and not a sizer. Notebook: `16_continuous_tide`. Component: open-position risk authoriser that may only reduce, hedge-require, or refuse added exposure. Registry: `EXP-H15`. Status: **Proposed**.
+
+**H16 (dynamic liquidity-wall information; candidate).** Dynamic liquidity-wall
+state provides incremental information about penetration, rejection,
+absorption, replenishment, and withdrawal after conditioning on Tide/Wave
+information. **Null:** no incremental value relative to nested no-wall and
+static-wall controls. This is an information hypothesis; an economic wall
+policy requires a separate after-cost test and sufficient prospective L2.
+
+*Implementation.* Hard prerequisite: prospective L2. Useful prerequisite: the order-flow features from the H7 workstream, without treating H7’s result as assumed. Notebook: `17_dynamic_walls`. Component: liquidity/wall-state estimator. Information test first; economic policy is a later gate. Registry: `EXP-H16`. Status: **Proposed**.
+
+**H17 (dynamic execution-method selection; candidate).** Choosing among
+feasible execution actions, including wait, reprice, cancel, and
+passive/aggressive styles, using estimated fill value, adverse selection,
+impact, and opportunity cost, improves implementation shortfall relative to
+the best fixed execution style established under H8, **holding authorised
+exposure fixed**. **Null:** no incremental value relative to that nested
+fixed-style model. Confirmatory testing depends on prospective L2 and
+order-outcome data.
+
+*Implementation.* Hard prerequisites: H8’s best fixed style, prospective L2, and a frozen authorised-exposure stream. Notebook: `18_dynamic_execution`. Component: execution-policy selector and simulator. Registry: `EXP-H17`. Status: **Proposed**.
+
+**H18 (conditional liquidity provision; candidate).** Under identifiable
+liquidity conditions, passive liquidity provision improves net execution
+economics without unacceptable adverse-selection or inventory risk. **Null:**
+no incremental value relative to the nested simpler execution model that does
+not rest quotes. Confirmatory testing depends on prospective L2 and
+order-outcome data. This is not a full market-making strategy.
+
+*Implementation.* Hard prerequisites: H8, and H17 if a dynamic parent is the nested control; otherwise the nested control is the simpler non-quoting execution model named in the protocol. Prospective L2 and order outcomes are required for confirmation. Notebook: `19_liquidity_provision`. Component: conditional passive-execution policy. Registry: `EXP-H18`. Status: **Proposed**.
+
+**H19 (scaling / partial reduction; candidate).** Policies that change
+position size after entry—scale-in, partial reduction, or partial exit—
+improve the post-entry P&L distribution relative to the best **binary**
+hold/full-exit dynamic policy under H14, holding entries and that parent
+exit policy fixed. **Null:** no incremental value relative to that nested
+dynamic-exit model. Confirmatory testing depends on sufficient prospective
+L2. H19 is not a restatement of H14 or H15.
+
+*Implementation.* Hard prerequisite: the retained or declared best H14 binary policy, with entries frozen. Notebook: `20_scaling_management`. Component: post-entry size path. Registry: `EXP-H19`. Status: **Proposed**.
+
+Rejection of H7–H9 or H14–H19 still leaves a viable Tide/Wave research thesis.
+Rejection of H10 is an acceptable academic outcome and a practical stop-ship
+condition for autonomy.
+
+---
+
+## 19. Validation methodology
+
+Minimum standard for promoting a component toward the autonomous system:
+
+1. **Protocol registered** in the experiment contract (§10.1).  
+2. **Nested benchmark** present; complexity justified by increment.  
+3. **Split discipline:** train / validate / untouched test. Walk-forward where stationarity is in doubt.  
+4. **Leakage audit:** timestamps, labels, cross-asset alignment, news, L2 reconstruction.  
+5. **Statistical evaluation:** likelihood / calibration / appropriate tests; multiple-testing control across the family of experiments.  
+6. **Economic evaluation:** after $C_{\text{execution}}$, with capacity and latency sensitivity.  
+7. **Risk evaluation:** VaR/ES backtests; constraint adherence; drawdown and liquidation proxies.  
+8. **Ablation:** remove the component; the increment must vanish in the expected direction.  
+9. **Failure path:** what the component does when data are stale or the model is uncalibrated.  
+10. **Composition test:** the component still helps *inside* the stack, not only in isolation.
+11. **Component isolation:** separate alpha, trade-management, and execution
+    estimands using the §10.4 baselines and the same parent decisions where
+    appropriate.
+12. **Post-entry validation:** Policies may use only $\mathcal{F}_t$ at each
+    management clock; sequential evaluation, not retrospective path-optimal
+    exits. H15 isolates continuous Tide risk re-authorisation from entry-only
+    risk approval; H14 compares binary hold/full-exit dynamic policies with
+    static-exit controls while size is fixed; H19 tests whether
+    scaling/partial reduction adds value beyond the best H14 policy. Parent
+    entries remain fixed.
+13. **Liquidity validation:** H16 compares dynamic-wall, static-wall, and
+    no-wall models first on rejection, absorption, penetration, and timing;
+    any economic policy claim is a separate after-cost test.
+14. **Execution validation:** H8 compares declared fixed execution policies
+    with market-on-signal; H17 compares dynamic selection with the best fixed
+    style; H18 isolates conditional liquidity provision. All include fill
+    uncertainty, queue/partial-fill assumptions, adverse selection, inventory,
+    latency, impact, and opportunity cost under the same parent decisions.
+
+Engineering tests (replay determinism, unit tests) are necessary for
+implementation integrity. They do **not** substitute for (1)–(14). Passing
+(1)–(14) does not by itself make a component paper-ready; software promotion
+is the separate lifecycle in §23 and §32.
+
+---
+
+## 20. Deferred extensions
+
+| Extension | Why deferred |
+|---|---|
+| Full L2-conditional diffusion as the *initial* Wave model | L2 archive is prospective |
+| Jump-diffusion / Lévy as default | Must be evidence-led |
+| Schrödinger / quantum analogy | Experimental curiosity only |
+| Options book / $Q$-measure pricing thesis | Wrong scope for the initial degree project |
+| FX overlay as a core signal | Later AUD portfolio-risk experiment |
+| LLM direct trading | Architectural prohibition |
+| Full autonomous market making / continuous two-sided quoting | Distinct strategy; conditional passive liquidity provision and market-maker-style execution remain within Ripple research scope because they affect entry, management, and exit economics |
+| Multi-venue statistical arbitrage | Different identification problem |
+| High-frequency sub-second holding as the research target | Data and execution assumptions not yet met |
+| Hard-coded live utility $U$ | Research design decision |
+| Treating historical bounce/breakout V1 as the product | Circumvents H9–H10 |
+
+---
+
+## 21. Open questions
+
+These are unanswered by design.
+
+1. Which forecast horizon $h$ and which barrier definition make first-passage objects decision-relevant on 1-minute data?  
+2. Is $\pi_t$ better implemented as HMM, change-point, or another latent-state model? What $K$?  
+3. Does factor structure in a small crypto universe justify PCA beyond a single market factor?  
+4. What $\alpha$ and what $B_t$ policy (static vs vol-targeted vs stress-scaled) are operationally meaningful?  
+5. Can ES be estimated well enough, with parameter and model uncertainty, to bind live decisions without false precision?  
+6. What is the right decision criterion if $U$ is left unspecified — constraint satisfaction, growth, or a family of utilities with robustness checks?  
+7. On 1-minute data alone, is there *any* after-cost edge, or does the practical objective require L2?  
+8. Which Ripple observables survive conditioning on Wave?  
+9. How should capacity and impact be estimated before a large L2 sample exists?  
+10. How will prospective L2 be aligned with the 1-minute research sample without mixing incomparable information sets in a single “result”?  
+11. What constitutes a structural break in this market, and how should live models be retired?  
+12. When (if ever) does news event state survive a timestamp-safe test?  
+13. How should academic reporting handle a negative practical result (no deployable edge) while still composing a complete thesis?
+14. Which information is useful for entry but not exit, and vice versa?
+15. Can target-before-stop probabilities be recalibrated reliably while a position is open without post-entry selection bias?
+16. Does a dynamic wall representation add value beyond raw depth, flow, and distance-to-price features?
+17. When does conditional passive execution compensate for adverse selection, fill uncertainty, inventory risk, and opportunity cost?
+18. What is the minimum economic information required for an opportunity to remain actionable after accounting for execution cost, risk, liquidity, and time-to-opportunity?
+
+---
+
+## 22. Relationship between strategy research and the autonomous trading system
 
 ```mermaid
-flowchart TD
-    EVT[Market Event] --> CLASS{Event Type?}
-    CLASS -->|Trade| TF[TradeFlow: classify aggressor]
-    CLASS -->|Depth| OB[OrderBook: update levels]
-
-    TF --> FEAT[RippleFeatureEngine: update I, Pμ, OFI, CVD, λ, VPIN]
-    OB --> FEAT
-    OB --> WD[WallDetector: detect walls, compute W_p]
-
-    FEAT --> EVID[RippleEvidenceEngine: score liquidity evidence]
-    WD --> EVID
-    EVID --> INF[ScoreBasedInference: infer liquidity state]
-
-    WD --> LMAP[LiquidityMapEngine: update map, hold/break/dest scores]
-    FEAT --> LMAP
-
-    INF --> TRIG[TriggerDecisionEngine: detect archetypes]
-    LMAP --> TRIG
-
-    TRIG -->|setup detected| PERM{Wave Permissions?}
-    PERM -->|allowed| RISK{Risk Budget?}
-    PERM -->|denied| DROP[No trade]
-    RISK -->|budget available| SIZE[Position Sizing: Q_final]
-    RISK -->|budget exhausted| DROP
-    SIZE --> TLC[TradeLifecycleEngine: manage trade]
-    TLC --> EXEC[ExecutionIntent → Execution Layer]
+flowchart TB
+    subgraph thesis [Academic programme]
+        Exp[Falsifiable experiments]
+        Comp[Validated / rejected components]
+        Prop[Formal proposal after early evidence]
+    end
+    subgraph auto [Autonomous system]
+        Pipe[Ingest to execution pipeline]
+        Risk[Hard Tide limits and safety]
+        Live[Live / paper under event-time]
+    end
+    Exp --> Comp
+    Comp -->|only validated pieces| Pipe
+    Prop -.->|scopes the thesis| Exp
+    Pipe --> Risk --> Live
+    Live -.->|new data / breaks / P and L| Exp
 ```
+
+**Research** produces beliefs about distributions, incremental information, and decision rules, with error bars and rejections.
+
+**The autonomous system** is a composition of those beliefs with non-negotiable safety: risk limits, stale-data handling, reconciliation, and fail-closed execution.
+
+Rules of promotion (detail in §23 and §32):
+
+- Research validation and software readiness are different gates. Passing tests does not validate a hypothesis. Validating a hypothesis does not make a component paper-ready.
+- Data plumbing may run in shadow against live feeds before any hypothesis is validated. Those runs are not evidence, and they must not take risk.
+- A strategy component reaches paper observation only from **Paper Ready**.
+- Live eligibility is a review after paper validation. It is not automatic deployment, and it is not required for the research programme to be complete.
+- The stack is not entitled to real-money risk because the parts exist in code.
+- Academic success does not require a profitable system. Practical success does. Completion of this roadmap means a paper-trading-capable foundation (§38), not a live strategy.
+
+This document is the contract for both the research programme and the implementation sequence. Broker manuals, schemas, and configuration catalogues may still live elsewhere. They do not replace the gates below.
+
+### 22.1 Restored strategy concepts
+
+This revision restores concepts that are part of the research direction but
+must not be mistaken for validated mechanisms:
+
+- closed-loop open-position control and conceptual trade state;
+- forecast, position-management, and execution clocks;
+- hierarchical authority versus non-hierarchical information;
+- dynamic binary exits (H14), continuous Tide re-authorisation (H15), and
+  scaling/partial reduction beyond binary exit (H19) as separable problems;
+- dynamic wall outcomes, including failure versus disappearance;
+- unrestricted and finite-horizon first-passage objects, including candidate
+  liquidity-barrier conditioning;
+- executable opportunity as distinct from first-passage probability;
+- the NO-TRADE region as a first-class economic decision;
+- candidate execution actions including WAIT, and expected value of waiting;
+- conditional liquidity provision, not full market making;
+- inventory, partial-fill, queue-position, and adverse-selection considerations;
+- a conceptual operational position state machine;
+- entry, management, and exit as distinct research problems;
+- post-entry sequential evaluation and selection-bias control;
+- counterfactual freeze-upstream attribution of forecast, management, and
+  execution value.
 
 ---
 
-## 10. Liquidity Map
+## 23. Research-to-implementation lifecycle
 
-### 10.1 Purpose
+Every hypothesis follows one lifecycle. A later state does not erase the
+requirements of an earlier one. Exploratory notebooks, passing unit tests, and
+a wired backtest are not substitutes for each other.
 
-The Liquidity Map is a real-time model of where significant liquidity exists, where it has been consumed, and where price is likely to travel next. It is maintained by Ripple and consumed for trade management.
+```text
+PROPOSED
+   ↓
+EXPLORATORY
+   ↓
+IMPLEMENTED
+   ↓
+RESEARCH VALIDATED
+   ↓
+INTEGRATION VALIDATED
+   ↓
+PAPER READY
+   ↓
+PAPER OBSERVATION
+   ↓
+PAPER VALIDATED
+   ↓
+LIVE ELIGIBLE
+```
 
-### 10.2 Components
+Side exits, available from any pre-validation state: **Rejected**, **Revised**
+(closed; a new experiment id is opened), **Deferred**.
 
-#### 10.2.1 Resting Liquidity Levels
-
-Derived from order book walls:
-
-$$
-\mathcal{L}_{\text{rest}} = \{(p_j, \mathcal{D}_j, W_j, s_j) : W_j > W_{\min}\}
-$$
-
-where $ p_j $ is price, $ \mathcal{D}_j $ is resting depth at that level, $ W_j $ is wall quality score (§9.5.7), $ s_j \in \{\text{BID}, \text{ASK}\} $ is side.
-
-#### 10.2.2 Traded Liquidity Levels
-
-Derived from Volume Profile:
-
-$$
-\mathcal{L}_{\text{traded}} = \{(p_j, V_j^{\text{profile}}, \text{type}_j) : V_j > V_{\text{thresh}}\}
-$$
-
-where $ \text{type}_j \in \{\text{HVN}, \text{LVN}, \text{POC}\} $.
-
-#### 10.2.3 Flow-Pressure Levels
-
-Derived from trade flow concentration:
-
-$$
-\mathcal{L}_{\text{flow}} = \{(p_j, F_j^{\text{net}}) : |F_j^{\text{net}}| > F_{\text{thresh}}\}
-$$
-
-where $ F_j^{\text{net}} $ is net signed flow at price level $ j $.
-
-#### 10.2.4 Structural Anchors
-
-Session VWAP, rolling mean, session high/low, prior day close:
-
-$$
-\mathcal{L}_{\text{struct}} = \{(\text{VWAP}_t, \text{type}=\text{VWAP}), (\text{high}_t, \text{type}=\text{HIGH}), \ldots\}
-$$
-
-#### 10.2.5 Void Corridors
-
-Price ranges with minimal resting and traded liquidity:
-
-$$
-\mathcal{V} = \{(p_{\text{lo}}, p_{\text{hi}}) : \max_{p \in [p_{\text{lo}}, p_{\text{hi}}]} \mathcal{D}_p < \mathcal{D}_{\text{void}} \text{ and } V_p^{\text{profile}} < V_{\text{void}}\}
-$$
-
-Price can move through void corridors quickly with minimal friction. The thresholds $ \mathcal{D}_{\text{void}} $ and $ V_{\text{void}} $ are configurable (defaults derived from rolling percentiles of the full book depth and profile volume distributions, e.g., 10th percentile).
-
-### 10.3 Hold / Break / Destination Scores
-
-For each level $ \ell $ in the liquidity map:
-
-| Score | Definition | Usage |
+| State | Meaning | What it is not |
 |---|---|---|
-| $ \text{hold}_\ell $ | Probability the level holds when approached | Bounce trade entry quality |
-| $ \text{break}_\ell $ | $ 1 - \text{hold}_\ell $ | Breakout trade entry quality |
-| $ \text{dest}_\ell $ | Score for this level as a price destination | Target selection, scale-out points |
+| **Proposed** | The hypothesis is identified. No meaningful experiment has been run under this protocol. | A hunch recorded in a chat or an old V1 notebook |
+| **Exploratory** | A notebook is being used to understand data, labels, features, and whether the hypothesis is even well posed. | Confirmatory evidence |
+| **Implemented** | Feature, label, model, and evaluation logic exist as reusable code, not only as notebook cells, and can be re-run. | A claim that the hypothesis is true |
+| **Research validated** | The declared statistical and, where relevant, economic protocol has been completed and the pre-registered decision is to retain the component. | Permission to paper-trade |
+| **Integration validated** | The component runs inside the event-time research/backtest pipeline and passes the software and replay tests that apply to it. | A new economic result |
+| **Paper ready** | Research evidence, reproducible behaviour, realistic costs, failure handling, monitoring, integration tests, and a paper-compatible interface are all present. | A statement that paper trading has happened |
+| **Paper observation** | Live market data in; hypothetical decisions, orders, and fills out; no financial risk. Used to check alignment, latency, state, stability, execution assumptions, and operations. | A backtest, and not live trading |
+| **Paper validated** | A declared paper-observation protocol has been completed. | Live eligibility |
+| **Live eligible** | Research, integration, operational, and paper gates have all been satisfied for that component or composition. Deployment still requires an explicit decision. | An instruction to trade |
 
-Destination score:
+**Decision rules.** Apply these to the experiment id, not to a moving hypothesis statement.
 
-$$
-\text{dest}_\ell = w_{\text{dest}}^{\mathcal{D}} \cdot \hat{\mathcal{D}}_\ell + w_{\text{dest}}^{V} \cdot \hat{V}_\ell^{\text{profile}} + w_{\text{dest}}^{\text{vwap}} \cdot \frac{1}{1 + |\ell - \text{VWAP}| / \hat{\sigma}_P} + w_{\text{dest}}^{\text{struct}} \cdot \mathbb{1}[\ell \in \mathcal{L}_{\text{struct}}]
-$$
+- **Retain** (enter Research validated) only when the protocol in §10.1 was registered before the confirmatory run, the nested benchmark was beaten on the pre-registered metric, costs were applied when the claim is economic, calibration was assessed when the object is a probability or a risk measure, and the multiple-testing rule for the family was applied.
+- **Reject** when that protocol finishes and the null is not rejected, or the economic gate fails. Record the negative result. Do not retune the same id and call it confirmation.
+- **Revise** when exploration shows the question was ill posed. Close the id. Open a new id. Do not edit the original hypothesis so that it matches what was found.
+- **Defer** when a hard dependency or dataset does not yet exist. Deferred is not rejected. H13 starts deferred. Confirmatory L2 branches stay proposed on the parent id and cannot be confirmed on 1-minute proxies.
 
-where hatted quantities denote min-max normalized values within the current map snapshot.
-
-### 10.4 Liquidity Map Snapshot
-
-The liquidity map is published as a structured snapshot at Ripple cadence:
-
-```
-LiquidityMapSnapshot {
-    timestamp: int64
-    levels: [{
-        price: float64
-        depth: float64
-        wall_quality: float64
-        profile_volume: float64
-        net_flow: float64
-        hold_score: float64
-        dest_score: float64
-        type: {WALL_BID, WALL_ASK, HVN, LVN, POC, VWAP, VOID_BOUNDARY}
-    }]
-    void_corridors: [{lo: float64, hi: float64}]
-    nearest_bid_wall: float64
-    nearest_ask_wall: float64
-    poc: float64
-    vwap: float64
-}
-```
+H1–H12 and H14–H19 are **Proposed**. H13 is **Deferred**. Nothing in the historical V1 notebooks, optimiser reports, or HMM smoke tests moves these states. Those artefacts were not run under this protocol.
 
 ---
 
-## 11. Trade Archetypes
+## 24. From hypothesis to code
 
-### 11.1 Bounce Trade
+```text
+Hypothesis
+    ↓
+Experiment specification
+    ↓
+Research notebook
+    ↓
+Labels / features / model / experiment
+    ↓
+Statistical + economic evaluation
+    ↓
+Decision
+    ↓
+Reusable implementation
+    ↓
+Tests
+    ↓
+Backtest integration
+    ↓
+Composition
+```
 
-**Setup:** Price approaches a significant wall, and the wall shows signs of absorbing aggressive flow.
+The notebook is where the hypothesis is investigated and where the first
+research implementation is written. It is not disposable analysis. Components
+that subsequent experiments or the strategy pipeline depend on are extracted
+into the project library while the notebook still runs. The aim is that the
+research programme produces much of the foundation of the paper-trading system.
+That is an objective, not a guarantee, and not a claim that every notebook
+cell becomes production code.
 
-| Phase | Condition |
+Code is promoted deliberately across five tiers:
+
+| Tier | Role |
 |---|---|
-| **Detection** | Wall with $ W_p > W_{\min} $; price within $ k \cdot \sigma $ of wall |
-| **Confirmation** | Aggression declining; CVD diverging; microprice shifting away from wall |
-| **Entry** | Confirmed reversal: e.g., microprice crossed back by $ \delta_{\text{entry}} $ |
-| **Target** | Nearest destination level on the liquidity map in the bounce direction |
-| **Stop** | Wall break level (price trades through + wall depth collapses) |
+| Exploration code | Notebook cells, scratch plots, one-off fits. May leak, may be rewritten. Cannot be imported by the strategy. |
+| Research library code | Reusable functions with tests and an explicit information set. Experiments call this, not a private copy. |
+| Backtest / replay code | The same decision logic, driven by historical events in time order. |
+| Paper-trading code | The same decision logic, driven by live events, with simulated fills and no capital at risk. |
+| Production / live code | Eligible only after §23. Out of scope until a live-eligibility review. |
 
-**Direction:** Always away from the wall. A bounce off a bid-side wall is a long entry. A bounce off an ask-side wall is a short entry.
+A notebook-only strategy that cannot be stepped one event at a time is not an
+implementation of this architecture. Forecast, management, and execution clocks
+(§3.4) have to be representable as sequential updates.
 
-#### 11.1.1 V1 Bounce Detection Algorithm
+---
 
-The following pseudocode defines the exact V1 detection and entry logic for `TriggerDecisionEngine`. All thresholds reference configuration parameters from §27.
+## 25. Hypothesis implementation map
 
+No row below is a result. Status is the lifecycle state, not a performance claim.
+
+| Id | Research question | Required data | Notebook | Dependencies | Research output | Reusable component | Integration target | Validation gate | Status |
+|---|---|---|---|---|---|---|---|---|---|
+| H1 | Does a Student-\(t\) model calibrate better than Gaussian for density, VaR, and ES? | ~5y 1-minute prices | `02_return_distributions` | Versioned 1-minute set | Calibration and density comparison | Tail / distribution estimator | Tide risk; Wave densities | Statistical + calibration | Proposed |
+| H2 | Do filtered regime probabilities improve those forecasts vs the unconditional distribution retained by H1? | Same, plus a declared state model | `03_regime_models` | Retained H1 benchmark; Student-\(t\) rejection does not block it | \(\pi_{t\mid t}\) forecast increment | Regime-state estimator | Wave and Tide inputs | Forecast increment vs retained unconditional model | Proposed |
+| H3 | Do lagged factor/PCA residuals add information beyond own-price history? | 1-minute plus a frozen cross-asset panel | `04_factor_models` | H1; panel is a useful prerequisite | Factor-residual increment | Factor-state estimator | Wave and Tide inputs | Forecast increment vs own-price | Proposed |
+| H4 | Do distribution or first-passage decisions improve after-cost outcomes vs hard-label Wave and always-in-market? | 1-minute; costs declared | `05_wave_probability` | H1; H2/H3 only if retained; frozen dumb sizer | Decision-quality result | Wave forecast used by a decision experiment | Wave → Decision | Economic, after cost, component isolation | Proposed |
+| H5 | Does an ES/margin budget improve the left tail vs unconstrained Wave? | Same parent decisions as the control | `06_tide_risk` | Unconstrained parent (H4 or a declared simpler parent) | Constrained vs unconstrained outcomes | Risk-budget constraint | Decision, under Tide | Economic + risk | Proposed |
+| H6 | Does a pre-registered opportunity/risk ratio beat equal or vol-targeted sizing under the same budget? | Same | `07_allocation` | H5 | Sizing comparison | Candidate allocator | Decision | Economic under a common ES budget | Proposed |
+| H7 | Does \(O_t\) still move short-horizon or first-passage forecasts after Tide/Wave? | Prospective L2 only | `08_ripple_information` | Running L2 collector; frozen Tide/Wave state | Information increment | Order-flow feature engine | Ripple information | Forecast increment; economic test is separate | Proposed |
+| H8 | Does the best fixed execution policy beat market-on-signal with the parent decision held fixed? | Frozen parent decisions; L2 for confirmatory fills; 1-minute proxies are exploration only | `09_execution_baselines` | Frozen parent stream; L2 for confirmation | Fixed-policy implementation shortfall | Execution simulator | Execution, under Ripple | Execution gate; counterfactual parent | Proposed |
+| H9 | Do frozen bounce/breakout policies beat nested non-microstructure policies after costs? | Prospective L2 | `10_archetypes` | L2 sufficient for walls; pre-registered parameters | Archetype increment or rejection | Candidate policy only if retained | Ripple policy | Economic after cost | Proposed |
+| H10 | Does the composed system beat the best simpler rung after costs on untouched data? | The composed event stream | `11_composition` | Retained pieces integrated; untouched test unused for selection | Stack increment or rejection | Composed strategy under test | Full pipeline | Full §19 plus composition | Proposed |
+| H11 | Do predictive maps break more across structural change than across ordinary regime moves? | The maps under test | `12_nonstationarity` | Useful once H1–H4 exist; does not block them | Break vs regime comparison | Model-break monitor | Safety / paper monitoring | Diagnostic protocol | Proposed |
+| H12 | Does timestamp-safe event state improve Tide/Wave forecasts? | A corpus with earliest-available timestamps | `13_news` | Independent; corpus is hard | Event-state increment | Structured event features, never orders | Tide/Wave inputs | Leakage audit plus forecast increment | Proposed |
+| H13 | Does separating USD/AUD from BTC/USD improve AUD ES? | AUD FX path aligned to the book | `14_fx` | Deferred | Not started | None until un-deferred | Portfolio risk | Not open | Deferred |
+| H14 | Do sequential binary hold/full-exit rules beat static exits at fixed size? | 1-minute for the non-L2 branch; L2 only for the microstructure branch | `15_dynamic_exit` | Frozen entries; H4 useful | Binary-exit increment | Binary exit policy | Position management | Post-entry sequential; size fixed | Proposed |
+| H15 | Does open-position Tide re-authorisation beat entry-only risk approval? | Parent entries; risk state | `16_continuous_tide` | H5 or a declared entry-only budget | Risk-path comparison | Open-position risk authoriser | Tide → Decision while in position | Isolated from H14 and H19 | Proposed |
+| H16 | Do dynamic walls add information on penetration, rejection, absorption, replenishment, withdrawal? | Prospective L2 | `17_dynamic_walls` | L2; H7 features useful, not assumed true | Wall-information increment | Wall-state estimator | Ripple liquidity | Information first; economic policy separate | Proposed |
+| H17 | Does choosing among wait, reprice, cancel, and passive/aggressive styles beat the best H8 style? | Prospective L2 and order outcomes; authorised size fixed | `18_dynamic_execution` | H8 | Dynamic vs fixed implementation shortfall | Execution selector | Execution | Execution attribution | Proposed |
+| H18 | Does conditional passive liquidity provision improve net execution without unacceptable adverse selection or inventory? | Prospective L2 and order outcomes | `19_liquidity_provision` | H8; H17 only if that is the named parent | Passive-provision increment | Conditional passive policy | Execution | Execution + inventory | Proposed |
+| H19 | Does changing size after entry beat the best H14 binary policy? | Frozen H14 parent; L2 for confirmation | `20_scaling_management` | H14 | Scale vs binary comparison | Post-entry size path | Position management | Isolated from H14 and H15 | Proposed |
+
+---
+
+## 26. Hypothesis dependencies
+
+Dependencies are not a single ladder. Hard dependencies block a confirmatory
+test. Useful prerequisites improve the experiment but are not assumed true.
+Independent work can start in parallel. Confirmatory branches cannot borrow
+evidence from a different sample.
+
+```text
+DATA FOUNDATION
+  1-minute history (available)
+  L2 collector (active, not yet a validation archive)
+        │
+        ├──────────────────────────────┐
+        ↓                              ↓
+       H1 tails                     L2 ACCUMULATION
+        ├── hard → H2 regimes          │
+        └── hard → H3 factors          ├── hard → H7 information
+                 │                     │         ↓ useful
+                 ↓ useful              │        H16 walls
+            H4 Wave decisions          │         │
+                   ↓ hard (parent)     │         │
+            H5 Tide budget             │         │
+                   ↓ hard              │         │
+            H6 allocation              │         │
+        │                              │
+        └──────────┬───────────────────┘
+                   ↓
+            COMPOSED WAVE / TIDE
+             (only retained pieces)
+                   │
+          ┌────────┴─────────┐
+          ↓                  ↓
+        H14 binary exit    H15 continuous Tide
+          ↓ hard
+        H19 scaling
+          │
+          └────────┬─────────┐
+                   ↓         ↓
+            H8 fixed exec   H9 archetypes (L2, independent candidate)
+                   ↓ hard
+                 H17 dynamic exec
+                   ↓ hard if named as parent
+                 H18 conditional liquidity
+                   │
+                   ↓
+            COMPOSED STRATEGY
+                   ↓ hard
+                  H10
+                   ↓
+            EVENT-TIME REPLAY
+                   ↓
+            SHADOW / PAPER
 ```
-function detect_bounce(walls, ripple, lmap, config):
-    for wall in walls where wall.side matches approach direction:
-        if wall.quality < config.ripple.wall_min_quality:
-            continue
 
-        # Proximity check: price must be within proximity_sigma * σ_P of wall
-        distance = abs(ripple.microprice - wall.price)
-        if distance > config.ripple.proximity_sigma * ripple.recent_sigma_P:
-            continue
+Reading the graph:
 
-        # Wall must be absorbing: aggressive flow high but wall depth stable
-        if ripple.liquidity_state not in {ABSORPTION, STABLE}:
-            continue
+- **Hard.** H2’s nested benchmark is the unconditional distribution retained by H1, which remains Gaussian when Student-\(t\) is rejected. H5 needs a parent decision. H6 needs H5’s budget. H17 needs H8’s best fixed style. H19 needs H14’s binary policy. H10 needs a composed pipeline. Confirmatory H7, H9, H16, H17, and H18 need prospective L2.
+- **Useful, not hard.** H3 before H4. H4 before H14. H7’s features before H16. A cross-asset panel before H3. H1–H4 before H11 is interpreted.
+- **Independent.** H11 can be designed as soon as one map exists and does not block H1. H12 waits on a corpus, not on H4. H9 is not on the path to H4; rejection of H9 leaves Tide/Wave intact.
+- **Parallel now.** 1-minute work on H1–H6, H11, H14’s non-L2 branch, and H15 proceeds while the L2 collector runs. Those streams are not merged into one result.
+- **Not dependencies.** H14, H15, and H19 stay separate experiments. H8, H17, and H18 stay separate. Forecast value, management value, and execution value stay attributable by freezing the upstream parent (§10.8).
 
-        # SETUP detected — enter confirmation window
-        setup = new BounceSetup(
-            wall          = wall,
-            side          = LONG if wall.side == BID else SHORT,
-            setup_ts      = ripple.timestamp,
-            stop_price    = wall.price,  # invalidation = wall break level
-            target_price  = lmap.nearest_dest_in_direction(setup.side),
-        )
-        return setup
+---
 
-    return None
+## 27. Notebook programme
 
-function confirm_bounce(setup, ripple, config):
-    elapsed = ripple.timestamp - setup.setup_ts
-    if elapsed > config.ripple.confirmation_window_ms:
-        return CANCEL  # confirmation window expired
+Logical notebook ids, not a command to rename files. The repository already
+contains historical V1 walkthroughs `notebooks/00_data_infrastructure` through
+`notebooks/09_hmm_extension`, aligned to `docs/history/strategy_v1.md`. They stay as history.
+New work uses the ids below and must not overwrite those files. The first
+physical notebooks are `notebooks/research/00_data_validation.ipynb`,
+`notebooks/research/01_baselines.ipynb`,
+`notebooks/research/02_return_distributions.ipynb`, and
+`notebooks/research/03_regime_models.ipynb`. Later physical paths are
+recorded in the experiment registry (§34).
 
-    # Three confirmation conditions — ALL must be true:
-    # 1. Aggressive flow declining (toward exhaustion)
-    flow_declining = ripple.cvd_slope * setup.side_sign < 0
-        OR abs(ripple.cvd_slope) < config.ripple.exhaustion_cvd_slope_thresh
-
-    # 2. Microprice shifting away from wall
-    microprice_shift = (ripple.microprice - setup.wall.price) * setup.side_sign
-    shifted = microprice_shift > config.ripple.bounce_microprice_shift_ticks * tick_size
-
-    # 3. Imbalance favoring bounce direction
-    imbalance_ok = ripple.imbalance * setup.side_sign > config.ripple.bounce_imbalance_thresh
-
-    if flow_declining AND shifted AND imbalance_ok:
-        return CONFIRMED
-    return WAIT
-```
-
-**`side_sign`**: +1 for LONG, −1 for SHORT. This convention is used throughout.
-
-**Config parameters used** (add to §27.3 if not present):
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `ripple.proximity_sigma` | float64 | 2.0 | Wall proximity zone in σ units |
-| `ripple.bounce_microprice_shift_ticks` | float64 | 3.0 | Microprice ticks away from wall for confirmation |
-| `ripple.bounce_imbalance_thresh` | float64 | 0.1 | Minimum signed imbalance for confirmation |
-| `ripple.exhaustion_cvd_slope_thresh` | float64 | 0.01 | CVD slope below this = flow exhausting |
-
-### 11.2 Breakout Trade
-
-**Setup:** Price approaches a significant wall, and the wall shows signs of failing (withdrawal, rapid consumption).
-
-| Phase | Condition |
+| Notebook | Work |
 |---|---|
-| **Detection** | Wall with $ W_p > W_{\min} $; depth declining or being consumed |
-| **Confirmation** | Aggressive flow accelerating; CVD accelerating; trade sizes increasing |
-| **Entry** | Confirmed break: price through wall + depth < $ D_{\text{fail}} $ |
-| **Target** | Next liquidity destination beyond the broken wall |
-| **Stop** | Price reverses back through the broken level + wall re-forms |
+| `00_data_validation` | Timestamp integrity, gaps, leakage checks, dataset versions. Not a trading hypothesis. |
+| `01_baselines` | Benchmark ladder in §10.4, including vol-matched and cost-matched controls. |
+| `02_return_distributions` | H1 |
+| `03_regime_models` | H2 |
+| `04_factor_models` | H3 |
+| `05_wave_probability` | H4 |
+| `06_tide_risk` | H5 |
+| `07_allocation` | H6 |
+| `08_ripple_information` | H7 |
+| `09_execution_baselines` | H8 |
+| `10_archetypes` | H9 |
+| `11_composition` | H10 |
+| `12_nonstationarity` | H11 |
+| `13_news` | H12 |
+| `14_fx` | H13, only if un-deferred |
+| `15_dynamic_exit` | H14 |
+| `16_continuous_tide` | H15 |
+| `17_dynamic_walls` | H16 |
+| `18_dynamic_execution` | H17 |
+| `19_liquidity_provision` | H18 |
+| `20_scaling_management` | H19 |
 
-**Direction:** Through the wall. A breakout through an ask-side wall is a long entry. A breakout through a bid-side wall is a short entry.
-
-#### 11.2.1 V1 Breakout Detection Algorithm
-
-```
-function detect_breakout(walls, ripple, lmap, config):
-    for wall in walls:
-        if wall.quality < config.ripple.wall_min_quality:
-            continue
-
-        # Wall must be failing: depth declining rapidly or being consumed
-        depth_ratio = wall.depth / wall.initial_depth_at_detection
-        if depth_ratio > config.ripple.breakout_depth_fail_ratio:
-            continue  # wall still healthy, not failing
-
-        # Price must be at or through the wall
-        if wall.side == ASK:
-            if ripple.microprice < wall.price - tick_size:
-                continue  # price hasn't reached wall yet
-        else:  # BID wall
-            if ripple.microprice > wall.price + tick_size:
-                continue
-
-        # SETUP detected
-        setup = new BreakoutSetup(
-            wall          = wall,
-            side          = LONG if wall.side == ASK else SHORT,
-            setup_ts      = ripple.timestamp,
-            stop_price    = wall.price,  # invalidation = price reverses back through
-            target_price  = lmap.nearest_dest_beyond(wall.price, setup.side),
-        )
-        return setup
-
-    return None
-
-function confirm_breakout(setup, ripple, config):
-    elapsed = ripple.timestamp - setup.setup_ts
-    if elapsed > config.ripple.confirmation_window_ms:
-        return CANCEL
-
-    # Three confirmation conditions — ALL must be true:
-    # 1. Price has traded through the wall level
-    through = (ripple.last_trade_price - setup.wall.price) * setup.side_sign > 0
-
-    # 2. Wall depth collapsed below fail threshold
-    wall_failed = setup.wall.depth < config.ripple.breakout_depth_fail_abs
-        OR setup.wall.depth / setup.wall.initial_depth_at_detection
-           < config.ripple.breakout_depth_fail_ratio
-
-    # 3. Aggressive flow accelerating in breakout direction
-    flow_accel = ripple.cvd_slope * setup.side_sign
-                 > config.ripple.breakout_cvd_slope_thresh
-
-    if through AND wall_failed AND flow_accel:
-        return CONFIRMED
-    return WAIT
-```
-
-**Config parameters used:**
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `ripple.breakout_depth_fail_ratio` | float64 | 0.3 | Wall depth / initial depth below this = failing |
-| `ripple.breakout_depth_fail_abs` | float64 | 0.0 | Absolute depth below this = failed (0 = use ratio only) |
-| `ripple.breakout_cvd_slope_thresh` | float64 | 0.05 | Min signed CVD slope for breakout confirmation |
+H14–H19 do not share a single “position management” notebook. Forecast,
+management, and execution questions stay in different notebooks so their
+value can be attributed separately.
 
 ---
 
-## 12. Trade Lifecycle and State Machine
+## 28. Notebook contract
 
-Every trade passes through a defined lifecycle:
+Every hypothesis notebook has the same sections, in this order. Exploration
+that changes the question does not edit the notebook’s hypothesis. It opens a
+new experiment.
 
-```mermaid
-stateDiagram-v2
-    [*] --> SETUP : archetype detected
-    SETUP --> ENTRY : confirmation criteria met
-    SETUP --> CANCELLED : confirmation window expires or conditions invalidate
-    ENTRY --> CONFIRMATION : fill received, initial stop set
-    CONFIRMATION --> EXPANSION : price moves favorably past first threshold
-    CONFIRMATION --> EXIT : invalidation triggered (stop)
-    EXPANSION --> MATURATION : target zone reached or momentum fading
-    EXPANSION --> EXIT : invalidation triggered
-    MATURATION --> EXIT : target hit, exhaustion, time, or risk-budget exit
-    EXIT --> COOLDOWN : position closed
-    COOLDOWN --> [*] : cooldown expires, re-arm
-    CANCELLED --> [*]
+1. Objective
+2. Hypothesis
+3. Null
+4. Information set, including what is excluded and which clock applies
+5. Dataset and version
+6. Data-quality checks
+7. Label definition, including the intra-bar rule when barriers are used
+8. Baseline
+9. Model / method
+10. Training / validation / test split
+11. Experiment configuration
+12. Statistical evaluation
+13. Economic evaluation, or an explicit statement that the hypothesis is predictive only
+14. Calibration, when the object is a probability or a risk measure
+15. Ablation
+16. Robustness / sensitivity
+17. Failure analysis
+18. Result
+19. Decision: retain, reject, revise, or defer
+20. Reusable implementation extracted, and what stayed exploratory
+21. Next experiment
+
+---
+
+## 29. Reusable-code extraction
+
+Research notebooks discover and validate components. Reusable project modules
+hold the implementation that later experiments and the strategy pipeline import.
+
+```text
+Notebook prototype
+       ↓
+Reusable research function/class
+       ↓
+Tested library component
+       ↓
+Backtest/replay component
+       ↓
+Live-compatible component
 ```
 
-### 12.1 State Definitions
+The last step is not taken until the component is Paper ready or, for pure
+infrastructure, until its safety behaviour is defined. Examples, not APIs:
 
-| State | Description |
+| Hypothesis | Extract |
 |---|---|
-| `SETUP` | Archetype detected, awaiting confirmation |
-| `ENTRY` | Confirmation met, order submitted or filled |
-| `CONFIRMATION` | Position open, in initial risk zone, awaiting first favorable move |
-| `EXPANSION` | Price has moved favorably; trail stop engaged, scaling may occur |
-| `MATURATION` | Near target or momentum fading; tightening management |
-| `EXIT` | Closing position; executing exit order(s) |
-| `COOLDOWN` | Position closed; no new entries until cooldown expires |
-| `CANCELLED` | Setup invalidated before entry |
+| H1 | Distribution estimator → tail-risk model → risk-model library → Tide risk component |
+| H2 | Regime estimator → regime-state component → Wave/Tide input |
+| H3 | Factor model → factor-state component → Wave/Tide input |
+| H4 | Forecast and first-passage objects → Wave research component |
+| H5–H6 | Risk budget and candidate allocator → Decision inputs |
+| H7 | Order-flow feature engine → Ripple information component |
+| H8, H17, H18 | Execution policies and simulator → paper execution component |
+| H14, H19 | Position-management policies → management component |
+| H15 | Open-position risk authoriser → Tide component |
+| H16 | Wall-state estimator → Ripple liquidity component |
 
-### 12.2 Transition Triggers
+Exact class names are not specified here. What is specified is that a retained
+result must be callable outside the notebook that found it.
 
-| Transition | Trigger |
+---
+
+## 30. Build while researching
+
+The programme does not finish “all research” and then start software.
+
+```text
+research hypothesis
+→ build the minimal implementation
+→ test the hypothesis
+→ improve the implementation
+→ validate
+→ keep the reusable component
+→ build the next hypothesis on top
+```
+
+By the end of the programme the intended foundation is:
+
+```text
+Validated or explicitly rejected research
++ reusable modelling code
++ feature library
++ risk, decision, and execution components
++ event-time backtester
++ paper-trading interfaces
++ tests
+= a base on which autonomous paper trading can be attempted
+```
+
+Rejected hypotheses still leave the negative result, the tests, and the
+baseline they failed to beat. They do not leave a silent feature in the
+strategy.
+
+---
+
+## 31. Implementation roadmap
+
+Phases are workstreams. They overlap where the dependency graph allows. A
+phase is not a claim that its hypotheses will succeed.
+
+### Phase 0 — Data foundation
+
+Validate the historical 1-minute dataset. Keep the prospective L2 collector
+running as its own workstream: raw events, exchange and local timestamps,
+sequence ids, snapshots, trades, session metadata, quality flags, and
+regenerable derived sets. Add dataset/version metadata. Event-time replay
+starts here as infrastructure, not as a strategy result. Historical L2 is not
+invented to fill the gap.
+
+### Phase 1 — Research infrastructure
+
+Experiment framework, dataset loading, train/validation/test splits,
+walk-forward, benchmarks, metrics, statistical tests, calibration diagnostics,
+the experiment registry, result persistence, and code-version tracking.
+Without this, later notebooks cannot be confirmatory.
+
+### Phase 2 — Statistical foundations
+
+Gaussian and Student-\(t\) models, regime models, factor/PCA models, return
+distributions, and first-passage labels with an explicit intra-bar rule.
+Supports H1–H3. Filtered probabilities only.
+
+### Phase 3 — Wave
+
+Wave features, probabilistic forecasts, barrier and first-passage models,
+calibration, and Wave decision experiments under a frozen sizer. Supports H4.
+
+### Phase 4 — Tide
+
+Portfolio and risk state, covariance or factor state as far as H3 justifies,
+ES, stress, budgets, candidate allocation, and RORAC only as a pre-registered
+candidate. Supports H5–H6. Entry-only authorisation is the baseline that H15
+will later challenge.
+
+### Phase 5 — Ripple information
+
+Order-flow reconstruction from the prospective archive, OFI, CVD, imbalance,
+microprice, depth, liquidity-state features, and wall representation.
+Supports H7 and H16. Does not start confirmatory tests on a sample too short
+to be declared in the protocol.
+
+### Phase 6 — Trade management
+
+Position state, sequential decisions, static exit baselines, dynamic binary
+exit, continuous Tide risk authorisation, and scaling/partial reduction as
+three implementations. Supports H14, H15, and H19 separately.
+
+### Phase 7 — Execution
+
+Fill simulator, market, passive, aggressive limit, waiting, repricing,
+cancellation, partial fills, queue assumptions, impact, and adverse selection.
+Supports H8, then H17, then H18. Proxy costs on 1-minute data stay labelled
+as proxies.
+
+### Phase 8 — Composition
+
+One event-time pipeline:
+
+```text
+Data → Tide → Wave → Decision → Ripple → Execution
+    → Position → Risk / P&L → feedback
+```
+
+Authority flows that way. Information may still enter Tide, Wave, and Ripple
+from the tape (§3.3). Then run H10. Forecast, management, and execution value
+remain separable by freezing the upstream parent.
+
+### Phase 9 — Paper trading
+
+Only through the gates in §32:
+
+```text
+historical replay
+→ deterministic replay
+→ historical out-of-sample
+→ shadow on live data
+→ paper execution
+→ paper monitoring
+→ paper validation
+→ live-eligibility review
+```
+
+The review can conclude “not eligible”.
+
+---
+
+## 32. Implementation gates
+
+No numerical thresholds are introduced here. A gate passes when its declared
+protocol is satisfied, including an explicit failure path.
+
+| Gate | Requirement |
 |---|---|
-| SETUP → ENTRY | Confirmation criteria met within confirmation window |
-| SETUP → CANCELLED | Confirmation window expires, wall state changes, permissions revoked |
-| ENTRY → CONFIRMATION | Fill received |
-| CONFIRMATION → EXPANSION | Unrealized PnL exceeds $ \theta_{\text{expand}} \cdot \hat{\sigma}_P $ |
-| CONFIRMATION → EXIT | Price hits invalidation level |
-| EXPANSION → EXPANSION | Scale-in fill received (self-transition: update position, set new tranche stop) |
-| EXPANSION → MATURATION | Price enters target zone or momentum indicators fade |
-| EXPANSION → EXIT | Trailing stop hit, risk budget exceeded, or time limit |
-| MATURATION → EXPANSION | Price re-accelerates after reaching target zone (only if no scale-out yet) |
-| MATURATION → EXIT | Any exit condition met (see §13) |
-| EXIT → COOLDOWN | All exit fills received |
-| COOLDOWN → [*] | Cooldown timer expires |
-| *any active state* → EXIT | Risk-budget exit (Tide budget exhausted or risk multiplier drops to 0) |
-| *any active state* → EXIT | Wave permissions revoked for current archetype while trade is open |
+| Research | §10.1 protocol registered against a stable experiment id |
+| Statistical | Pre-registered statistical criterion met or the null retained |
+| Economic | After-cost result reported when the claim is economic; omitted only for a declared information-only hypothesis |
+| Calibration | Probabilities and risk measures assessed with the diagnostics in §10.3 |
+| Robustness | Sensitivity and walk-forward, or an explicit reason walk-forward does not apply |
+| Leakage | Information set matches the clock; smoothed states, same-bar labels, and full-sample normalisation are absent |
+| Code | Reusable implementation exists outside the notebook |
+| Unit test | Core logic tested, including the failure path that motivated the change |
+| Replay | Event-time replay is deterministic for the same events and code version |
+| Integration | Component runs inside the parent strategy without changing frozen parents |
+| Attribution | Forecast, management, and execution increments are not credited to each other |
+| Safety | Stale data, gaps, and model failure have a defined safe behaviour |
+| Paper | Interface consumes live events and emits hypothetical actions only |
+| Paper validation | The declared observation window and monitoring set in §37 were completed |
 
-**Note on forced exits:** Risk-budget and permission-revocation exits can trigger from any active state (CONFIRMATION, EXPANSION, MATURATION). These have **highest** priority and override all other logic. The trade transitions directly to EXIT regardless of current state.
-
-### 12.3 Concurrent Trades
-
-In **V1**, Ripple manages **at most one open trade per symbol at a time.** A new setup cannot enter ENTRY while another trade is in any active state (CONFIRMATION, EXPANSION, MATURATION, EXIT). The COOLDOWN state also blocks new entries.
-
-In later versions, concurrent trades (e.g., one bounce and one breakout on different walls) may be supported, subject to Tide position limits.
-
----
-
-## 13. Exit Taxonomy
-
-Every exit belongs to one of five categories:
-
-| Exit Type | Trigger | Priority |
-|---|---|---|
-| **Invalidation** | Trade thesis disproven (stop hit, wall re-forms after breakout, wall breaks after bounce) | Highest — execute immediately |
-| **Target** | Price reaches a liquidity destination on the map | Normal — scale out |
-| **Exhaustion** | Momentum fading (CVD flattening, trade rate declining, impact increasing) | Normal — tighten or exit |
-| **Time** | Trade has been open longer than $ T_{\max} $ without reaching target | Normal — exit at market |
-| **Risk-budget** | Consumed ES approaching sleeve budget; Tide risk multiplier drops | Highest — reduce or exit |
-
-### 13.1 Exit Priority
-
-Risk-budget and invalidation exits override all other logic. If a risk-budget exit triggers, Ripple must reduce position regardless of other conditions.
-
-**Evaluation order:** On each tick, the `TradeLifecycleEngine` checks exits in this exact order. The first match fires.
-
-1. **Risk-budget** — `risk.consumed_es >= risk.es_budget * config.risk.budget_exit_threshold` OR `tide.risk_multiplier == 0`
-2. **Invalidation** — price crosses stop\_price in the adverse direction
-3. **Time** — `hold_time_ms > config.ripple.max_hold_time_ms`
-4. **Target** — price crosses target\_price in the favorable direction
-5. **Exhaustion** — momentum fading conditions (see §13.3)
-
-### 13.2 Partial Exits
-
-Target and exhaustion exits may be partial (scale-out). Invalidation and risk-budget exits are typically full (close 100% of remaining position).
-
-### 13.3 V1 Exit Detection Conditions
-
-Each exit type has explicit, deterministic detection logic:
-
-#### 13.3.1 Invalidation Exit
-
-```
-function check_invalidation(trade, ripple):
-    # Bounce: wall breaks — price trades through wall + wall depth collapsed
-    if trade.archetype == BOUNCE:
-        price_through = (ripple.last_trade_price - trade.wall_price) * (-trade.side_sign) > 0
-        wall_gone = nearest_wall_at(trade.wall_price).depth
-                    < config.ripple.breakout_depth_fail_abs
-                    OR nearest_wall_at(trade.wall_price) is None
-        return price_through AND wall_gone
-
-    # Breakout: price reverses back through broken level + wall re-forms
-    if trade.archetype == BREAKOUT:
-        price_reversed = (trade.wall_price - ripple.last_trade_price) * trade.side_sign > 0
-        wall_reformed = nearest_wall_at(trade.wall_price) is not None
-                        AND nearest_wall_at(trade.wall_price).quality > config.ripple.wall_min_quality
-        return price_reversed AND wall_reformed
-```
-
-**Order type:** MARKET. **Urgency:** IMMEDIATE. **Quantity:** 100% of remaining position.
-
-#### 13.3.2 Target Exit
-
-```
-function check_target(trade, ripple, lmap):
-    price_at_target = (ripple.microprice - trade.current_target_price) * trade.side_sign >= 0
-    return price_at_target
-```
-
-When triggered, scale out the next fraction per `config.ripple.scale_out_fractions`. After each scale-out, advance `current_target_price` to the next liquidity map destination. See §14.2.
-
-**Order type:** LIMIT at `current_target_price`. **Urgency:** NORMAL. **Quantity:** next scale-out fraction.
-
-#### 13.3.3 Exhaustion Exit
-
-```
-function check_exhaustion(trade, ripple, config):
-    # ALL three conditions must hold simultaneously:
-    # 1. CVD slope near zero or adverse
-    cvd_fading = ripple.cvd_slope * trade.side_sign
-                 < config.ripple.exhaustion_cvd_slope_thresh
-
-    # 2. Trade rate declining (current rate < 50% of rate at entry)
-    rate_declining = ripple.trade_rate < trade.entry_trade_rate * 0.5
-
-    # 3. Impact increasing (market becoming thinner)
-    impact_rising = ripple.impact > trade.entry_impact * config.ripple.exhaustion_impact_ratio
-
-    return cvd_fading AND rate_declining AND impact_rising
-```
-
-**Config parameters:**
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `ripple.exhaustion_impact_ratio` | float64 | 1.5 | Impact must be this × entry impact |
-
-**Order type:** LIMIT. **Urgency:** NORMAL. **Quantity:** 100% of remaining position (full close on exhaustion).
-
-#### 13.3.4 Time Exit
-
-```
-function check_time(trade, timestamp, config):
-    return (timestamp - trade.entry_ts) > config.ripple.max_hold_time_ms
-```
-
-**Order type:** MARKET. **Urgency:** NORMAL. **Quantity:** 100% of remaining position.
-
-#### 13.3.5 Risk-Budget Exit
-
-```
-function check_risk_budget(risk_snapshot, config):
-    budget_fraction = risk_snapshot.consumed_es / risk_snapshot.es_budget
-    return budget_fraction >= config.risk.budget_exit_threshold
-        OR risk_snapshot.risk_multiplier == 0.0
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `risk.budget_exit_threshold` | float64 | 0.90 | Exit when consumed ES reaches this fraction of budget |
-
-**Order type:** MARKET. **Urgency:** IMMEDIATE. **Quantity:** 100% of remaining position.
+Research validated requires the research, statistical, and, where relevant,
+economic, calibration, robustness, and leakage gates. Integration validated
+adds code, unit test, replay, and integration. Paper ready adds safety, paper,
+attribution, and realistic costs. Paper validated adds the paper-validation
+gate. Live eligible adds an explicit review. None of these gates is implied by
+another.
 
 ---
 
-## 14. Scaling Logic
+## 33. Research artifacts
 
-### 14.1 Scale-In Rules
+A finished experiment, including a rejection, leaves a reproducible set:
 
-1. **Scale-in occurs only after Confirmation state.** No adding to a position that has not yet proven its initial thesis.
-2. Scale-in requires the trade to be in `EXPANSION` state.
-3. Each scale-in tranche must have its own invalidation level.
-4. Total position must remain within Tide's `max_position_usd` and ES budget.
-5. **V1: maximum 1 scale-in per trade** (2 tranches total: initial + 1 add). Later versions may allow more.
-
-#### 14.1.1 V1 Scale-In Trigger
-
-```
-function check_scale_in(trade, ripple, risk, config):
-    if trade.lifecycle_state != EXPANSION:
-        return False
-    if trade.scale_count >= config.ripple.max_scale_ins:
-        return False
-
-    # Price must have moved favorably by at least scale_in_threshold * σ_P
-    # beyond the entry price (not just beyond the expansion threshold)
-    favorable_move = (ripple.microprice - trade.entry_price) * trade.side_sign
-    if favorable_move < config.ripple.scale_in_threshold_sigma * ripple.recent_sigma_P:
-        return False
-
-    # Momentum must still be intact
-    if ripple.cvd_slope * trade.side_sign < config.ripple.scale_in_cvd_slope_min:
-        return False
-
-    # Risk budget must allow the additional size
-    additional_qty = trade.initial_quantity  # each tranche = same size as initial
-    if not risk.check_new_order(additional_qty, ripple.microprice):
-        return False
-
-    return True
+```text
+Experiment
+├── hypothesis
+├── protocol
+├── dataset version
+├── code version
+├── configuration
+├── notebook
+├── model, if any
+├── results
+├── plots and tables
+├── statistical tests
+├── economic evaluation, if the claim is economic
+├── decision
+├── reusable code
+├── tests
+└── integration status
 ```
 
-When scale-in triggers:
-- Submit order for `additional_qty` at current market (or limit near microprice for bounce)
-- Set the new tranche's invalidation at: `trade.entry_price` (breakeven for whole position)
-- The combined stop\_price moves to `trade.entry_price` (breakeven) after scale-in fill
+The set must be sufficient to answer why a component is in the strategy, or
+why it was refused, without reconstructing the argument from memory.
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `ripple.max_scale_ins` | int32 | 1 | Max scale-in tranches per trade |
-| `ripple.scale_in_threshold_sigma` | float64 | 2.0 | Min favorable move in σ before scale-in |
-| `ripple.scale_in_cvd_slope_min` | float64 | 0.02 | Min signed CVD slope to confirm momentum |
+---
 
-### 14.2 Scale-Out Rules
+## 34. Experiment registry
 
-1. Scale-out targets are determined by the liquidity map's destination levels.
-2. Scale-out is executed at predefined fractions (e.g., 1/3 at first target, 1/3 at second target, remainder at final target or trailing stop).
-3. After each scale-out, the invalidation level is tightened.
+The registry is a concept. Storage technology is not specified. Each
+experiment has a stable id: `EXP-H01` … `EXP-H19`. A revision is a new id
+(`EXP-H01b`), not an overwrite.
 
-#### 14.2.1 V1 Scale-Out Algorithm
+Tracked fields:
 
-At trade entry, the `TradeLifecycleEngine` selects up to 3 target levels from the liquidity map, ranked by `dest_score` in the favorable direction:
-
-```
-function compute_scale_out_plan(trade, lmap, config):
-    destinations = lmap.get_destinations_in_direction(trade.side)
-        .filter(d => d.price * trade.side_sign > trade.entry_price * trade.side_sign)
-        .sort_by(dest_score, descending)
-        .take(len(config.ripple.scale_out_fractions))
-
-    plan = []
-    remaining = trade.quantity
-    for i, dest in enumerate(destinations):
-        fraction = config.ripple.scale_out_fractions[i]
-        qty = floor(trade.initial_quantity * fraction, lot_size)
-        plan.append(ScaleOutLevel(
-            target_price = dest.price,
-            quantity      = min(qty, remaining),
-            new_stop      = compute_tightened_stop(trade, i, config),
-        ))
-        remaining -= qty
-
-    # If fewer destinations than fractions, last level gets remainder
-    if remaining > 0 and len(plan) > 0:
-        plan[-1].quantity += remaining
-
-    return plan
-
-function compute_tightened_stop(trade, scale_out_index, config):
-    if scale_out_index == 0:
-        return trade.entry_price  # move to breakeven after first scale-out
-    else:
-        # Move stop to prior target level (lock in profits)
-        return trade.scale_out_plan[scale_out_index - 1].target_price
+```text
+experiment_id
+hypothesis
+parent hypothesis
+dataset version
+code version
+status                  # lifecycle state, Rejected, Revised, or Deferred
+result                  # empty until the protocol completes
+decision                # retain / reject / revise / defer
+component produced
+validation state
+paper state
 ```
 
-When a scale-out level is reached:
-1. Submit LIMIT order for the planned quantity at the target price.
-2. After fill, update `trade.stop_price` to the tightened level.
-3. Advance `trade.current_target_index` to the next level.
-4. If all scale-out levels are filled, the remaining position (if any) rides a trailing stop.
+The registry is the only place a status may move. Narrative reports and
+notebook outputs do not move it by themselves.
 
-### 14.3 Trailing Stop
+---
 
-After all planned scale-out levels have been reached OR when the trade enters `MATURATION`, the stop becomes a trailing stop:
+## 35. One decision path for research and paper
 
-```
-function update_trailing_stop(trade, ripple, config):
-    if not trade.trailing_stop_active:
-        return
+The backtester, the replay engine, and the eventual paper-trading engine
+should share the same decision logic wherever practical.
 
-    # Trail distance = config multiplier * recent σ_P
-    trail_distance = config.ripple.trailing_stop_sigma * ripple.recent_sigma_P
+Avoid:
 
-    if trade.side == LONG:
-        new_stop = ripple.microprice - trail_distance
-        trade.stop_price = max(trade.stop_price, new_stop)  # only tighten, never loosen
-    else:
-        new_stop = ripple.microprice + trail_distance
-        trade.stop_price = min(trade.stop_price, new_stop)
+```text
+research implementation ≠ backtest implementation ≠ paper implementation
 ```
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `ripple.trailing_stop_sigma` | float64 | 2.0 | Trail distance in σ units |
+Prefer:
 
-### 14.4 Position Sizing Formula
-
-**Step 1 — Risk-denominated raw size.** Given a dollar risk budget per trade (`target_risk_usd`, a configuration parameter, e.g., 50 USDT) and the distance to the invalidation level:
-
-$$
-Q_{\text{risk}} = \frac{\text{target\_risk\_usd}}{|P_{\text{entry}} - P_{\text{stop}}|}
-$$
-
-This is the position size such that a full stop-out loses exactly `target_risk_usd`.
-
-**Step 2 — Volatility adjustment.** Scale by the ratio of a target volatility to the current realized volatility, so the strategy takes larger positions in calm markets and smaller positions in volatile ones:
-
-$$
-Q_{\text{raw}} = Q_{\text{risk}} \cdot \frac{\sigma_{\text{target}}}{\hat{\sigma}_{\text{realized}}}
-$$
-
-where:
-- $ \sigma_{\text{target}} $ = the annualized volatility at which the strategy is designed to operate (configuration parameter, e.g., 0.60 for 60%)
-- $ \hat{\sigma}_{\text{realized}} $ = the trailing realized annualized volatility of the asset (see §7.4.1)
-
-When $ \hat{\sigma}_{\text{realized}} > \sigma_{\text{target}} $, sizing shrinks. When $ \hat{\sigma}_{\text{realized}} < \sigma_{\text{target}} $, sizing grows. The ratio is clamped to $ [0.25, 2.0] $ to prevent extreme sizing in degenerate volatility conditions.
-
-**Step 3 — Tide throttle and budget clip.**
-
-$$
-Q_{\text{final}} = \text{clip}\!\left( Q_{\text{raw}} \cdot \text{tide.risk\_multiplier} \cdot R_{\text{budget}}, \; 0, \; Q_{\max} \right)
-$$
-
-where:
-- $ R_{\text{budget}} = \text{clip}\!\left(\frac{\text{es\_budget} - \text{consumed\_es}}{\text{es\_budget}},\; 0,\; 1\right) $ — remaining budget fraction
-- $ Q_{\max} = \text{tide.max\_position\_usd} / P_{\text{entry}} $ — hard cap from Tide
-
-**Invariant:** $ Q_{\text{final}} \leq Q_{\max} $ always. If $ R_{\text{budget}} = 0 $, no new position is allowed.
-
----
-
-## 15. Capital Allocation and Risk Budgeting
-
-### 15.1 Implementation Choices
-
-The system supports a hierarchy of risk constraints:
-
-| Level | What it constrains | Who sets it |
-|---|---|---|
-| **Global** | Total portfolio ES | Configuration / user |
-| **Strategy sleeve** | ES per strategy | Tide |
-| **Asset** | ES per asset across all strategies | Tide |
-| **Cell** (strategy × asset) | ES for a specific strategy on a specific asset | Tide |
-
-### 15.2 Simple Global ES Throttle (V1)
-
-In V1, a single global ES budget suffices:
-
-$$
-\sum_{\text{all positions}} \text{ES}_i \leq \text{ES}_{\text{global}}
-$$
-
-where $ \text{ES}_i $ is the parametric ES estimate for position $ i $:
-
-$$
-\text{ES}_i \approx Q_i \cdot P_i \cdot \hat{\sigma}_i \cdot \sqrt{\Delta t_{\text{horizon}}} \cdot \frac{\phi(z_\alpha)}{1 - \alpha}
-$$
-
-with the default $ \alpha = 0.95 $ (see §6). Here $ Q_i \cdot P_i $ is the notional exposure, $ \hat{\sigma}_i $ is the annualized realized volatility of asset $ i $, and $ \Delta t_{\text{horizon}} $ is the risk horizon expressed as a fraction of a year. The multiplier $ \phi(z_{0.95})/(1-0.95) \approx 2.063 $.
-
-**Example:** For a 1-day horizon with 365-day year: $ \sqrt{1/365} \approx 0.0523 $. A 100 USDT notional on an asset with 80% annualized vol gives $ \text{ES}_i \approx 100 \times 0.80 \times 0.0523 \times 2.063 \approx 8.63 $ USDT.
-
-### 15.3 Risk Budget Flow
-
-```mermaid
-flowchart TD
-    CONFIG["Configuration: ES_global, max_position_usd"] --> TIDE
-    TIDE["TideEngine"] -->|"es_budget, risk_multiplier, bias"| RE["RiskEngine (C++)"]
-    RE -->|"check_new_order(Q, P)"| PASS{Budget OK?}
-    PASS -->|yes| EXEC["Execute Order"]
-    PASS -->|no| REJECT["Reject / Reduce Size"]
-    EXEC -->|Fill| RE
-    RE -->|"consumed_es updated"| TIDE
-    TIDE -->|"risk-budget exit signal"| TLC["TradeLifecycleEngine"]
+```text
+shared strategy / model logic
+        ↓
+historical event source  or  live event source
+        ↓
+same decision pipeline
+        ↓
+simulated execution  or  paper execution
 ```
 
-### 15.4 Hierarchical ES (Later)
-
-Full Euler decomposition as described in §7.4.5, with per-cell budgets and dynamic rebalancing.
-
----
-
-## 16. Feature Schema
-
-### 16.1 Namespace: `tide.*`
-
-| Feature | Type | Cadence | Category |
-|---|---|---|---|
-| `tide.crypto_beta_return` | float64 | 60s | Raw |
-| `tide.realized_vol` | float64 | 60s | Derived |
-| `tide.funding_rate` | float64 | 8h | Raw |
-| `tide.oi_change_pct` | float64 | 60s | Derived |
-| `tide.vol_regime` | enum | 60s | Model output |
-| `tide.macro_sentiment` | float64 | 300s | Derived |
-| `tide.liquidity_stress` | float64 | 60s | Derived |
-| `tide.bias` | enum | 60s | Model output |
-| `tide.risk_multiplier` | float64 | 60s | Model output |
-| `tide.max_position_usd` | float64 | 60s | Config-derived |
-| `tide.es_budget` | float64 | 60s | Model output |
-
-### 16.2 Namespace: `wave.*`
-
-| Feature | Type | Cadence | Category |
-|---|---|---|---|
-| `wave.trend_efficiency` | float64 | 5s | Derived |
-| `wave.dispersion` | float64 | 5s | Derived |
-| `wave.absorption_ratio` | float64 | 60s | Derived |
-| `wave.residual_dislocation` | float64 | 5s | Derived |
-| `wave.distance_vwap` | float64 | 5s | Derived |
-| `wave.distance_session_high` | float64 | 5s | Derived |
-| `wave.distance_session_low` | float64 | 5s | Derived |
-| `wave.regime` | enum | 5s | Model output |
-| `wave.permissions` | bitfield | 5s | Model output |
-
-### 16.3 Namespace: `ripple.*`
-
-| Feature | Type | Cadence | Category |
-|---|---|---|---|
-| `ripple.imbalance` | float64 | per-event | Derived |
-| `ripple.microprice` | float64 | per-event | Derived |
-| `ripple.ofi` | float64 | per-event | Derived |
-| `ripple.cvd` | float64 | per-event | Derived |
-| `ripple.cvd_slope` | float64 | 100ms | Derived |
-| `ripple.impact` | float64 | 100ms | Derived |
-| `ripple.vpin` | float64 | 1s | Derived |
-| `ripple.lsi` | float64 | 100ms | Derived |
-| `ripple.liquidity_state` | enum | per-event | Model output |
-| `ripple.best_bid_wall_quality` | float64 | per-event | Derived |
-| `ripple.best_ask_wall_quality` | float64 | per-event | Derived |
-
-### 16.4 Namespace: `liquidity_map.*`
-
-| Feature | Type | Cadence | Category |
-|---|---|---|---|
-| `liquidity_map.nearest_bid_wall` | float64 | per-event | Derived |
-| `liquidity_map.nearest_ask_wall` | float64 | per-event | Derived |
-| `liquidity_map.poc` | float64 | 1s | Derived |
-| `liquidity_map.vwap` | float64 | 1s | Derived |
-| `liquidity_map.void_count` | int32 | 1s | Derived |
-| `liquidity_map.levels` | array | per-event | Composite |
-
-### 16.5 Namespace: `risk.*`
-
-| Feature | Type | Cadence | Category |
-|---|---|---|---|
-| `risk.consumed_es` | float64 | per-fill | Derived |
-| `risk.remaining_budget` | float64 | per-fill | Derived |
-| `risk.position_usd` | float64 | per-fill | Derived |
-| `risk.unrealized_pnl` | float64 | 100ms | Derived |
-
-### 16.6 Namespace: `trade.*`
-
-| Feature | Type | Cadence | Category |
-|---|---|---|---|
-| `trade.state` | enum | per-event | State |
-| `trade.archetype` | enum | on-entry | Label |
-| `trade.entry_price` | float64 | on-fill | Raw |
-| `trade.stop_price` | float64 | per-event | Derived |
-| `trade.target_price` | float64 | per-event | Derived |
-| `trade.hold_time_ms` | int64 | per-event | Derived |
-| `trade.unrealized_pnl` | float64 | per-event | Derived |
-| `trade.scale_count` | int32 | on-fill | State |
+This matters because the strategy has three clocks and an event-time
+information set. A notebook that uses the whole sample, a smoothed regime
+probability, or a same-bar high to decide cannot be dropped onto a live
+stream and still be the same strategy. Shared logic is the mechanism that
+keeps §3.4 and §8.8 intact when the code moves from research to paper.
 
 ---
 
-## 17. Data Contracts
-
-### 17.1 Market Event
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | Exchange timestamp (ms) |
-| `symbol` | string | Trading pair |
-| `event_type` | enum | `TRADE`, `DEPTH_UPDATE`, `DEPTH_SNAPSHOT` |
-
-### 17.2 Trade Event
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | Exchange timestamp (ms) |
-| `symbol` | string | Trading pair |
-| `price` | float64 | Execution price |
-| `quantity` | float64 | Executed quantity |
-| `is_buyer_maker` | bool | True if the buyer was the maker (sell-initiated trade) |
-
-### 17.3 Depth Update
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | Exchange timestamp (ms) |
-| `symbol` | string | Trading pair |
-| `bids` | array of (price, qty) | Updated bid levels |
-| `asks` | array of (price, qty) | Updated ask levels |
-| `first_update_id` | int64 | Sequence number (for sync) |
-| `last_update_id` | int64 | Sequence number |
-
-### 17.4 Feature Snapshot
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | Snapshot time |
-| `features` | map<string, variant> | Feature namespace.name → value |
-
-### 17.5 Wave State
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | State time |
-| `regime` | enum | Current Wave regime |
-| `trend_efficiency` | float64 | |
-| `dispersion` | float64 | |
-| `absorption_ratio` | float64 | |
-| `permissions` | PermissionSet | Allowed trade archetypes |
-
-### 17.6 Ripple State
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | State time |
-| `liquidity_state` | enum | Current liquidity transition state |
-| `walls` | array of Wall | Active walls |
-| `microprice` | float64 | |
-| `imbalance` | float64 | |
-| `cvd` | float64 | |
-| `ofi` | float64 | |
-| `lsi` | float64 | |
-
-### 17.7 Trade State
-
-| Field | Type | Description |
-|---|---|---|
-| `trade_id` | string | Unique trade identifier |
-| `archetype` | enum | BOUNCE / BREAKOUT |
-| `side` | enum | LONG / SHORT |
-| `state` | enum | Lifecycle state |
-| `entry_price` | float64 | |
-| `stop_price` | float64 | |
-| `target_price` | float64 | |
-| `quantity` | float64 | Current position size |
-| `unrealized_pnl` | float64 | |
-| `hold_time_ms` | int64 | |
-| `scale_count` | int32 | |
-
-### 17.8 Risk Budget Snapshot
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | |
-| `es_budget` | float64 | Total ES budget for this cell |
-| `consumed_es` | float64 | ES currently consumed |
-| `risk_multiplier` | float64 | Tide risk multiplier |
-| `max_position_usd` | float64 | |
-| `bias` | enum | Tide directional bias |
-| `vol_regime` | enum | Tide volatility regime |
-
-### 17.9 Liquidity Map Snapshot
-
-See §10.4 for the full schema.
-
-### 17.10 Fill Event
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | Fill time (exchange timestamp, ms) |
-| `trade_id` | string | Trade identifier this fill belongs to |
-| `order_id` | string | Exchange order identifier |
-| `symbol` | string | Trading pair |
-| `side` | enum | `BUY` / `SELL` |
-| `price` | float64 | Fill price |
-| `quantity` | float64 | Filled quantity |
-| `commission` | float64 | Commission paid (quote currency) |
-| `is_maker` | bool | True if filled as maker |
-
-### 17.11 Wall
-
-| Field | Type | Description |
-|---|---|---|
-| `price` | float64 | Price level of the wall |
-| `depth` | float64 | Current resting depth ($ \mathcal{D}_p $) |
-| `side` | enum | `BID` / `ASK` |
-| `quality` | float64 | Wall quality score $ W_p $ (§9.5.7) |
-| `persistence` | float64 | $ \pi_p \in [0,1] $ |
-| `cancellation_rate` | float64 | $ c_p \in [0,1] $ |
-| `first_seen_ts` | int64 | Timestamp when wall was first detected |
-| `last_update_ts` | int64 | Timestamp of last depth change at this level |
-
-### 17.12 Permission Set
-
-| Field | Type | Description |
-|---|---|---|
-| `long_bounce` | enum | `FULL` / `REDUCED` / `DISABLED` |
-| `short_bounce` | enum | `FULL` / `REDUCED` / `DISABLED` |
-| `long_breakout` | enum | `FULL` / `REDUCED` / `DISABLED` |
-| `short_breakout` | enum | `FULL` / `REDUCED` / `DISABLED` |
-| `reduced_size_fraction` | float64 | Fraction of normal size when `REDUCED` (default 0.5) |
-
-**Encoding:** In C++, the permission set may be encoded as a bitfield for fast lookup. The `REDUCED` state carries an associated size fraction that Ripple applies to `Q_raw` before Tide throttling.
-
-### 17.13 Tide Snapshot
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | Snapshot time |
-| `bias` | enum | `LONG` / `SHORT` / `NEUTRAL` |
-| `risk_multiplier` | float64 | $ \in [0, 1] $ |
-| `max_position_usd` | float64 | Per-cell maximum notional |
-| `es_budget` | float64 | ES budget for this strategy × asset cell |
-| `consumed_es` | float64 | Currently consumed ES |
-| `vol_regime` | enum | `LOW` / `NORMAL` / `HIGH` / `CRISIS` |
-| `crypto_beta_return` | float64 | Latest synthetic index return |
-| `realized_vol` | float64 | Rolling realized volatility |
-| `liquidity_stress` | float64 | Tide-level LSI |
-
-### 17.14 Execution Intent
-
-| Field | Type | Description |
-|---|---|---|
-| `timestamp` | int64 | Decision time |
-| `trade_id` | string | Associated trade lifecycle ID |
-| `symbol` | string | Trading pair |
-| `side` | enum | `BUY` / `SELL` |
-| `quantity` | float64 | Desired quantity |
-| `order_type` | enum | `MARKET` / `LIMIT` |
-| `limit_price` | float64 | Limit price (if order_type = LIMIT) |
-| `intent_type` | enum | `ENTRY` / `SCALE_IN` / `SCALE_OUT` / `EXIT` |
-| `exit_reason` | enum | `INVALIDATION` / `TARGET` / `EXHAUSTION` / `TIME` / `RISK_BUDGET` / `NONE` |
-| `urgency` | enum | `IMMEDIATE` / `NORMAL` |
-
-**Note:** `IMMEDIATE` urgency is used for invalidation and risk-budget exits. `NORMAL` is used for target and exhaustion exits, which may use limit orders.
-
----
-
-## 18. Strategy Permissions Matrix
-
-The permissions matrix determines which trade archetypes Ripple is allowed to execute, based on Tide bias and Wave regime.
-
-| Tide Bias | Wave Regime | Long Bounce | Short Bounce | Long Breakout | Short Breakout |
-|---|---|---|---|---|---|
-| LONG | MEAN_REVERSION | ✅ Full | ⚠️ Reduced size | ✅ Full | ❌ Disabled |
-| LONG | BREAKOUT | ⚠️ Reduced | ❌ Disabled | ✅ Full | ❌ Disabled |
-| LONG | BREAKDOWN | ❌ Disabled | ❌ Disabled | ❌ Disabled | ❌ Disabled |
-| LONG | NEUTRAL | ✅ Full | ⚠️ Reduced | ⚠️ Reduced | ❌ Disabled |
-| SHORT | MEAN_REVERSION | ⚠️ Reduced | ✅ Full | ❌ Disabled | ✅ Full |
-| SHORT | BREAKOUT | ❌ Disabled | ⚠️ Reduced | ❌ Disabled | ✅ Full |
-| SHORT | BREAKDOWN | ❌ Disabled | ❌ Disabled | ❌ Disabled | ❌ Disabled |
-| SHORT | NEUTRAL | ⚠️ Reduced | ✅ Full | ❌ Disabled | ⚠️ Reduced |
-| NEUTRAL | MEAN_REVERSION | ✅ Full | ✅ Full | ⚠️ Reduced | ⚠️ Reduced |
-| NEUTRAL | BREAKOUT | ⚠️ Reduced | ⚠️ Reduced | ✅ Full | ✅ Full |
-| NEUTRAL | BREAKDOWN | ❌ Disabled | ❌ Disabled | ⚠️ Reduced | ⚠️ Reduced |
-| NEUTRAL | NEUTRAL | ✅ Full | ✅ Full | ⚠️ Reduced | ⚠️ Reduced |
-
-**Legend:**
-- ✅ Full: archetype allowed at full Tide-allocated size
-- ⚠️ Reduced: archetype allowed at reduced size (e.g., 50% of normal)
-- ❌ Disabled: archetype not allowed
-
----
-
-## 19. Implementation Guidance
-
-### 19.1 Language Partitioning
-
-| Responsibility | Language | Rationale |
-|---|---|---|
-| Event ingestion, order book, feature calculation on hot path | C++ | Latency, throughput |
-| Live-capable state machines (Ripple, trade lifecycle) | C++ | Determinism, speed |
-| Order management, risk checks on hot path | C++ | Speed for live execution |
-| Deterministic replay execution path | C++ | Consistency across modes |
-| Research, labeling, model fitting | Python | Flexibility, ecosystem |
-| Optimization workflows (NSGA-II, etc.) | Python | Scipy, iteration speed |
-| Analytics, offline diagnostics | Python | Existing stack |
-| Configuration | Python / JSON | Flexibility |
-
-### 19.2 App Mode Mapping
-
-| Mode | What runs | Notes |
-|---|---|---|
-| `data` | Data collection → TickStore (HDF5) | No strategy logic |
-| `backtest` | ReplayFeed → OrderFlowEngine → Ripple → paper fills | Deterministic replay |
-| `optimise` | Backtest in loop with NSGA-II | Parameter search |
-| `execute` | Live feed → Ripple → Binance broker | Real execution |
-
-### 19.3 Deterministic Replay Contract
-
-For a given sequence of events and configuration, the strategy must produce **identical** outputs. This requires:
-1. No use of wall-clock time in decision logic (only event timestamps).
-2. No floating-point non-determinism (use consistent rounding).
-3. No random number generation without seeded PRNGs.
-4. Serializable state at any point for snapshot/restore.
-
----
-
-## 20. Testing Philosophy and Required Test Types
-
-### 20.1 Unit Tests
-
-Every non-trivial function, feature computation, and state transition must have unit tests.
-
-### 20.2 Integration Tests
-
-End-to-end tests from event ingestion through feature computation to trade decision output.
-
-### 20.3 Replay Determinism Tests
-
-Feed identical event sequences twice; assert identical output.
-
-### 20.4 Boundary Tests
-
-- Zero-volume trades
-- Empty order book
-- Single-level book
-- Price gaps
-- Timestamp discontinuities
-- Maximum position reached
-- ES budget exhausted
-
-### 20.5 Regression Tests
-
-Before/after comparison for any behavioral change.
-
-### 20.6 Property-Based Tests
-
-Mathematical invariants that must hold regardless of input:
-- $ \text{ES}_\alpha \geq \text{VaR}_\alpha \geq 0 $
-- $ Q_{\text{final}} \leq Q_{\max} $
-- $ Q_{\text{final}} = 0 $ when $ R_{\text{budget}} = 0 $
-- $ I_t \in [-1, 1] $ for all order book states
-- $ W_p \geq 0 $ for all wall quality scores
-- $ \text{hold}_\ell + \text{break}_\ell = 1 $
-- Permissions matrix lookup never returns an undefined state
-- Trade lifecycle state machine has no unreachable states and no deadlocks (except terminal states)
-
-### 20.7 Adversarial / Edge-Case Tests
-
-- Malformed market data (NaN prices, negative quantities, zero timestamps)
-- Empty order book (no bids, no asks, or both)
-- Single-level book
-- Crossed book ($ P^b > P^a $)
-- Price gaps > 10% in a single event
-- Timestamp discontinuities (gap > 60s, then burst)
-- Maximum position reached mid-scale-in
-- ES budget exhausted between entry and first scale-in
-- Duplicate trade IDs in the event stream
-- Out-of-order events (depth update with future timestamp)
-- Zero-volume trade events
-
-### 20.8 Cadence and Timing Tests
-
-- Tide does not update more than once per `tide_update_interval_ms` (event-time)
-- Wave does not update more than once per `wave_update_interval_ms` (event-time)
-- Ripple processes every qualifying event
-- Cooldown timer prevents re-entry for the configured duration
-- Confirmation window expires at the correct event-time boundary
-
-### 20.9 Performance Benchmarks
-
-- Feature computation latency per event
-- State machine transition latency
-- End-to-end tick-to-decision latency
-- Liquidity map update latency
-- Memory usage over a 1-hour sustained replay
-
----
-
-## 21. Performance Engineering Expectations
-
-| Metric | Target | Notes |
-|---|---|---|
-| Per-event feature update (C++) | < 10 µs | Amortized over batch |
-| State machine transition (C++) | < 1 µs | Simple conditionals |
-| Tick-to-decision (C++) | < 100 µs | Full Ripple pipeline |
-| Python UI update | < 50 ms | 10–20 Hz render |
-| Memory per symbol | < 50 MB | Rolling windows, bounded buffers |
-
-### 21.1 Memory Constraints
-
-| Data Structure | Maximum Size | Eviction Policy |
-|---|---|---|
-| Order book levels per side | 500 levels | Drop beyond depth limit |
-| Tracked walls | 50 per side | Drop lowest quality beyond limit |
-| Liquidity map levels | 100 | Drop lowest relevance |
-| Volume profile bins | 1000 | Bounded by price range / tick size |
-| Trade history (rolling) | 100 000 events | FIFO eviction |
-| CVD bins | 10 000 | FIFO eviction by timestamp |
-| Heatmap depth slices | 600 (configurable) | FIFO ring buffer |
-| Feature history (per feature) | 10 000 samples | FIFO eviction |
-
-All sizes are configurable. Memory usage per symbol must remain below 50 MB with default settings.
-
-### 21.2 Performance Rules
-
-1. No heap allocation on the hot path (use pre-allocated buffers).
-2. No string operations on the hot path.
-3. No Python callbacks on the per-event C++ hot path.
-4. Bounded data structures with explicit eviction policies (see §21.1).
-5. Profile before optimizing; do not optimize speculatively.
-6. Liquidity map update must be incremental (not full rebuild per event).
-7. Volume profile query must be O(1) for POC and O(log N) for arbitrary level lookup.
-
----
-
-## 22. V1 Implementation Boundaries
-
-### 22.1 V1 Operating Assumptions
-
-These assumptions scope V1 and should be stated in code as compile-time or configuration-level assertions:
-
-| Assumption | V1 Value | Rationale |
-|---|---|---|
-| **Symbols** | Single symbol at a time (e.g., BTCUSDT perp on Binance) | Simplifies state management; multi-symbol is V2 |
-| **Venue** | Binance Futures only for L2; Binance + Oanda for L1 | Current data access |
-| **Max concurrent trades** | 1 per symbol | Simplifies lifecycle engine; multi-trade is V2 |
-| **Leverage** | Configuration parameter; default 1× (no leverage) | Leverage affects margin; must be explicit |
-| **Order types (entry)** | Bounce → LIMIT; Breakout → MARKET | Bounce has time to use limit; breakout needs immediacy |
-| **Order types (exit)** | Invalidation/Risk → MARKET; Target/Exhaustion → LIMIT; Time → MARKET | Urgency determines order type |
-| **Fee model** | Maker fee, taker fee as configuration parameters | Affects PnL calculation and target placement |
-| **Execution mode** | Paper fills in backtest/optimise; live Binance fills in execute mode | Matches app modes |
-| **Clock** | Event-time only (no wall-clock in decision logic) | Replay determinism |
-
-### 22.2 What V1 Must Include
-
-1. Canonical feature schema (all namespaces defined, at least Ripple features implemented).
-2. Deterministic Ripple baseline with rule-based state inference.
-3. Bounce and breakout trade archetypes.
-4. Trade lifecycle state machine with all five exit types.
-5. Scale-in only after confirmation; scale-out into liquidity destinations.
-6. Deterministic liquidity map with hold/break/destination scores.
-7. Volume Profile and CVD integration in Ripple.
-8. Simple global ES throttle for risk budgeting.
-9. Deterministic Wave regime classifier with permissions matrix.
-10. Replay determinism tests.
-11. Backtest validation on historical data.
-12. Live execution path (Binance Futures) with full risk checks.
-13. **Backtester hardening** (Phase 9): equity-floor / liquidation modelling
-    (`liquidation_equity_frac`), linear + quadratic slippage on rebalances
-    (`slippage_bps`, `slippage_per_unit_bps`), robust monthly-return math
-    that survives equity zero-crossings, timeframe-aware feature-window
-    rescaling (`with_timeframe(rescale_windows=True)`), and per-regime
-    chop / turnover diagnostics (`regime_flips`, `flips_per_bar`,
-    per-regime `trades` / `fees_paid` / `turnover_usd`,
-    `regime_run_lengths` histogram). Defaults preserve V1 behaviour for
-    existing parameter sets — these knobs are opt-in for realistic
-    transaction-cost / catastrophe modelling. See
-    `implementation_plan.md` §7 Phase 9 for full delivery details.
-
-### 22.3 What V1 Must NOT Include
-
-1. HMM or ML-based state inference.
-2. Cross-venue confirmation.
-3. Full Euler risk decomposition.
-4. Multi-factor PCA.
-5. Live optimization loops.
-6. Probabilistic position sizing beyond simple ES throttle.
-7. Multiple concurrent trades per symbol.
-8. Multi-symbol portfolio management.
-
----
-
-## 23. Later Extensions
-
-| Extension | Target Version | Dependencies |
-|---|---|---|
-| HMM-based Ripple state inference | V2 | Labeled training data from V1 |
-| HMM-based Wave regime classification | V2 | V1 Wave baseline + training data |
-| Cross-venue confirmation (Oanda L1) | V2 | V1 Wave factor plumbing |
-| Full Euler risk decomposition | V2 | V1 global ES throttle |
-| Multi-factor PCA for Wave | V3 | Multi-asset L1 data |
-| Adaptive position sizing (Kelly-like) | V3 | V2 HMM posteriors |
-| Live model retraining pipeline | V3 | V2 HMM + optimization framework |
-
----
-
-## 24. Non-Goals for V1
-
-1. Market-making or passive quoting strategies.
-2. Statistical arbitrage across venues.
-3. High-frequency sub-second holding periods.
-4. DeFi / on-chain integration.
-5. Portfolio optimization across dozens of assets.
-6. Automated deployment / CI-CD pipelines.
-
----
-
-## 25. Open Research Questions
-
-1. What is the optimal wall quality weighting ($ w_{\mathcal{D}}, w_\pi, w_c, w_{\text{prox}} $)? → Optimize via backtest.
-2. How many latent states does the Ripple HMM need? → Fit 2, 3, 4, 5 states; compare BIC.
-3. Does CVD divergence add alpha beyond wall logic alone? → Ablation study.
-4. What is the right confirmation window duration? → Grid search.
-5. How should the ES budget respond to regime changes? → Research Tide–Wave coupling.
-6. Is multi-factor PCA worth the complexity for a small crypto universe? → Evaluate explained variance.
-7. What is the information content of funding rate and open interest for Tide? → Feature importance analysis.
-
----
-
-## 26. Build Order / Roadmap
-
-```mermaid
-flowchart TD
-    P1[Phase 1: Schema & Contracts] --> P2[Phase 2: Deterministic Ripple]
-    P2 --> P3[Phase 3: Liquidity Map & VP/CVD]
-    P3 --> P4[Phase 4: Risk Budget Plumbing]
-    P4 --> P5[Phase 5: Wave Baseline]
-    P5 --> P6[Phase 6: Optimization & Replay]
-    P6 --> P7[Phase 7: HMM / Probabilistic]
-    P7 --> P8[Phase 8: Cross-Venue]
-
-    style P1 fill:#2d6a4f,color:#fff
-    style P2 fill:#2d6a4f,color:#fff
-    style P3 fill:#40916c,color:#fff
-    style P4 fill:#40916c,color:#fff
-    style P5 fill:#52b788,color:#000
-    style P6 fill:#52b788,color:#000
-    style P7 fill:#95d5b2,color:#000
-    style P8 fill:#b7e4c7,color:#000
+## 36. Paper-trading readiness
+
+```text
+Historical data
+      ↓
+Research / notebook
+      ↓
+Backtest          historical event-driven evaluation
+      ↓
+Replay            the same sequential logic as live, on historical events
+      ↓
+Live market data
+      ↓
+Shadow            live data, live decisions, no orders
+      ↓
+Paper execution   live data, simulated orders and fills, no capital at risk
+      ↓
+Paper monitoring
+      ↓
+Live eligibility  a review, not deployment
 ```
 
-| Phase | Focus | Est. Effort |
-|---|---|---|
-| 1 | Schema, contracts, config surface | 1–2 weeks |
-| 2 | Deterministic Ripple: archetypes, lifecycle, exits | 3–4 weeks |
-| 3 | Liquidity map, hold/break/dest, VP/CVD integration | 2–3 weeks |
-| 4 | Risk budget plumbing, ES throttle, Tide sizing interface | 1–2 weeks |
-| 5 | Wave baseline: deterministic regime, factor features | 2–3 weeks |
-| 6 | Optimization, replay consistency, UI exposure | 2–3 weeks |
-| 7 | HMM / probabilistic extensions | 4–6 weeks |
-| 8 | Cross-venue confirmation | 2–4 weeks |
+Shadow may be used to check feeds and plumbing before a hypothesis is
+validated. Strategy decisions produced in that mode are not research results
+and are not paper validation. Paper execution of a component begins only at
+Paper ready. Real-money trading is not the next automatic step after paper
+validation.
 
 ---
 
-## 27. Configuration Surface
+## 37. Paper-trading monitoring
 
-All configurable parameters are organized into layer-specific groups. Every parameter has a documented default and valid range. Magic constants in code are not acceptable — all tunable values must be wired to configuration.
+Categories only. Thresholds are part of a later protocol, not of this
+document.
 
-### 27.1 Tide Configuration
+**Data.** Feed health, timestamp latency, sequence gaps, stale data, book integrity.
 
-| Parameter | Type | Default | Range | Description |
-|---|---|---|---|---|
-| `tide.update_interval_ms` | int64 | 60000 | [10000, 600000] | Minimum update interval |
-| `tide.risk_multiplier_default` | float64 | 1.0 | [0, 1] | Default risk multiplier when Tide has no signal |
-| `tide.es_budget_global` | float64 | 1000.0 | [0, ∞) | Global ES budget (USDT) |
-| `tide.max_position_usd` | float64 | 10000.0 | [0, ∞) | Per-cell max notional |
-| `tide.vol_regime_thresholds` | float64[3] | [0.4, 0.8, 1.5] | ascending | Boundaries: LOW/NORMAL, NORMAL/HIGH, HIGH/CRISIS |
-| `tide.lsi_weights` | float64[3] | [0.33, 0.33, 0.34] | sum to 1 | LSI component weights $ w_1, w_2, w_3 $ |
-| `tide.risk_mult_by_regime` | float64[4] | [1.0, 0.8, 0.5, 0.0] | each ∈ [0,1] | Risk multiplier for LOW, NORMAL, HIGH, CRISIS |
-| `tide.lsi_reduce_threshold` | float64 | 1.5 | (0, ∞) | LSI above this triggers additional risk reduction |
-| `tide.lsi_reduce_slope` | float64 | 0.2 | (0, 1) | Multiplier penalty per LSI unit above threshold |
+**Model.** Feature drift, probability calibration, regime distribution, prediction distribution, model errors.
 
-### 27.2 Wave Configuration
+**Strategy.** Opportunity frequency, decision frequency, position state, risk consumption, expected versus realised behaviour.
 
-| Parameter | Type | Default | Range | Description |
-|---|---|---|---|---|
-| `wave.update_interval_ms` | int64 | 5000 | [1000, 60000] | Minimum update interval |
-| `wave.eta_mr_threshold` | float64 | 0.3 | (0, 1) | Trend efficiency threshold for MEAN_REVERSION |
-| `wave.eta_bo_threshold` | float64 | 0.7 | (0, 1) | Trend efficiency threshold for BREAKOUT |
-| `wave.eta_neutral_threshold` | float64 | 0.5 | (0, 1) | Threshold for return to NEUTRAL |
-| `wave.dispersion_threshold` | float64 | 0.02 | (0, 1) | Dispersion threshold for regime change |
-| `wave.dispersion_critical` | float64 | 0.05 | (0, 1) | Critical dispersion for BREAKDOWN |
-| `wave.ar_critical` | float64 | 0.85 | (0, 1) | Absorption ratio threshold for BREAKDOWN |
-| `wave.ar_recover` | float64 | 0.70 | (0, 1) | AR threshold for BREAKDOWN recovery |
-| `wave.reduced_size_fraction` | float64 | 0.5 | (0, 1) | Position size multiplier for REDUCED permission |
+**Execution.** Expected versus simulated fill, spread, slippage, queue assumptions, latency, rejected and cancelled orders.
 
-### 27.3 Ripple Configuration
+**Risk.** ES, exposure, margin, drawdown, concentration, emergency-state triggers.
 
-| Parameter | Type | Default | Range | Description |
-|---|---|---|---|---|
-| `ripple.wall_min_quality` | float64 | 0.5 | [0, ∞) | Minimum $ W_p $ to consider a wall significant |
-| `ripple.wall_quality_weights` | float64[4] | [0.25, 0.25, 0.25, 0.25] | each ≥ 0 | $ w_{\mathcal{D}}, w_\pi, w_c, w_{\text{prox}} $ |
-| `ripple.confirmation_window_ms` | int64 | 30000 | [5000, 120000] | Max time in SETUP before cancel |
-| `ripple.expand_threshold_sigma` | float64 | 1.0 | (0, 5) | $ \theta_{\text{expand}} $ for CONFIRMATION → EXPANSION |
-| `ripple.max_hold_time_ms` | int64 | 300000 | [30000, 3600000] | Time exit threshold $ T_{\max} $ |
-| `ripple.cooldown_ms` | int64 | 10000 | [0, 60000] | Post-exit cooldown |
-| `ripple.scale_out_fractions` | float64[] | [0.33, 0.33, 0.34] | sum to 1 | Scale-out fractions at successive targets |
-| `ripple.vol_ratio_clamp` | float64[2] | [0.25, 2.0] | lo < hi | Clamp for $ \sigma_{\text{target}} / \hat{\sigma}_{\text{realized}} $ |
-| `ripple.proximity_sigma` | float64 | 2.0 | (0, 10) | Wall proximity zone in σ units (bounce detection) |
-| `ripple.bounce_microprice_shift_ticks` | float64 | 3.0 | (0, 50) | Microprice ticks from wall for bounce confirmation |
-| `ripple.bounce_imbalance_thresh` | float64 | 0.1 | [0, 1) | Min signed imbalance for bounce confirmation |
-| `ripple.exhaustion_cvd_slope_thresh` | float64 | 0.01 | [0, 1) | CVD slope below this = flow exhausting |
-| `ripple.breakout_depth_fail_ratio` | float64 | 0.3 | (0, 1) | Wall depth / initial below this = failing |
-| `ripple.breakout_depth_fail_abs` | float64 | 0.0 | [0, ∞) | Absolute depth below this = failed (0 = ratio only) |
-| `ripple.breakout_cvd_slope_thresh` | float64 | 0.05 | (0, 1) | Min signed CVD slope for breakout confirmation |
-| `ripple.exhaustion_impact_ratio` | float64 | 1.5 | (1, 10) | Impact must be this × entry impact for exhaustion |
-| `ripple.max_scale_ins` | int32 | 1 | [0, 5] | Max scale-in tranches per trade |
-| `ripple.scale_in_threshold_sigma` | float64 | 2.0 | (0, 10) | Min favorable move in σ before scale-in |
-| `ripple.scale_in_cvd_slope_min` | float64 | 0.02 | [0, 1) | Min signed CVD slope for scale-in |
-| `ripple.trailing_stop_sigma` | float64 | 2.0 | (0, 10) | Trailing stop distance in σ units |
-| `ripple.wall_scan_depth` | int32 | 50 | [10, 200] | Book levels to scan per side for walls |
-| `ripple.wall_depth_multiple` | float64 | 3.0 | (1, 20) | Depth must exceed median × this to be a wall |
-| `ripple.wall_cancel_window` | int32 | 20 | [5, 100] | Rolling window size for cancellation rate |
-| `ripple.state_activation_threshold` | float64 | 0.6 | (0, 1) | Min evidence score to leave STABLE |
-| `ripple.state_margin` | float64 | 0.15 | (0, 0.5) | Min lead over runner-up for state change |
-
-### 27.4 Risk Configuration
-
-| Parameter | Type | Default | Range | Description |
-|---|---|---|---|---|
-| `risk.es_confidence_level` | float64 | 0.95 | (0.9, 0.999) | $ \alpha $ for ES computation |
-| `risk.target_risk_usd` | float64 | 50.0 | (0, ∞) | Dollar risk per trade |
-| `risk.sigma_target` | float64 | 0.60 | (0, 5) | Target annualized volatility for sizing |
-| `risk.maker_fee_bps` | float64 | 2.0 | [0, 100] | Maker fee in basis points |
-| `risk.taker_fee_bps` | float64 | 4.0 | [0, 100] | Taker fee in basis points |
-| `risk.leverage` | float64 | 1.0 | [1, 125] | Binance leverage setting |
-| `risk.budget_exit_threshold` | float64 | 0.90 | (0, 1) | Exit when consumed ES reaches this fraction of budget |
-
-### 27.5 Execution Configuration
-
-| Parameter | Type | Default | Range | Description |
-|---|---|---|---|---|
-| `execution.bounce_order_type` | enum | LIMIT | {LIMIT, MARKET} | Order type for bounce entries |
-| `execution.breakout_order_type` | enum | MARKET | {LIMIT, MARKET} | Order type for breakout entries |
-| `execution.slippage_tolerance_bps` | float64 | 5.0 | [0, 100] | Max acceptable slippage for market orders |
-
-### 27.6 Testing Configuration
-
-| Parameter | Type | Default | Range | Description |
-|---|---|---|---|---|
-| `testing.replay_tolerance` | float64 | 0.0 | [0, 1e-6] | Acceptable floating-point deviation in replay |
-| `testing.benchmark_latency_target_us` | int64 | 100 | [1, 10000] | Tick-to-decision latency target (µs) |
+Monitoring that cannot be tied back to an experiment id and a code version is
+not evidence about the strategy.
 
 ---
 
-## 28. Developer Rules
+## 38. Definition of completion
 
-### 28.1 Adding Features
+Completion is not “every notebook has been run”.
 
-1. Every new feature must be assigned to a namespace (`tide.*`, `wave.*`, `ripple.*`, etc.).
-2. Features must have a defined type, cadence, and category (raw / derived / model output).
-3. Feature names must be snake_case.
-4. New features must be added to the schema table in this document before implementation.
+Every **retained** hypothesis has:
 
-### 28.2 Changing Schema
+- a documented experiment
+- a reusable implementation
+- validation evidence
+- tests
+- backtest or replay integration
+- known limitations
+- a promotion state in the registry
 
-1. Schema changes must be documented in this file first.
-2. All consumers of changed fields must be audited.
-3. Backward-incompatible changes must include a migration path for stored data.
+Every **rejected or deferred** hypothesis has a recorded decision and the
+reason, and is absent from the strategy path.
 
-### 28.3 Preserving Replayability
+The integrated system can step, on events:
 
-1. Decision logic must use event timestamps, not wall-clock time.
-2. Any state that affects decisions must be serializable.
-3. Replay tests must pass after every behavioral change.
+```text
+data ingestion
+→ feature generation
+→ Tide
+→ Wave
+→ Decision
+→ Ripple
+→ execution simulation
+→ position management
+→ risk
+→ P&L
+→ event-time replay
+→ monitoring
+```
 
-### 28.4 Keeping Deterministic Baseline
+with the retained components only. Missing layers are explicit gaps, not
+silent V1 defaults presented as this strategy.
 
-1. Probabilistic components must be opt-in behind a configuration flag.
-2. The deterministic baseline must remain functional and testable at all times.
-3. When an HMM or ML model is added, the rule-based fallback must be preserved.
-
----
-
-## 29. Consolidated Enum Reference
-
-All enum types used in data contracts, state machines, and configuration. These are the **canonical names**; C++ enums and Python constants must use these exact values.
-
-### 29.1 Layer Enums
-
-| Enum | Values | Used In |
-|---|---|---|
-| `TideBias` | `LONG`, `SHORT`, `NEUTRAL` | Tide snapshot, permissions matrix |
-| `VolRegime` | `LOW`, `NORMAL`, `HIGH`, `CRISIS` | Tide snapshot |
-| `WaveRegime` | `MEAN_REVERSION`, `BREAKOUT`, `BREAKDOWN`, `NEUTRAL` | Wave snapshot, permissions matrix |
-| `PermissionLevel` | `FULL`, `REDUCED`, `DISABLED` | Permission set |
-
-### 29.2 Ripple State Enums
-
-| Enum | Values | Used In |
-|---|---|---|
-| `LiquidityState` | `STABLE`, `ABSORPTION`, `EXHAUSTION`, `WITHDRAWAL`, `REFILL` | Ripple state, evidence engine |
-| `WallSide` | `BID`, `ASK` | Wall detection, liquidity map |
-| `LevelType` | `WALL_BID`, `WALL_ASK`, `HVN`, `LVN`, `POC`, `VWAP`, `VOID_BOUNDARY` | Liquidity map |
-
-### 29.3 Trade Enums
-
-| Enum | Values | Used In |
-|---|---|---|
-| `TradeArchetype` | `BOUNCE`, `BREAKOUT` | Trade setup, lifecycle engine |
-| `TradeSide` | `LONG`, `SHORT` | Trade state |
-| `LifecycleState` | `SETUP`, `ENTRY`, `CONFIRMATION`, `EXPANSION`, `MATURATION`, `EXIT`, `COOLDOWN`, `CANCELLED` | Trade lifecycle FSM |
-| `ExitType` | `INVALIDATION`, `TARGET`, `EXHAUSTION`, `TIME`, `RISK_BUDGET` | Exit taxonomy, execution intent |
-
-### 29.4 Execution Enums
-
-| Enum | Values | Used In |
-|---|---|---|
-| `OrderSide` | `BUY`, `SELL` | Execution intent, fill event |
-| `OrderType` | `MARKET`, `LIMIT` | Execution intent, config |
-| `IntentType` | `ENTRY`, `SCALE_IN`, `SCALE_OUT`, `EXIT` | Execution intent |
-| `Urgency` | `IMMEDIATE`, `NORMAL` | Execution intent |
-| `ExitReason` | `INVALIDATION`, `TARGET`, `EXHAUSTION`, `TIME`, `RISK_BUDGET`, `NONE` | Execution intent |
-
-### 29.5 Market Data Enums
-
-| Enum | Values | Used In |
-|---|---|---|
-| `EventType` | `TRADE`, `DEPTH_UPDATE`, `DEPTH_SNAPSHOT` | Market event |
-| `AggressorSide` | `BUY`, `SELL` | Trade event (derived from `is_buyer_maker`) |
+Completion of the research programme should leave a **paper-trading-capable
+foundation**, not necessarily a profitable strategy and not a live-trading-ready
+system.
 
 ---
 
-## 30. Glossary
+## 39. Master roadmap
 
-| Term | Definition |
-|---|---|
-| **Absorption** | Aggressive flow consumed by resting liquidity; price stalls |
-| **Ask wall** | Large resting sell order concentration at a price level |
-| **Bid wall** | Large resting buy order concentration at a price level |
-| **Bounce trade** | Trade entered when a wall holds and price reverses |
-| **Breakout trade** | Trade entered when a wall fails and price breaks through |
-| **CVD** | Cumulative Volume Delta: running sum of signed trade volumes |
-| **Destination** | A liquidity level where price is likely to travel |
-| **ES** | Expected Shortfall: average loss beyond VaR |
-| **Euler decomposition** | Additive decomposition of a risk measure into component contributions |
-| **Exhaustion** | Aggressive flow weakening; momentum dying |
-| **HMM** | Hidden Markov Model: latent-state probabilistic model |
-| **HVN** | High Volume Node in a volume profile |
-| **Imbalance** | Ratio of bid to ask depth |
-| **Liquidity map** | Real-time model of significant liquidity levels |
-| **LSI** | Liquidity Stress Index |
-| **LVN** | Low Volume Node in a volume profile |
-| **Microprice** | Size-weighted mid-price |
-| **OFI** | Order Flow Imbalance: net change in resting liquidity |
-| **POC** | Point of Control: price with highest traded volume |
-| **Refill** | Liquidity reappearing after withdrawal or consumption |
-| **Ripple** | Fastest layer; execution and microstructure |
-| **Sleeve** | A strategy sub-allocation within the portfolio |
-| **Tide** | Slowest layer; macro bias and risk budgeting |
-| **Void corridor** | Price range with minimal liquidity |
-| **VPIN** | Volume-synchronized probability of informed trading |
-| **VWAP** | Volume-weighted average price |
-| **Wall** | Significant resting order concentration at a price level |
-| **Wall quality** | Composite score of wall size, persistence, refill, and proximity |
-| **Wave** | Middle layer; regime classification and structure context |
-| **Withdrawal** | Resting liquidity removed (wall pulled) |
+```text
+┌───────────────────────────────┐
+│ DATA FOUNDATION               │
+│ 1m history (available)        │
+│ prospective L2 (collecting)   │
+└───────────────┬───────────────┘
+                ↓
+┌───────────────────────────────┐
+│ RESEARCH INFRASTRUCTURE       │
+│ splits / metrics / registry / │
+│ event-time replay             │
+└───────────────┬───────────────┘
+                ↓
+┌───────────────────────────────┐
+│ STATISTICAL FOUNDATION        │
+│ H1, then H2 and H3 in parallel│
+└───────────────┬───────────────┘
+                ↓
+┌───────────────────────────────┐
+│ WAVE                          │
+│ H4                            │
+└───────────────┬───────────────┘
+                ↓
+┌───────────────────────────────┐
+│ TIDE                          │
+│ H5 → H6                       │
+└───────────────┬───────────────┘
+                ↓
+       ┌────────┴────────┐
+       ↓                 ↓
+┌─────────────┐   ┌──────────────────┐
+│ RIPPLE      │   │ MANAGEMENT       │
+│ H7 / H16    │   │ H14, H15, H19    │
+│ (L2 stream) │   │ kept separate    │
+└──────┬──────┘   └────────┬─────────┘
+       └────────┬──────────┘
+                ↓
+┌───────────────────────────────┐
+│ EXECUTION                     │
+│ H8 → H17 → H18                │
+│ H9 archetype branch aside     │
+└───────────────┬───────────────┘
+                ↓
+┌───────────────────────────────┐
+│ COMPOSED STRATEGY             │
+│ H10                           │
+└───────────────┬───────────────┘
+                ↓
+┌───────────────────────────────┐
+│ EVENT-TIME REPLAY             │
+└───────────────┬───────────────┘
+                ↓
+┌───────────────────────────────┐
+│ SHADOW / PAPER                │
+│ live eligibility is a review  │
+└───────────────────────────────┘
+```
+
+H11 (non-stationarity) and H12 (news) attach to whatever predictive maps
+exist; they are not rungs on this spine. H13 stays off the spine until it is
+un-deferred. L2 accumulation runs beside the spine from Phase 0 onward and
+joins it only at Ripple, wall, and execution experiments.
+
+The strategy remains Tide → Wave → Decision → Ripple → Execution, with
+position and risk fed back to Tide. The roadmap is how that strategy is
+discovered, tested, implemented, and brought to paper trading. It does not
+assume that every hypothesis survives, or that the result is profitable.

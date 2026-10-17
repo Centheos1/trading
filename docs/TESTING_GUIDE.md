@@ -1,5 +1,8 @@
 # Testing Guide
 
+> **Scope — frozen historical V1.** This document governs the archived baseline specified by `docs/history/strategy_v1.md`. It is not the current strategy. The current research programme is the root `strategy.md`. Do not change the V1 baseline to match an unvalidated research hypothesis, and do not treat V1 behaviour as evidence for that programme.
+
+
 ## 1. Overview
 
 This document is the **canonical testing reference** for the Tide / Wave / Ripple quantitative trading system. It is intended for developers and coding agents working on the codebase.
@@ -26,7 +29,7 @@ Testing is critical because:
 
 | Priority | Document | Role |
 |---|---|---|
-| 1 | `strategy.md` | Canonical strategy design, math, contracts |
+| 1 | `docs/history/strategy_v1.md` | Canonical strategy design, math, contracts |
 | 2 | `implementation_plan.md` | Build plan, phases, acceptance criteria |
 | 3 | Tests | Executable specification |
 | 4 | `AGENT_STRATEGY_RULES.md` | Operational rules and guardrails |
@@ -39,7 +42,7 @@ Testing is critical because:
 ### 2.1 Core Principles
 
 1. **Correctness before performance.** Get behavior right, then optimize.
-2. **Tests are executable specifications.** If a test contradicts `strategy.md`, the test is wrong — fix the test, not the strategy (unless the strategy has a bug).
+2. **Tests are executable specifications.** If a test contradicts `docs/history/strategy_v1.md`, the test is wrong — fix the test, not the strategy (unless the strategy has a bug).
 3. **Every meaningful behavior change requires a test.** "Meaningful" means any change that alters outputs given the same inputs.
 4. **Tests must be written before or alongside new features.** Never defer tests to a later commit.
 5. **No test may be disabled without justification.** If a test fails, fix the code or the test — do not skip it.
@@ -89,9 +92,9 @@ Each implementation phase has specific test requirements. A phase is not complet
 
 **Examples:**
 - Enum `to_string` round-trip
-- Config struct defaults match `strategy.md` §27
+- Config struct defaults match `docs/history/strategy_v1.md` §27
 - `PermissionSet.get()` returns correct values
-- Feature registry completeness against `strategy.md` §16
+- Feature registry completeness against `docs/history/strategy_v1.md` §16
 - Wall quality score computation
 
 ### 3.2 Feature Tests
@@ -108,7 +111,7 @@ Each implementation phase has specific test requirements. A phase is not complet
 - Wall persistence and cancellation rate
 - Trend efficiency, dispersion, absorption ratio (Wave)
 
-**Rule:** Every feature in `strategy.md` §16 that has a computation must have a test with known inputs and expected outputs.
+**Rule:** Every feature in `docs/history/strategy_v1.md` §16 that has a computation must have a test with known inputs and expected outputs.
 
 ### 3.3 State Machine Tests
 
@@ -206,7 +209,7 @@ Each implementation phase has specific test requirements. A phase is not complet
 
 **When required:** From Phase 2 onward.
 
-**What to test (from `strategy.md` §20.7):**
+**What to test (from `docs/history/strategy_v1.md` §20.7):**
 - NaN prices, negative quantities, zero timestamps
 - Empty order book (no bids, no asks, or both)
 - Single-level book
@@ -223,7 +226,7 @@ Each implementation phase has specific test requirements. A phase is not complet
 
 **Purpose:** Verify mathematical invariants that must hold regardless of input.
 
-**Invariants (from `strategy.md` §20.6):**
+**Invariants (from `docs/history/strategy_v1.md` §20.6):**
 - ES >= VaR >= 0
 - Final position quantity in [0, Q_max]
 - Final position = 0 when risk budget = 0
@@ -237,7 +240,7 @@ Each implementation phase has specific test requirements. A phase is not complet
 
 **Purpose:** Verify that layer update cadences are respected.
 
-**What to test (from `strategy.md` §20.8):**
+**What to test (from `docs/history/strategy_v1.md` §20.8):**
 - Tide does not update more than once per `tide_update_interval_ms` (event-time)
 - Wave does not update more than once per `wave_update_interval_ms` (event-time)
 - Ripple processes every qualifying event
@@ -527,7 +530,7 @@ Liquidity transitions are the core of the Ripple execution layer. Each transitio
 
 ### 7.3 Trade Lifecycle Tests
 
-Test every transition in the lifecycle FSM defined in `strategy.md` §12:
+Test every transition in the lifecycle FSM defined in `docs/history/strategy_v1.md` §12:
 
 ```
 SETUP → ENTRY → CONFIRMATION → EXPANSION → MATURATION → EXIT → COOLDOWN
@@ -548,7 +551,7 @@ SETUP → CANCELLED                                               (idle)
 
 ### 7.4 Exit Type Tests
 
-Test each exit type independently (from `strategy.md` §13):
+Test each exit type independently (from `docs/history/strategy_v1.md` §13):
 
 | Exit Type | Trigger | Priority | Test |
 |---|---|---|---|
@@ -665,7 +668,7 @@ Each component of the liquidity map must be tested independently:
 
 - Targets derived from the liquidity map match the highest-scoring destinations.
 - Scale-out points align with destination levels.
-- The map respects the bounded level count (max 100 levels per `strategy.md` §21.1).
+- The map respects the bounded level count (max 100 levels per `docs/history/strategy_v1.md` §21.1).
 
 ### 10.4 Performance
 
@@ -678,7 +681,7 @@ Each component of the liquidity map must be tested independently:
 
 ### 11.1 Lifecycle FSM Completeness
 
-Verify that the FSM defined in `strategy.md` §12 is correctly implemented:
+Verify that the FSM defined in `docs/history/strategy_v1.md` §12 is correctly implemented:
 
 - All 8 states exist: SETUP, ENTRY, CONFIRMATION, EXPANSION, MATURATION, EXIT, COOLDOWN, CANCELLED.
 - All valid transitions are reachable.
@@ -787,7 +790,7 @@ void benchmark_feature_update() {
 
 ### 13.4 Memory Profiling
 
-For sustained replay tests, monitor memory usage over time to ensure bounded data structures do not grow beyond limits defined in `strategy.md` §21.1:
+For sustained replay tests, monitor memory usage over time to ensure bounded data structures do not grow beyond limits defined in `docs/history/strategy_v1.md` §21.1:
 
 | Data Structure | Maximum Size |
 |---|---|
@@ -843,7 +846,7 @@ A change is **done** when:
 | Tests pass | All existing tests pass; new tests added for new behavior |
 | Replay deterministic | Same events + config → same outputs |
 | Linter clean | No new linter warnings in changed files |
-| Docs updated | `strategy.md` / `implementation_plan.md` updated if needed |
+| Docs updated | `docs/history/strategy_v1.md` / `implementation_plan.md` updated if needed |
 | Performance acceptable | No regression > 20% on key metrics |
 | Change is narrow | One logical unit; no unrelated modifications |
 
@@ -966,7 +969,7 @@ Steps:
 2. Open the test file at the indicated line.
 3. Run the specific test function in isolation if needed (comment out others in `main()`).
 4. Use `std::cerr` to print intermediate values.
-5. If the test is wrong (testing incorrect behavior per `strategy.md`), fix the test and document why.
+5. If the test is wrong (testing incorrect behavior per `docs/history/strategy_v1.md`), fix the test and document why.
 
 ### 17.2 Python Test Failures
 
@@ -981,7 +984,7 @@ python -m unittest tests.test_schemas.TestMyClass.test_my_method -v
 Steps:
 1. Read the assertion error and traceback.
 2. Add `print()` statements or use `pdb` for debugging.
-3. Check that test expectations match `strategy.md`.
+3. Check that test expectations match `docs/history/strategy_v1.md`.
 
 ### 17.3 Build Failures After Schema Changes
 
@@ -989,7 +992,7 @@ If `Schemas.h` or `schemas.py` changes, you may see cascading failures:
 1. Rebuild the C++ library: `cd build && cmake .. && make -j$(sysctl -n hw.ncpu)`
 2. Rebuild the pybind11 module: `make orderflow_engine`
 3. Run both C++ and Python test suites.
-4. If a schema change is required, follow the update order: `strategy.md` §17 → C++ structs → Python dataclasses → pybind11 bindings → tests.
+4. If a schema change is required, follow the update order: `docs/history/strategy_v1.md` §17 → C++ structs → Python dataclasses → pybind11 bindings → tests.
 
 ---
 

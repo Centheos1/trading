@@ -8,9 +8,10 @@ together:
 
 | Document | Owns |
 |---|---|
-| `strategy.md` | Strategy design, math, contracts (source of truth) |
-| `implementation_plan.md` | Build plan, phases, acceptance criteria |
-| `docs/AGENT_STRATEGY_RULES.md` | Tide/Wave/Ripple architecture, determinism, hot-path latency |
+| `strategy.md` | Current research programme (source of truth for new strategy work) |
+| `docs/history/strategy_v1.md` | Frozen historical V1 specification |
+| `docs/implementation_plan.md` | Build plan for the frozen V1 baseline |
+| `docs/AGENT_STRATEGY_RULES.md` | V1 determinism, hot-path latency, and stub policy |
 | `docs/TESTING_GUIDE.md` | How to run, write, and organize tests |
 | `docs/DEPLOYMENT.md` | EC2 / Docker / S3 runbook |
 | **This document** | General code quality + **data-pipeline & operational reliability** |

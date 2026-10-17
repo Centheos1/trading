@@ -1,0 +1,22 @@
+{
+  "code_version": "cbb99ab50632f790fa9a2e41b032c7ce5f2e7bd6+dirty",
+  "component": "research.distributions",
+  "config_digest": "5c06edef219302cfc2906f7a4b2ef4a1e643a36cfe7bc0e5b4b6ba74cbf48484",
+  "dataset_digest": "c1192eca8fa673c386b4ff3aad751f4f2d4895e2b02d7b693a42aac1ecd28188",
+  "dataset_id": "btcusdt-1m",
+  "decision": "",
+  "experiment_id": "EXP-H01",
+  "horizons": [
+    5,
+    15,
+    60
+  ],
+  "hypothesis": "A Student-t model of 5-, 15-, and 60-minute BTCUSDT log returns is better calibrated than a Gaussian model.",
+  "notebook": "notebooks/research/02_return_distributions.ipynb",
+  "null": "The Student-t model has no incremental calibration value relative to the Gaussian model on the pre-registered horizon family.",
+  "parent_hypothesis": null,
+  "result": "student_t",
+  "run_id": "",
+  "sealed_access": false,
+  "status": "Exploratory"
+}

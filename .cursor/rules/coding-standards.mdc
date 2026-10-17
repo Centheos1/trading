@@ -24,9 +24,10 @@ Non-negotiables on every change:
 7. **Keep changes narrow; leave the tree green; update docs you invalidate**
    (especially `docs/DEPLOYMENT.md` for any operational change).
 
-Source-of-truth order: `strategy.md` → `implementation_plan.md` → tests →
-`docs/AGENT_STRATEGY_RULES.md` (strategy/hot-path) + `docs/CODING_STANDARDS.md`
-(general + data/infra) → `docs/TESTING_GUIDE.md`.
+Source-of-truth order: current research follows `strategy.md`; the frozen V1
+baseline follows `docs/history/strategy_v1.md` → `docs/implementation_plan.md`
+→ its tests → `docs/AGENT_STRATEGY_RULES.md`. `docs/CODING_STANDARDS.md`
+applies to every change. Do not treat the frozen V1 as the current strategy.
 
 Definition of Done and the stub policy: `docs/AGENT_STRATEGY_RULES.md` §12 / §3.3b.
 

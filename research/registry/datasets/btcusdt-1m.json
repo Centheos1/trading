@@ -1,0 +1,33 @@
+{
+  "bucket": "trading-data-centheos",
+  "dataset_id": "btcusdt-1m",
+  "digest": "c1192eca8fa673c386b4ff3aad751f4f2d4895e2b02d7b693a42aac1ecd28188",
+  "end": "2026-10-17T10:43:00+00:00",
+  "exclusions": {
+    "duplicate_timestamps": 0,
+    "inconsistent_ohlc": 0,
+    "missing_minutes": 0,
+    "nonpositive_prices": 0,
+    "off_grid_timestamps": 0
+  },
+  "objects": [
+    {
+      "etag": "21230ccfcadb8e9d453f6140c4cae35a-2",
+      "key": "ohlcv/binance/BTCUSDT/1m.parquet",
+      "size": 101746188,
+      "version_id": "2ID349llU2NTv.oYdRWCaAc7Uym83TA4"
+    },
+    {
+      "etag": "b67bbf4dddd1bcb2658bac4d361452ec",
+      "key": "ohlcv/binance/BTCUSDT/1m/2026.parquet",
+      "size": 5482639,
+      "version_id": "null"
+    }
+  ],
+  "profile": "trading",
+  "schema_version": "minute-bars-v1",
+  "start": "2020-01-01T00:00:00+00:00",
+  "symbol": "BTCUSDT",
+  "timeframe": "1m",
+  "venue": "binance"
+}
