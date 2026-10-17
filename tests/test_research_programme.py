@@ -22,6 +22,7 @@ from research.clock import as_utc_index
 from research.evaluate import (
     align_to_frozen_dataset,
     evaluate_baselines,
+    confirm_h1,
     evaluate_h1,
     evaluate_h2,
     freeze_dataset,
@@ -473,6 +474,141 @@ class TestDistributions(unittest.TestCase):
         self.assertEqual(accepted.benchmark, "gaussian")
         with self.assertRaises(ValueError):
             h1_development_decision(better.iloc[0:0])
+
+    def test_confirmation_scores_the_sealed_block_once(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        index = pd.date_range("2024-01-01", "2024-03-15", freq="min", tz="UTC")
+        rng = np.random.default_rng(4)
+        shocks = rng.standard_t(5, size=len(index)) * 0.001
+        close = pd.Series(100 * np.exp(np.cumsum(shocks)), index=index)
+        config = dict(H1_CONFIG)
+        config.update({"sealed_months": 1, "horizons_minutes": [5]})
+        digest = "a" * 64
+
+        def opened():
+            return replace(
+                load_record("research/registry/EXP-H01.json"),
+                horizons=(5,),
+                decision="",
+                result="",
+                status="Proposed",
+                dataset_id="",
+                dataset_digest="",
+                code_version="",
+                config_digest="",
+                sealed_access=False,
+                run_id="",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "EXP-H01.json"
+            record = opened()
+            save_record(path, record)
+            with patch("research.evaluate.sealed_returns", side_effect=AssertionError("sealed read")):
+                with patch("research.evaluate.code_version", return_value="abc123+dirty"):
+                    with self.assertRaises(RuntimeError):
+                        confirm_h1(
+                            close,
+                            record,
+                            dataset_id="btcusdt-1m",
+                            dataset_digest=digest,
+                            root=".",
+                            record_path=path,
+                            config=config,
+                        )
+            self.assertFalse(load_record(path).sealed_access)
+            with patch("research.evaluate.code_version", return_value="abc123"):
+                confirmed = confirm_h1(
+                    close,
+                    record,
+                    dataset_id="btcusdt-1m",
+                    dataset_digest=digest,
+                    root=".",
+                    record_path=path,
+                    config=config,
+                )
+            loaded = load_record(path)
+            self.assertTrue(confirmed.record.sealed_access)
+            self.assertEqual(loaded, confirmed.record)
+            self.assertEqual(loaded.decision, "retain")
+            self.assertEqual(loaded.result, "student_t")
+            self.assertEqual(loaded.status, "Research validated")
+            self.assertEqual(loaded.dataset_digest, digest)
+            self.assertEqual(len(loaded.run_id), 16)
+            self.assertTrue((confirmed.scores["sealed_access"] == True).all())
+            self.assertEqual(set(confirmed.scores["origin"]), {"sealed"})
+            sealed_score = confirmed.scores.set_index("model")["mean_log_score"]
+            self.assertGreater(float(sealed_score["student_t"]), float(sealed_score["gaussian"]))
+            built = horizon_log_returns(close, 5)
+            development, _ = development_returns(built.returns, 5, confirmed.boundary)
+            sealed = sealed_returns(built.returns, 5, confirmed.boundary, confirmatory=True)
+            self.assertTrue(set(development.index).isdisjoint(sealed.index))
+            self.assertEqual(int(confirmed.scores["observations"].iloc[0]), len(sealed))
+            with patch("research.evaluate.code_version", return_value="abc123"):
+                with self.assertRaises(RuntimeError):
+                    confirm_h1(
+                        close,
+                        loaded,
+                        dataset_id="btcusdt-1m",
+                        dataset_digest=digest,
+                        root=".",
+                        record_path=path,
+                        config=config,
+                    )
+            self.assertEqual(load_record(path), loaded)
+
+            other = Path(tmp) / "again.json"
+            save_record(other, opened())
+            shifted = close.copy()
+            shifted.loc[shifted.index >= confirmed.boundary] *= 1.2
+            with patch("research.evaluate.code_version", return_value="abc123"):
+                moved = confirm_h1(
+                    shifted,
+                    opened(),
+                    dataset_id="btcusdt-1m",
+                    dataset_digest=digest,
+                    root=".",
+                    record_path=other,
+                    config=config,
+                )
+            self.assertNotAlmostEqual(
+                float(confirmed.scores["mean_log_score"].iloc[0]),
+                float(moved.scores["mean_log_score"].iloc[0]),
+            )
+            rejected_path = Path(tmp) / "bad-digest.json"
+            save_record(rejected_path, opened())
+            with patch("research.evaluate.sealed_returns", side_effect=AssertionError("sealed read")):
+                with patch("research.evaluate.code_version", return_value="abc123"):
+                    with self.assertRaises(ValueError):
+                        confirm_h1(
+                            close,
+                            opened(),
+                            dataset_id="btcusdt-1m",
+                            dataset_digest="not-a-digest",
+                            root=".",
+                            record_path=rejected_path,
+                            config=config,
+                        )
+            self.assertFalse(load_record(rejected_path).sealed_access)
+            mismatched = replace(opened(), dataset_digest="b" * 64, dataset_id="btcusdt-1m", status="Exploratory")
+            mismatch_path = Path(tmp) / "mismatch.json"
+            save_record(mismatch_path, mismatched)
+            with patch("research.evaluate.sealed_returns", side_effect=AssertionError("sealed read")):
+                with patch("research.evaluate.code_version", return_value="abc123"):
+                    with self.assertRaises(RuntimeError):
+                        confirm_h1(
+                            close,
+                            mismatched,
+                            dataset_id="btcusdt-1m",
+                            dataset_digest=digest,
+                            root=".",
+                            record_path=mismatch_path,
+                            config=config,
+                        )
+            self.assertFalse(load_record(mismatch_path).sealed_access)
 
     def test_a_calibrated_pit_stays_near_the_diagonal(self):
         rng = np.random.default_rng(11)

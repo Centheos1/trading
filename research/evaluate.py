@@ -1,10 +1,15 @@
-"""Notebook-facing evaluation. The sealed test is not read here."""
+"""Notebook-facing evaluation.
+
+Development evaluators do not read the sealed test. ``confirm_h1`` is the
+only function here that does, and only after the code revision is committed.
+"""
 
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -23,7 +28,15 @@ from research.distributions import bonferroni, fit_gaussian, fit_student_t, scor
 from research.manifest import SCHEMA_VERSION, DatasetManifest, DatasetObject, build_manifest
 from research.protocol import BASELINE_CONFIG, H1_CONFIG, H2_CONFIG
 from research.quality import QualityReport, audit_minute_bars
-from research.registry import ExperimentRecord
+from research.registry import (
+    ExperimentRecord,
+    code_version,
+    config_digest,
+    load_record,
+    make_run_id,
+    require_committed,
+    save_record,
+)
 from research.regimes import (
     clock_gap_resets,
     fit_clocked_gaussian_hmm,
@@ -34,7 +47,13 @@ from research.regimes import (
     score_regime_forecast,
 )
 from research.returns import horizon_log_returns
-from research.splits import development_returns, rolling_origins, sealed_boundary, select_available
+from research.splits import (
+    development_returns,
+    rolling_origins,
+    sealed_boundary,
+    sealed_returns,
+    select_available,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +461,139 @@ def evaluate_h1(close: pd.Series, config: dict | None = None) -> H1Evaluation:
         boundary=boundary,
         sealed_access=False,
     )
+
+
+@dataclass(frozen=True)
+class H1Confirmation:
+    """One sealed H1 comparison and the registry record it wrote."""
+
+    scores: pd.DataFrame
+    record: ExperimentRecord
+    boundary: pd.Timestamp
+
+
+def confirm_h1(
+    close: pd.Series,
+    record: ExperimentRecord,
+    *,
+    dataset_id: str,
+    dataset_digest: str,
+    root: Path | str,
+    record_path: Path | str,
+    config: dict | None = None,
+) -> H1Confirmation:
+    """Fit H1 on the development sample and score the sealed year once.
+
+    The model is frozen before any sealed label is read. A dirty tree, a
+    second read, or a dataset other than the recorded freeze raises before
+    that read. The same log-score rule as development decides retain or reject.
+    """
+    version = require_committed(code_version(root))
+    _require_open_h1(record)
+    stored = load_record(record_path)
+    if stored.experiment_id != record.experiment_id:
+        raise RuntimeError(
+            f"record path belongs to {stored.experiment_id}, not {record.experiment_id}"
+        )
+    _require_open_h1(stored)
+    digest = _sha256_digest(dataset_digest)
+    if not dataset_id:
+        raise ValueError("confirmation needs a dataset id")
+    if stored.dataset_digest and stored.dataset_digest != digest:
+        raise RuntimeError(
+            f"confirmation dataset {digest} does not match the recorded freeze {stored.dataset_digest}"
+        )
+    settings = dict(H1_CONFIG)
+    if config:
+        settings.update(config)
+    horizons = tuple(int(item) for item in settings["horizons_minutes"])
+    if horizons != tuple(int(item) for item in stored.horizons):
+        raise ValueError(
+            f"confirmation horizons {list(horizons)} do not match H1 horizons {list(stored.horizons)}"
+        )
+    clock = as_utc_index(close.index)
+    values = pd.Series(close.to_numpy(dtype=float), index=clock, name="close").sort_index()
+    boundary = sealed_boundary(values.index, months=int(settings["sealed_months"]))
+    rows: list[dict] = []
+    for horizon in horizons:
+        built = horizon_log_returns(values, horizon)
+        development, held_out = development_returns(built.returns, horizon, boundary)
+        if held_out == 0:
+            raise RuntimeError(f"horizon {horizon} held no labels out for the sealed test")
+        if len(development) < 30:
+            raise RuntimeError(f"horizon {horizon} development sample has {len(development)} labels")
+        sealed = sealed_returns(built.returns, horizon, boundary, confirmatory=True)
+        if len(sealed) < 30:
+            raise RuntimeError(f"horizon {horizon} sealed sample has {len(sealed)} labels")
+        gaussian = fit_gaussian(development.to_numpy())
+        student = fit_student_t(development.to_numpy())
+        for model in (gaussian, student):
+            score = score_distribution(model, sealed.to_numpy(), alpha=float(settings["var_alpha"]))
+            rows.append(
+                {
+                    "horizon_minutes": horizon,
+                    "origin": "sealed",
+                    "model": score.model,
+                    "observations": score.observations,
+                    "mean_log_score": score.mean_log_score,
+                    "pit_ks_pvalue": score.pit_ks_pvalue,
+                    "var_exceedance_rate": score.var_exceedance_rate,
+                    "var_pvalue": score.var_pvalue,
+                    "expected_shortfall": score.expected_shortfall,
+                    "realised_shortfall": score.realised_shortfall,
+                    "sealed_access": True,
+                }
+            )
+    scores = pd.DataFrame(rows)
+    verdict = h1_development_decision(h1_log_score_comparison(scores)).iloc[0]
+    if verdict.null_decision == "reject":
+        decision = "retain"
+        status = "Research validated"
+        result = "student_t"
+    else:
+        decision = "reject"
+        status = "Rejected"
+        result = "gaussian"
+    configuration = config_digest(settings)
+    run_id = make_run_id(stored.experiment_id, digest, version, configuration)
+    updated = replace(
+        stored,
+        status=status,
+        result=result,
+        decision=decision,
+        dataset_id=dataset_id,
+        dataset_digest=digest,
+        code_version=version,
+        config_digest=configuration,
+        sealed_access=True,
+        run_id=run_id,
+    )
+    save_record(record_path, updated)
+    logger.warning(
+        "H1 confirmatory decision=%s benchmark=%s run=%s boundary=%s",
+        decision,
+        result,
+        run_id,
+        boundary.isoformat(),
+    )
+    return H1Confirmation(scores=scores, record=updated, boundary=boundary)
+
+
+def _require_open_h1(record: ExperimentRecord) -> None:
+    """Refuse a record that has already consumed the sealed test."""
+    if record.experiment_id != "EXP-H01":
+        raise ValueError(f"H1 confirmation needs EXP-H01, got {record.experiment_id}")
+    if record.sealed_access or record.decision in {"retain", "reject"}:
+        raise RuntimeError(
+            f"H1 sealed test has already been used: decision={record.decision!r} sealed_access={record.sealed_access}"
+        )
+
+
+def _sha256_digest(value: str) -> str:
+    """Return a lowercase sha256 hex digest, or raise."""
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"dataset digest must be a sha256 hex string, got {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
