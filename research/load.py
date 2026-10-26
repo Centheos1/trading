@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Iterable
 
 import pandas as pd
 
@@ -47,6 +48,72 @@ def load_research_bars(
     combined.index.name = "timestamp"
     logger.info("Combined %d rows from %d research objects", len(combined), len(objects))
     return combined, objects
+
+
+def load_research_panel(
+    *,
+    venue: str,
+    symbols: Iterable[str],
+    timeframe: str,
+    bucket: str = CANONICAL_BUCKET,
+    profile: str = CANONICAL_PROFILE,
+    region: str = CANONICAL_REGION,
+) -> tuple[dict[str, pd.DataFrame], dict[str, tuple[DatasetObject, ...]]]:
+    """Load every declared panel member and fail if the declaration is invalid."""
+    declared = tuple(symbols)
+    if len(declared) < 2 or len(set(declared)) != len(declared):
+        raise ValueError("research panel needs at least two unique symbols")
+    frames: dict[str, pd.DataFrame] = {}
+    objects: dict[str, tuple[DatasetObject, ...]] = {}
+    for symbol in declared:
+        frame, identified = load_research_bars(
+            venue=venue,
+            symbol=symbol,
+            timeframe=timeframe,
+            bucket=bucket,
+            profile=profile,
+            region=region,
+        )
+        frames[symbol] = frame
+        objects[symbol] = identified
+    logger.info("Loaded research panel symbols=%s", list(declared))
+    return frames, objects
+
+
+def load_research_series(
+    series: Iterable[tuple[str, str]],
+    *,
+    timeframe: str,
+    bucket: str = CANONICAL_BUCKET,
+    profile: str = CANONICAL_PROFILE,
+    region: str = CANONICAL_REGION,
+) -> tuple[dict[str, pd.DataFrame], dict[str, tuple[DatasetObject, ...]]]:
+    """Load a declared (venue, symbol) series list and preserve its order.
+
+    Symbols must be unique across venues. A missing series fails the load;
+    it is not dropped from the panel.
+    """
+    declared = tuple(series)
+    symbols = tuple(symbol for _, symbol in declared)
+    if len(declared) < 2 or len(set(symbols)) != len(symbols):
+        raise ValueError("research series need at least two unique symbols")
+    frames: dict[str, pd.DataFrame] = {}
+    objects: dict[str, tuple[DatasetObject, ...]] = {}
+    for venue, symbol in declared:
+        if not venue or not symbol:
+            raise ValueError(f"research series entry {(venue, symbol)!r} is incomplete")
+        frame, identified = load_research_bars(
+            venue=venue,
+            symbol=symbol,
+            timeframe=timeframe,
+            bucket=bucket,
+            profile=profile,
+            region=region,
+        )
+        frames[symbol] = frame
+        objects[symbol] = identified
+    logger.info("Loaded research series=%s", list(declared))
+    return frames, objects
 
 
 def normalize_bars(frame: pd.DataFrame) -> pd.DataFrame:

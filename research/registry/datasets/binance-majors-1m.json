@@ -1,0 +1,250 @@
+{
+  "alignment_exclusions": 370500,
+  "bucket": "trading-data-centheos",
+  "dataset_id": "binance-majors-1m",
+  "digest": "521d37ac1ceb1825b8734b8128760b88acfc6d41010c0d6f1ac4cf3b469e0696",
+  "end": "2026-10-18T22:35:00+00:00",
+  "members": [
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "binance-majors-1m-btcusdt",
+      "digest": "151fe467d048a337d68c7f110201fd99a83798aeff7dc47b514eb4def252cd49",
+      "end": "2026-10-18T22:35:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "21230ccfcadb8e9d453f6140c4cae35a-2",
+          "key": "ohlcv/binance/BTCUSDT/1m.parquet",
+          "size": 101746188,
+          "version_id": "2ID349llU2NTv.oYdRWCaAc7Uym83TA4"
+        },
+        {
+          "etag": "d9a8c2e0a0d211a9f50c9af0b06f7da8",
+          "key": "ohlcv/binance/BTCUSDT/1m/2026.parquet",
+          "size": 5537421,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T00:00:00+00:00",
+      "symbol": "BTCUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "binance-majors-1m-ethusdt",
+      "digest": "170e5725e98dacfae876df30a7a31596a4deef09d982b146f4506b3516bda1a7",
+      "end": "2026-10-18T22:35:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "695c91867b34da5eedc82c1b5adbc78f-2",
+          "key": "ohlcv/binance/ETHUSDT/1m.parquet",
+          "size": 92455903,
+          "version_id": "24_TzoOu0yrDHp_BTCaWTA9z.UomIdj0"
+        },
+        {
+          "etag": "b7a8dff54796e9f358703d3305774822",
+          "key": "ohlcv/binance/ETHUSDT/1m/2026.parquet",
+          "size": 5106061,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T00:00:00+00:00",
+      "symbol": "ETHUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "binance-majors-1m-bnbusdt",
+      "digest": "2d7417b5f9b33ef62ee6b765eb26cdc32765d4a587c2e2b6b59f9ae56262821c",
+      "end": "2026-10-18T22:35:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "1520df17d05345bc391458f015d43dda-2",
+          "key": "ohlcv/binance/BNBUSDT/1m.parquet",
+          "size": 70959601,
+          "version_id": "JHxKIEBYOUL.8BDnSOujKeQQib5m83a6"
+        },
+        {
+          "etag": "a6a709842cdfbafcd5f0ec5cdad1e837",
+          "key": "ohlcv/binance/BNBUSDT/1m/2026.parquet",
+          "size": 3730131,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-02-10T08:01:00+00:00",
+      "symbol": "BNBUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "binance-majors-1m-xrpusdt",
+      "digest": "e7eb12b6fd1ee3fc87dcb1e496452ca281d66c9d23f7e97fba678987247e6566",
+      "end": "2026-10-18T22:35:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "15085bb5b9b86f74b86842610fde327c",
+          "key": "ohlcv/binance/XRPUSDT/1m/2020.parquet",
+          "size": 9807355,
+          "version_id": "3tQUyt9pHOCwCiuik.ZhH..eO.ZxtQV9"
+        },
+        {
+          "etag": "2ef509a8e286c123fb85c1d3120f43d5",
+          "key": "ohlcv/binance/XRPUSDT/1m/2021.parquet",
+          "size": 10946880,
+          "version_id": "ii1faH6FH_e6HY6Bgqc9gkDGlhl1fFSm"
+        },
+        {
+          "etag": "3095d12118583fdd09161abf327a79c1",
+          "key": "ohlcv/binance/XRPUSDT/1m/2022.parquet",
+          "size": 10217514,
+          "version_id": "yF2vlFj_MAQF5r5HNb01CgdaMEAk7mPs"
+        },
+        {
+          "etag": "ef0da485699b6647541fa9fbab5fee00",
+          "key": "ohlcv/binance/XRPUSDT/1m/2023.parquet",
+          "size": 10203011,
+          "version_id": "PrUliVVVDK5Lgf70UqG5SwQ4pEMqN05l"
+        },
+        {
+          "etag": "2a1fba15368d32e99f7bbe6ba2ea81fe",
+          "key": "ohlcv/binance/XRPUSDT/1m/2024.parquet",
+          "size": 11014164,
+          "version_id": "bjSMvg8IyB.5dmllNN5N7CWQMwo4JPnm"
+        },
+        {
+          "etag": "f2e13c37b7f39e4259a31d06ff844ecc",
+          "key": "ohlcv/binance/XRPUSDT/1m/2025.parquet",
+          "size": 11012370,
+          "version_id": "FUgEB0NfNnnef7_UF7kfvunoYd_7TSHS"
+        },
+        {
+          "etag": "42b027e085656e582aafa233e74113f2",
+          "key": "ohlcv/binance/XRPUSDT/1m/2026.parquet",
+          "size": 8616089,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-06T08:21:00+00:00",
+      "symbol": "XRPUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "binance-majors-1m-adausdt",
+      "digest": "30c0ab4b845f284d2006228fdcc396ee956a40b844ff4502846b0c6f2fae7e44",
+      "end": "2026-10-18T22:35:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "ad013fd6e51ab610e1f0bdb42112ed18-2",
+          "key": "ohlcv/binance/ADAUSDT/1m.parquet",
+          "size": 66427270,
+          "version_id": "lelw.Vt2BIoFhHz_GqUnm9Aj.AS8zXDT"
+        },
+        {
+          "etag": "bc0089aedb6382a6616acd63bec4444d",
+          "key": "ohlcv/binance/ADAUSDT/1m/2026.parquet",
+          "size": 3556039,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-31T08:01:00+00:00",
+      "symbol": "ADAUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "binance-majors-1m-solusdt",
+      "digest": "1add171f8f2a59db187655ef1c5a8dae1bd24e9e3e7ef683d1e6e42ec19c03e8",
+      "end": "2026-10-18T22:35:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "06aac33a7ae5dc5d3d477107360f208b-2",
+          "key": "ohlcv/binance/SOLUSDT/1m.parquet",
+          "size": 65446689,
+          "version_id": "5EdkhYSbny2oUPdgtwpnJhvcbcfs7nlL"
+        },
+        {
+          "etag": "c2a0eccd00e6c88b13186e1e5ffc7787",
+          "key": "ohlcv/binance/SOLUSDT/1m/2026.parquet",
+          "size": 4065987,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-09-14T07:00:00+00:00",
+      "symbol": "SOLUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    }
+  ],
+  "profile": "trading",
+  "schema_version": "minute-bars-v1",
+  "start": "2020-09-14T07:00:00+00:00",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "SOLUSDT"
+  ],
+  "timeframe": "1m",
+  "venue": "binance"
+}

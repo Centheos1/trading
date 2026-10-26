@@ -46,6 +46,7 @@ class RebalancePlan:
     target_return_used: float | None
     target_units: dict[str, float]
     weights: dict[str, float]
+    mix_weights: dict[str, float] = field(default_factory=dict)
     legs: list[OrderLeg] = field(default_factory=list)
     skips: list[dict] = field(default_factory=list)
     sent_to_broker: bool = False
@@ -71,6 +72,7 @@ class RebalancePlan:
         legs = [OrderLeg(**leg) for leg in payload.get("legs", [])]
         data = dict(payload)
         data["legs"] = legs
+        data.setdefault("mix_weights", {})
         return cls(**data)
 
 
@@ -266,82 +268,55 @@ def reconcile_plan(
     return plan
 
 
-def _cap_scale(weights: dict[str, float], weight_cap: float, gross_cap: float) -> float:
-    gross = sum(abs(float(weight)) for weight in weights.values())
-    largest = max((abs(float(weight)) for weight in weights.values()), default=0.0)
-    limits = []
-    if largest > 0:
-        limits.append(weight_cap / largest)
-    if gross > 0:
-        limits.append(gross_cap / gross)
-    if not limits:
-        return 1.0
-    scale = min(limits)
-    if scale <= 0 or not _finite(scale):
-        raise ValueError(f"portfolio caps do not allow a positive allocation, scale={scale}")
-    return scale
-
-
-def _fit_margin_scale(
+def margin_notional_weights(
+    mix: dict[str, float],
+    margin_rates: dict[str, float],
     *,
-    weights: dict[str, float],
-    targets,
-    mids: dict[str, float],
-    conversions: dict[str, float],
-    rates: dict[str, float],
-    margin_capacity: float,
-    weight_cap: float,
-    gross_cap: float,
-) -> tuple[float, float, str]:
-    """Scale every weight together toward 25% margin, never through 30%.
+    margin_fraction: float,
+) -> dict[str, float]:
+    """Turn a fully invested mix into notional fractions of NAV.
 
-    The research weight and gross caps shape the mix. They do not limit the
-    lot size. A book that is already at those caps is levered uniformly until
-    margin used is about 25% of capacity.
+    ``mix`` sums to about 1. Each name receives
+    ``margin_fraction * |mix| / gross(mix)`` of NAV as margin, and its
+    notional is that margin divided by the instrument margin rate.
+    The account return is the sum of these notionals times price returns.
     """
-    if margin_capacity <= 0 or not _finite(margin_capacity):
-        raise ValueError(f"margin capacity must be positive, got {margin_capacity}")
-    base_units = targets(1.0)
-    base_margin = _margin_required(base_units, mids, conversions, rates)
-    if base_margin <= 0:
-        return 1.0, 0.0, "base portfolio margin is zero"
-    research_limit = _cap_scale(weights, weight_cap, gross_cap)
-    target_margin = margin_capacity * MARGIN_TARGET
-    ceiling_margin = margin_capacity * MARGIN_CEILING
-    desired = target_margin / base_margin
-    ceiling_scale = ceiling_margin / base_margin
-    scale = min(desired, ceiling_scale)
-    estimated = base_margin
-    for _ in range(10):
-        units = targets(scale)
-        estimated = _margin_required(units, mids, conversions, rates)
-        if estimated <= ceiling_margin + 1e-8:
-            break
-        scale *= ceiling_margin / estimated * 0.999
-    if estimated > ceiling_margin + 1e-6:
+    if margin_fraction <= 0 or not _finite(margin_fraction) or margin_fraction > MARGIN_CEILING:
         raise ValueError(
-            f"rounded target margin {estimated:.2f} exceeds the {MARGIN_CEILING:.0%} ceiling "
-            f"{ceiling_margin:.2f}"
+            f"margin fraction must be in (0, {MARGIN_CEILING:.0%}], got {margin_fraction}"
         )
-    utilization = estimated / margin_capacity
-    if scale > research_limit + 1e-6:
-        reason = (
-            f"allocation scaled to {scale:.6f} past the research cap {research_limit:.6f}; "
-            f"margin utilization {utilization:.2%} of the {MARGIN_TARGET:.0%} target"
-        )
-    elif utilization < MARGIN_FLOOR:
-        reason = (
-            f"margin utilization {utilization:.2%} is below {MARGIN_FLOOR:.0%} "
-            f"at allocation {scale:.6f}"
-        )
-    elif abs(scale - desired) > 1e-6:
-        reason = (
-            f"allocation scaled to {scale:.6f}; margin utilization {utilization:.2%} "
-            f"of the {MARGIN_TARGET:.0%} target"
-        )
-    else:
-        reason = f"allocation {scale:.6f} uses {utilization:.2%} margin"
-    return scale, estimated, reason
+    gross = sum(abs(float(weight)) for weight in mix.values())
+    if gross <= 0 or not _finite(gross):
+        raise ValueError(f"mix gross must be positive, got {gross}")
+    traded: dict[str, float] = {}
+    for name, weight in mix.items():
+        signed = float(weight)
+        if _near_zero(signed):
+            traded[name] = 0.0
+            continue
+        try:
+            rate = float(margin_rates[name])
+        except KeyError as exc:
+            raise ValueError(f"{name} has no margin rate") from exc
+        if rate <= 0 or not _finite(rate):
+            raise ValueError(f"{name} margin rate must be positive, got {rate}")
+        traded[name] = margin_fraction * signed / (gross * rate)
+    return traded
+
+
+def _allocation_scale(mix: dict[str, float], traded: dict[str, float]) -> float:
+    """Return the common notional multiple when every name shares one rate."""
+    ratios: list[float] = []
+    for name, weight in mix.items():
+        signed = float(weight)
+        if _near_zero(signed):
+            continue
+        ratios.append(float(traded[name]) / signed)
+    if not ratios:
+        return 1.0
+    if all(abs(ratio - ratios[0]) <= 1e-6 * max(1.0, abs(ratios[0])) for ratio in ratios):
+        return ratios[0]
+    return 1.0
 
 
 def build_plan(
@@ -364,22 +339,34 @@ def build_plan(
     note: str = "",
     sent_to_broker: bool = False,
 ) -> RebalancePlan:
-    """Build the full plan for one New York session. Does not send it."""
+    """Build the full plan for one New York session. Does not send it.
+
+    ``weights`` is the sum-to-1 mix. When ``margin_capacity`` is set, each
+    name's notional is its share of the 25% margin budget divided by its
+    margin rate. ``weight_cap`` and ``gross_cap`` describe that mix. They
+    are not applied again to the notionals.
+    """
     steps = trade_steps or {}
     conversions = quote_home_conversions or {
         name: 1.0 for name in weights
     }
     rates = margin_rates or {}
+    if weight_cap <= 0 or not _finite(weight_cap):
+        raise ValueError(f"weight cap must be positive, got {weight_cap}")
+    if gross_cap < 1 or not _finite(gross_cap):
+        raise ValueError(f"gross cap must be at least 1, got {gross_cap}")
     if margin_budget is not None and (
         margin_budget <= 0 or not _finite(margin_budget)
     ):
         raise ValueError(f"margin budget must be positive, got {margin_budget}")
+    mix = {name: float(value) for name, value in weights.items()}
+    sized = dict(mix)
     allocation_scale = 1.0
     margin_utilization = None
 
-    def targets(scale: float) -> dict[str, float]:
+    def targets(scale: float, book: dict[str, float]) -> dict[str, float]:
         result: dict[str, float] = {}
-        for name, weight in weights.items():
+        for name, weight in book.items():
             step = float(steps.get(name, min_trade_units))
             try:
                 conversion = float(conversions[name])
@@ -396,27 +383,45 @@ def build_plan(
             )
         return result
 
-    target_units = targets(allocation_scale)
+    target_units = targets(allocation_scale, sized)
     estimated_margin = None
     if margin_capacity is not None:
         if not rates:
             raise ValueError("margin rates are required when margin capacity is set")
-        allocation_scale, estimated_margin, margin_note = _fit_margin_scale(
-            weights={name: float(value) for name, value in weights.items()},
-            targets=targets,
-            mids=mids,
-            conversions=conversions,
-            rates=rates,
-            margin_capacity=margin_capacity,
-            weight_cap=weight_cap,
-            gross_cap=gross_cap,
-        )
-        target_units = targets(allocation_scale)
-        margin_utilization = estimated_margin / margin_capacity
+        fraction = MARGIN_TARGET * float(margin_capacity) / float(nav)
+        if fraction > MARGIN_CEILING:
+            logger.warning(
+                "margin target %.2f%% of capacity is above the %.0f%% ceiling; clamping",
+                fraction * 100,
+                MARGIN_CEILING * 100,
+            )
+            fraction = MARGIN_CEILING
+        sized = margin_notional_weights(mix, rates, margin_fraction=fraction)
+        allocation_scale = _allocation_scale(mix, sized)
+        target_units = targets(1.0, sized)
+        estimated_margin = _margin_required(target_units, mids, conversions, rates)
         ceiling = margin_capacity * MARGIN_CEILING
+        for _ in range(8):
+            if estimated_margin <= ceiling + 1e-6:
+                break
+            shrink = ceiling / estimated_margin * 0.999
+            sized = {name: value * shrink for name, value in sized.items()}
+            allocation_scale *= shrink
+            target_units = targets(1.0, sized)
+            estimated_margin = _margin_required(target_units, mids, conversions, rates)
+        if estimated_margin > ceiling + 1e-6:
+            raise ValueError(
+                f"rounded target margin {estimated_margin:.2f} exceeds the "
+                f"{MARGIN_CEILING:.0%} ceiling {ceiling:.2f}"
+            )
+        margin_utilization = estimated_margin / margin_capacity
         if margin_budget is None or ceiling < margin_budget:
             margin_budget = ceiling
-        if "below" in margin_note:
+        margin_note = (
+            f"margin budget {fraction:.2%} of NAV split by mix weight and divided by "
+            f"margin rate; utilization {margin_utilization:.2%}"
+        )
+        if margin_utilization < MARGIN_FLOOR:
             logger.warning(margin_note)
         else:
             logger.info(margin_note)
@@ -431,7 +436,7 @@ def build_plan(
             if estimated_margin <= margin_budget + 1e-8:
                 break
             allocation_scale *= margin_budget / estimated_margin * 0.999
-            target_units = targets(allocation_scale)
+            target_units = targets(allocation_scale, mix)
             estimated_margin = _margin_required(
                 target_units, mids, conversions, rates
             )
@@ -468,7 +473,8 @@ def build_plan(
         status=status,
         target_return_used=target_return_used,
         target_units=target_units,
-        weights={name: float(value) for name, value in weights.items()},
+        weights={name: float(value) for name, value in sized.items()},
+        mix_weights=mix,
         legs=legs,
         skips=skips,
         sent_to_broker=sent_to_broker,

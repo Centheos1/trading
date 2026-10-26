@@ -21,7 +21,13 @@ from oanda_portfolio.frontier import (
     ledoit_wolf_covariance,
     shrink_correlation,
 )
-from oanda_portfolio.plan import build_legs, build_plan, units_from_weight
+from oanda_portfolio.plan import (
+    RebalancePlan,
+    build_legs,
+    build_plan,
+    margin_notional_weights,
+    units_from_weight,
+)
 from oanda_portfolio.practice import (
     FillResult,
     PlanStore,
@@ -32,7 +38,13 @@ from oanda_portfolio.practice import (
     trade_step,
 )
 from oanda_portfolio.select import select_portfolio
-from oanda_portfolio.simulate import choose_size, simulate
+from oanda_portfolio.simulate import (
+    DayDecision,
+    SimulationResult,
+    book_for_session,
+    choose_size,
+    simulate,
+)
 
 
 def _minutes(timestamps, closes, spreads):
@@ -394,7 +406,41 @@ class TestOrderPlan(unittest.TestCase):
         self.assertGreater(plan.allocation_scale, 1.0)
         self.assertAlmostEqual(plan.margin_utilization, 0.25, places=3)
         self.assertLessEqual(plan.estimated_margin, 100_000 * 0.30)
-        self.assertIn("past the research cap", plan.note)
+        self.assertIn("margin rate", plan.note)
+        self.assertAlmostEqual(plan.weights["EUR_USD"], 0.25 / 0.05, places=6)
+
+    def test_margin_budget_gives_the_lower_rate_more_notional(self):
+        traded = margin_notional_weights(
+            {"LOW": 0.6, "HIGH": -0.4},
+            {"LOW": 0.05, "HIGH": 0.25},
+            margin_fraction=0.25,
+        )
+        self.assertAlmostEqual(traded["LOW"], 0.25 * 0.6 / 0.05)
+        self.assertAlmostEqual(traded["HIGH"], 0.25 * -0.4 / 0.25)
+        self.assertAlmostEqual(abs(traded["LOW"]) * 0.05 + abs(traded["HIGH"]) * 0.25, 0.25)
+        self.assertGreater(abs(traded["LOW"]) / 0.6, abs(traded["HIGH"]) / 0.4)
+        with self.assertRaises(ValueError):
+            margin_notional_weights({"EUR_USD": 1.0}, {}, margin_fraction=0.25)
+
+        plan = build_plan(
+            session_date="2026-10-20",
+            list_version="v1",
+            nav=100_000,
+            weights={"LOW": 0.6, "HIGH": -0.4},
+            mids={"LOW": 1.0, "HIGH": 1.0},
+            current_units={},
+            min_trade_units=1,
+            target_return_used=0.2,
+            quote_home_conversions={"LOW": 1.0, "HIGH": 1.0},
+            margin_rates={"LOW": 0.05, "HIGH": 0.25},
+            margin_capacity=100_000,
+        )
+        self.assertAlmostEqual(plan.weights["LOW"], traded["LOW"], places=6)
+        self.assertAlmostEqual(plan.weights["HIGH"], traded["HIGH"], places=6)
+        self.assertAlmostEqual(plan.mix_weights["LOW"], 0.6)
+        self.assertAlmostEqual(plan.margin_utilization, 0.25, places=3)
+        self.assertEqual(plan.target_units["LOW"], 300_000)
+        self.assertEqual(plan.target_units["HIGH"], -40_000)
 
 
 class FakeBroker:
@@ -673,9 +719,178 @@ class TestWalkForward(unittest.TestCase):
         self.assertTrue(result.final_weights is not None)
         self.assertAlmostEqual(float(result.final_weights.sum()), 1.0, places=5)
         self.assertLessEqual(float(result.final_weights.abs().max()), 0.8 + 1e-6)
+        self.assertIsNotNone(result.final_mix)
+        self.assertAlmostEqual(float(result.final_mix.sum()), 1.0, places=5)
+        rated = simulate(
+            closes,
+            spreads,
+            FrontierConfig(
+                target_return=0.05,
+                lookback=30,
+                min_overlap=30,
+                gross_cap=2.0,
+                weight_cap=0.8,
+                portfolio_sizes=(2, 3),
+                score_months=2,
+                min_trade_units=1,
+                research_nav=50_000,
+                margin_rates={name: 0.05 for name in closes.columns},
+            ),
+        )
+        mix = rated.final_mix
+        notionals = rated.final_weights
+        self.assertIsNotNone(mix)
+        self.assertAlmostEqual(float(mix.sum()), 1.0, places=5)
+        margin = float(sum(abs(notionals[name]) * 0.05 for name in notionals.index))
+        self.assertAlmostEqual(margin, 0.25, places=4)
+        carried = book_for_session(rated, rated.plans[-1].session_date)
+        self.assertAlmostEqual(sum(carried.weights.values()), 1.0, places=5)
+        with self.assertRaises(ValueError):
+            simulate(
+                closes,
+                spreads,
+                FrontierConfig(
+                    target_return=0.05,
+                    lookback=30,
+                    min_overlap=30,
+                    portfolio_sizes=(2,),
+                    score_months=2,
+                    margin_rates={"EUR_USD": 0.05},
+                ),
+            )
+
         traded = result.covariance_comparison["ledoit_wolf"]
         sample = result.covariance_comparison["sample"]
         self.assertFalse(np.allclose(traded.to_numpy(), sample.to_numpy()))
+
+    def test_a_skipped_final_session_keeps_the_previous_weights(self):
+        index = pd.bdate_range("2024-01-02", periods=140)
+        rng = np.random.default_rng(1)
+        shock = rng.normal(0.0, 0.002, size=(len(index), 4))
+        drift = np.array([0.0002, 0.0002, -0.0001, 0.0004])
+        closes = pd.DataFrame(
+            100 * np.exp(np.cumsum(shock + drift, axis=0)),
+            index=index,
+            columns=["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD"],
+        )
+        spreads = pd.DataFrame(
+            {"EUR_USD": 0.0002, "GBP_USD": 0.0003, "USD_JPY": 0.02, "XAU_USD": 0.5},
+            index=index,
+        )
+        closes.loc[index[-1]] = np.nan
+        config = FrontierConfig(
+            target_return=0.05,
+            lookback=30,
+            min_overlap=30,
+            gross_cap=2.0,
+            weight_cap=0.8,
+            portfolio_sizes=(2, 3),
+            score_months=2,
+            min_trade_units=1,
+            research_nav=50_000,
+        )
+        result = simulate(closes, spreads, config)
+        session = str(index[-1].date())
+        self.assertTrue(result.plans)
+        self.assertNotEqual(result.plans[-1].session_date, session)
+        book = book_for_session(result, session)
+        self.assertTrue(book.held)
+        self.assertEqual(book.weights, result.plans[-1].weights)
+        self.assertEqual(book.list_version, result.plans[-1].list_version)
+        self.assertEqual(book.target_return_used, result.plans[-1].target_return_used)
+        self.assertIn("missing daily candle", book.reason)
+
+    def test_book_for_session_returns_the_plan_when_that_session_rebalanced(self):
+        weights = {"EUR_USD": 0.6, "GBP_USD": 0.4}
+        plan = RebalancePlan(
+            session_date="2026-10-16",
+            list_version="2026-10-16-k20",
+            nav=100_000,
+            status="simulated",
+            target_return_used=0.2,
+            target_units={"EUR_USD": 10, "GBP_USD": -4},
+            weights=weights,
+            note="optimized",
+        )
+        result = SimulationResult(
+            config=FrontierConfig(),
+            paths={},
+            chosen_size={},
+            chosen_returns=pd.Series(dtype=float),
+            plans=[plan],
+        )
+        book = book_for_session(result, "2026-10-16")
+        self.assertFalse(book.held)
+        self.assertEqual(book.weights, weights)
+        self.assertEqual(book.reason, "optimized")
+
+    def test_book_for_session_holds_weights_when_the_candle_is_missing(self):
+        weights = {"CHINAH_HKD": 0.2, "EUR_USD": 0.8}
+        plan = RebalancePlan(
+            session_date="2026-10-16",
+            list_version="2026-10-16-k20",
+            nav=100_000,
+            status="simulated",
+            target_return_used=0.2,
+            target_units={"CHINAH_HKD": 1, "EUR_USD": 2},
+            weights=weights,
+        )
+        decision = DayDecision(
+            session_date="2026-10-19",
+            portfolio_size=20,
+            net_return=None,
+            weights=dict(weights),
+            skipped=True,
+            reason="missing daily candle: ['CHINAH_HKD']",
+            symbols=("CHINAH_HKD", "EUR_USD"),
+            target_used=None,
+        )
+        result = SimulationResult(
+            config=FrontierConfig(),
+            paths={20: [decision]},
+            chosen_size={},
+            chosen_returns=pd.Series(dtype=float),
+            plans=[plan],
+        )
+        book = book_for_session(result, "2026-10-19")
+        self.assertTrue(book.held)
+        self.assertEqual(book.session_date, "2026-10-19")
+        self.assertEqual(book.weights, weights)
+        self.assertEqual(book.list_version, "2026-10-16-k20")
+        self.assertEqual(book.target_return_used, 0.2)
+        self.assertIn("CHINAH_HKD", book.reason)
+
+    def test_book_for_session_raises_when_the_skip_carries_no_book(self):
+        plan = RebalancePlan(
+            session_date="2026-10-16",
+            list_version="2026-10-16-k20",
+            nav=100_000,
+            status="simulated",
+            target_return_used=0.2,
+            target_units={"EUR_USD": 1},
+            weights={"EUR_USD": 1.0},
+        )
+        decision = DayDecision(
+            session_date="2026-10-19",
+            portfolio_size=20,
+            net_return=None,
+            weights={},
+            skipped=True,
+            reason="no eligible list",
+            symbols=(),
+            target_used=None,
+        )
+        result = SimulationResult(
+            config=FrontierConfig(),
+            paths={20: [decision]},
+            chosen_size={},
+            chosen_returns=pd.Series(dtype=float),
+            plans=[plan],
+        )
+        with self.assertRaises(RuntimeError) as raised:
+            book_for_session(result, "2026-10-19")
+        self.assertIn("2026-10-19", str(raised.exception))
+        self.assertIn("2026-10-16", str(raised.exception))
 
 
 if __name__ == "__main__":

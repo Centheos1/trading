@@ -1,0 +1,22 @@
+{
+  "code_version": "ad29123c1ddb52450245342d704ab33b3ec748e4+dirty",
+  "component": "research.wave",
+  "config_digest": "ba39c8e6d2070dd3cc66551399b21ddd5aca79e26348cb6f685d4232bee12562",
+  "dataset_digest": "c1192eca8fa673c386b4ff3aad751f4f2d4895e2b02d7b693a42aac1ecd28188",
+  "dataset_id": "btcusdt-1m",
+  "decision": "",
+  "experiment_id": "EXP-H04",
+  "horizons": [
+    5,
+    15,
+    60
+  ],
+  "hypothesis": "First-passage probability decisions improve after-cost risk-adjusted outcomes versus hard-label Wave and always-in-market controls under a frozen volatility-targeted sizer.",
+  "notebook": "notebooks/research/06_wave_probability.ipynb",
+  "null": "Probability-aware Wave decisions add no after-cost Sharpe improvement over both registered controls at every declared horizon.",
+  "parent_hypothesis": "EXP-H01",
+  "result": "first_passage_probability",
+  "run_id": "",
+  "sealed_access": false,
+  "status": "Exploratory"
+}

@@ -56,6 +56,24 @@ class DatasetManifest:
     digest: str
 
 
+@dataclass(frozen=True)
+class PanelManifest:
+    """Immutable identity of an aligned collection of symbol datasets."""
+
+    dataset_id: str
+    venue: str
+    symbols: tuple[str, ...]
+    timeframe: str
+    bucket: str
+    profile: str
+    members: tuple[DatasetManifest, ...]
+    start: str
+    end: str
+    alignment_exclusions: int
+    schema_version: str
+    digest: str
+
+
 def _s3_client(profile: str, region: str):
     try:
         import boto3
@@ -207,6 +225,145 @@ def canonical_payload(manifest: DatasetManifest) -> dict:
 def content_digest(manifest: DatasetManifest) -> str:
     raw = json.dumps(canonical_payload(manifest), sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
+
+
+def build_panel_manifest(
+    *,
+    dataset_id: str,
+    members: tuple[DatasetManifest, ...] | list[DatasetManifest],
+    start: str,
+    end: str,
+    alignment_exclusions: int,
+    allow_cross_venue: bool = False,
+) -> PanelManifest:
+    """Bind a fixed symbol order and aligned interval to member manifests."""
+    ordered = tuple(members)
+    if not dataset_id:
+        raise ValueError("panel dataset_id is required")
+    if len(ordered) < 2:
+        raise ValueError("a panel manifest needs at least two member datasets")
+    for member in ordered:
+        verify_manifest(member)
+    symbols = tuple(member.symbol for member in ordered)
+    if len(set(symbols)) != len(symbols):
+        raise ValueError(f"panel manifest contains duplicate symbols: {symbols}")
+    venues = {member.venue for member in ordered}
+    timeframes = {member.timeframe for member in ordered}
+    buckets = {member.bucket for member in ordered}
+    profiles = {member.profile for member in ordered}
+    schemas = {member.schema_version for member in ordered}
+    shared = (timeframes, buckets, profiles, schemas)
+    if not allow_cross_venue:
+        shared = (venues, *shared)
+    if any(len(values) != 1 for values in shared):
+        raise ValueError(
+            "panel members must share timeframe, bucket, profile, and schema"
+            if allow_cross_venue
+            else "panel members must share venue, timeframe, bucket, profile, and schema"
+        )
+    if allow_cross_venue and len(venues) < 2:
+        raise ValueError("cross-venue panel was requested but every member uses the same venue")
+    if start >= end:
+        raise ValueError(f"panel start {start} is not before end {end}")
+    if alignment_exclusions < 0:
+        raise ValueError(f"panel alignment exclusions cannot be negative: {alignment_exclusions}")
+    draft = PanelManifest(
+        dataset_id=dataset_id,
+        venue="cross-venue" if len(venues) > 1 else ordered[0].venue,
+        symbols=symbols,
+        timeframe=ordered[0].timeframe,
+        bucket=ordered[0].bucket,
+        profile=ordered[0].profile,
+        members=ordered,
+        start=start,
+        end=end,
+        alignment_exclusions=int(alignment_exclusions),
+        schema_version=ordered[0].schema_version,
+        digest="",
+    )
+    return PanelManifest(**(asdict(draft) | {"members": ordered, "symbols": symbols, "digest": panel_content_digest(draft)}))
+
+
+def panel_canonical_payload(manifest: PanelManifest) -> dict:
+    """Return the canonical panel payload without its aggregate digest."""
+    payload = asdict(manifest)
+    payload.pop("digest", None)
+    payload["symbols"] = list(manifest.symbols)
+    payload["members"] = [
+        canonical_payload(member) | {"digest": member.digest} for member in manifest.members
+    ]
+    return payload
+
+
+def panel_content_digest(manifest: PanelManifest) -> str:
+    raw = json.dumps(panel_canonical_payload(manifest), sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def verify_panel_manifest(manifest: PanelManifest) -> None:
+    for member in manifest.members:
+        verify_manifest(member)
+    actual = panel_content_digest(manifest)
+    if actual != manifest.digest:
+        raise ValueError(
+            f"panel dataset {manifest.dataset_id} digest mismatch: "
+            f"recorded {manifest.digest} actual {actual}"
+        )
+
+
+def save_panel_manifest(path: Path | str, manifest: PanelManifest) -> None:
+    """Atomically write a verified panel manifest."""
+    verify_panel_manifest(manifest)
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    payload = panel_canonical_payload(manifest) | {"digest": manifest.digest}
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    os.replace(temporary, target)
+
+
+def load_panel_manifest(path: Path | str) -> PanelManifest:
+    """Load a panel manifest and verify every member and aggregate digest."""
+    payload = json.loads(Path(path).read_text())
+    try:
+        members = []
+        for item in payload["members"]:
+            members.append(
+                DatasetManifest(
+                    dataset_id=item["dataset_id"],
+                    venue=item["venue"],
+                    symbol=item["symbol"],
+                    timeframe=item["timeframe"],
+                    bucket=item["bucket"],
+                    profile=item["profile"],
+                    objects=tuple(DatasetObject(**obj) for obj in item["objects"]),
+                    start=item["start"],
+                    end=item["end"],
+                    schema_version=item["schema_version"],
+                    exclusions=QualityExclusions(**item["exclusions"]),
+                    digest=item["digest"],
+                )
+            )
+        manifest = PanelManifest(
+            dataset_id=payload["dataset_id"],
+            venue=payload["venue"],
+            symbols=tuple(payload["symbols"]),
+            timeframe=payload["timeframe"],
+            bucket=payload["bucket"],
+            profile=payload["profile"],
+            members=tuple(members),
+            start=payload["start"],
+            end=payload["end"],
+            alignment_exclusions=int(payload["alignment_exclusions"]),
+            schema_version=payload["schema_version"],
+            digest=payload["digest"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"panel manifest {path} is incomplete: {exc}") from exc
+    verify_panel_manifest(manifest)
+    if manifest.symbols != tuple(member.symbol for member in manifest.members):
+        raise ValueError(f"panel manifest {path} symbol order does not match its members")
+    return manifest
 
 
 def verify_manifest(manifest: DatasetManifest) -> None:

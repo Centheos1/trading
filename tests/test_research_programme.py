@@ -23,12 +23,15 @@ from research.evaluate import (
     align_to_frozen_dataset,
     evaluate_baselines,
     confirm_h1,
+    confirm_h2,
     evaluate_h1,
     evaluate_h2,
     freeze_dataset,
     h1_development_decision,
     h1_var_coverage_family,
+    h2_development_decision,
     h2_log_score_comparison,
+    h2_var_coverage_family,
     require_frozen_dataset,
 )
 from research.protocol import BASELINE_CONFIG, H1_CONFIG, H2_CONFIG
@@ -56,6 +59,7 @@ from research.regimes import (
     clock_gap_resets,
     filtered_probabilities,
     filtered_probability_frame,
+    fit_clocked_gaussian_hmm,
     fit_gaussian_hmm,
     fit_regime_densities,
     fit_weighted_gaussian,
@@ -454,6 +458,71 @@ class TestDistributions(unittest.TestCase):
         broken.loc[0, "var_pvalue"] = float("nan")
         with self.assertRaises(ValueError):
             h1_var_coverage_family(broken)
+
+    def test_h2_var_coverage_family_uses_the_benchmark_and_the_mixture(self):
+        scores = pd.DataFrame(
+            {
+                "horizon_minutes": [5, 5, 5, 5, 15, 15],
+                "model": [
+                    "student_t",
+                    "student_t",
+                    "regime_mixture",
+                    "regime_mixture",
+                    "student_t",
+                    "regime_mixture",
+                ],
+                "benchmark": ["student_t"] * 6,
+                "var_pvalue": [0.02, 0.04, 0.01, 0.03, 0.20, 0.50],
+            }
+        )
+        family = h2_var_coverage_family(scores)
+        self.assertEqual(family["horizon_minutes"].tolist(), [5, 5, 15, 15])
+        self.assertEqual(
+            family["model"].tolist(),
+            ["regime_mixture", "student_t", "regime_mixture", "student_t"],
+        )
+        self.assertEqual(family["median_var_pvalue"].tolist(), [0.02, 0.03, 0.50, 0.20])
+        self.assertEqual(family["bonferroni_var_pvalue"].tolist(), [0.08, 0.12, 1.0, 0.80])
+        gaussian = scores.copy()
+        gaussian["benchmark"] = "gaussian"
+        gaussian["model"] = gaussian["model"].replace({"student_t": "gaussian"})
+        self.assertEqual(h2_var_coverage_family(gaussian)["model"].iloc[0], "gaussian")
+        with self.assertRaises(RuntimeError):
+            h2_var_coverage_family(scores[scores["model"] != "regime_mixture"])
+        partial = pd.concat(
+            [
+                scores,
+                pd.DataFrame(
+                    {
+                        "horizon_minutes": [60],
+                        "model": ["student_t"],
+                        "benchmark": ["student_t"],
+                        "var_pvalue": [0.1],
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
+        with self.assertRaises(RuntimeError):
+            h2_var_coverage_family(partial)
+        with self.assertRaises(ValueError):
+            h2_var_coverage_family(scores.drop(columns=["var_pvalue"]))
+        with self.assertRaises(ValueError):
+            h2_var_coverage_family(scores.drop(columns=["benchmark"]))
+        with self.assertRaises(ValueError):
+            h2_var_coverage_family(scores.iloc[0:0])
+        two_benchmarks = scores.copy()
+        two_benchmarks.loc[0, "benchmark"] = "gaussian"
+        with self.assertRaises(RuntimeError):
+            h2_var_coverage_family(two_benchmarks)
+        unknown = scores.copy()
+        unknown["benchmark"] = "mixture"
+        with self.assertRaises(RuntimeError):
+            h2_var_coverage_family(unknown)
+        broken = scores.copy()
+        broken.loc[0, "var_pvalue"] = float("nan")
+        with self.assertRaises(ValueError):
+            h2_var_coverage_family(broken)
 
     def test_development_decision_rejects_the_null_only_when_every_horizon_improves(self):
         better = pd.DataFrame(
@@ -856,6 +925,33 @@ class TestRegimes(unittest.TestCase):
         filtered_shocked, _ = filtered_probability_frame(model, known_shocked)
         self.assertTrue(np.allclose(filtered_close.loc[decision].to_numpy(), filtered_shocked.loc[decision].to_numpy()))
 
+    def test_underflowed_initial_probability_still_fits(self):
+        rng = np.random.default_rng(2)
+        state = 0
+        values = np.empty(4000)
+        for time in range(len(values)):
+            values[time] = rng.normal(0.0, 1e-4 if state == 0 else 2e-3)
+            if rng.random() > (0.99 if state == 0 else 0.97):
+                state = 1 - state
+        values[0] = 0.05
+        with self.assertLogs("research.regimes", level="WARNING") as captured:
+            fitted = fit_gaussian_hmm(values)
+        self.assertTrue(any("underflowed to zero" in line for line in captured.output))
+        self.assertTrue(np.all(fitted.model.initial > 0.0))
+        self.assertTrue(np.isclose(fitted.model.initial.sum(), 1.0))
+        self.assertTrue(np.all(fitted.model.variances > 0.0))
+        self.assertLess(fitted.model.variances[0], fitted.model.variances[1])
+        filtered = filtered_probabilities(fitted.model, values)
+        self.assertTrue(np.isfinite(filtered).all())
+        self.assertTrue(np.allclose(filtered.sum(axis=1), 1.0))
+
+    def test_zero_variance_state_still_fails(self):
+        rng = np.random.default_rng(1)
+        sample = rng.normal(0.0, 1e-5, 500)
+        sample[0] = 0.2
+        with self.assertRaisesRegex(RuntimeError, "variances are not positive"):
+            fit_gaussian_hmm(sample)
+
     def test_collapsed_weights_and_smoothed_probabilities_fail(self):
         with self.assertRaises(RuntimeError):
             fit_gaussian_hmm(np.zeros(80))
@@ -912,6 +1008,20 @@ class TestRegimes(unittest.TestCase):
         scored = score_regime_forecast(components, probabilities, np.linspace(-1, 1, 40))
         self.assertAlmostEqual(scored.expected_shortfall, moment / 0.05, places=3)
         self.assertEqual(scored.model, "regime_mixture")
+
+    def test_mixture_pit_stays_inside_unit_interval_when_rows_overshoot_one(self):
+        components = (GaussianModel(0.0, 1.0), GaussianModel(0.0, 4.0))
+        count = 40
+        probabilities = np.tile([0.2, 0.8 + 1e-6], (count, 1))
+        totals = probabilities.sum(axis=1)
+        self.assertTrue(np.all(totals > 1.0))
+        self.assertTrue(np.allclose(totals, 1.0, atol=1e-6))
+        sample = np.linspace(-2.0, 2.0, count)
+        sample[0] = -10.0
+        sample[-1] = 20.0
+        scored = score_regime_forecast(components, probabilities, sample)
+        self.assertEqual(scored.observations, count)
+        self.assertTrue(np.isfinite(scored.mean_log_score))
 
     def test_separated_regimes_improve_the_holdout_log_score(self):
         rng = np.random.default_rng(9)
@@ -981,10 +1091,192 @@ class TestRegimes(unittest.TestCase):
         self.assertTrue(student.benchmark_resolved)
         self.assertEqual(set(student.scores["model"]), {"student_t", "regime_mixture"})
         proposal = load_record("research/registry/EXP-H02.json")
-        self.assertEqual(proposal.status, "Proposed")
+        self.assertIn(proposal.status, {"Proposed", "Exploratory"})
         self.assertEqual(proposal.decision, "")
         self.assertEqual(proposal.parent_hypothesis, "EXP-H01")
         self.assertFalse(proposal.sealed_access)
+
+    def test_h2_decision_rejects_the_null_only_when_every_horizon_improves(self):
+        better = pd.DataFrame(
+            {
+                "horizon_minutes": [5, 15, 60],
+                "mean_advantage": [0.12, 0.08, 0.03],
+                "median_advantage": [0.11, 0.07, 0.02],
+                "origins": [6, 6, 6],
+            }
+        )
+        rejected = h2_development_decision(better, "student_t").iloc[0]
+        self.assertEqual(rejected.null_decision, "reject")
+        self.assertEqual(rejected.benchmark, "regime_mixture")
+        mixed = better.copy()
+        mixed.loc[2, "mean_advantage"] = -0.01
+        accepted = h2_development_decision(mixed, "student_t").iloc[0]
+        self.assertEqual(accepted.null_decision, "accept")
+        self.assertEqual(accepted.benchmark, "student_t")
+        with self.assertRaises(ValueError):
+            h2_development_decision(better, "regime_mixture")
+        with self.assertRaises(ValueError):
+            h2_development_decision(better.iloc[0:0], "gaussian")
+
+    def test_h2_confirmation_scores_the_sealed_block_once(self):
+        import tempfile
+        from pathlib import Path
+
+        index = pd.date_range("2024-01-01", "2024-03-15", freq="min", tz="UTC")
+        rng = np.random.default_rng(4)
+        state = np.zeros(len(index), dtype=int)
+        for time in range(1, len(index)):
+            state[time] = state[time - 1] if rng.random() < 0.99 else 1 - state[time - 1]
+        shocks = rng.normal(scale=np.where(state == 0, 0.0004, 0.004))
+        close = pd.Series(100 * np.exp(np.cumsum(shocks)), index=index)
+        config = dict(H2_CONFIG)
+        config.update({"sealed_months": 1, "horizons_minutes": [5], "em_iterations": 3})
+        digest = "a" * 64
+
+        def opened_h1(**changes):
+            record = replace(
+                load_record("research/registry/EXP-H01.json"),
+                horizons=(5,),
+                decision="retain",
+                result="gaussian",
+                status="Research validated",
+                dataset_id="btcusdt-1m",
+                dataset_digest=digest,
+                sealed_access=True,
+                run_id="1234567890abcdef",
+            )
+            return replace(record, **changes) if changes else record
+
+        def opened_h2():
+            return replace(
+                load_record("research/registry/EXP-H02.json"),
+                horizons=(5,),
+                decision="",
+                result="",
+                status="Proposed",
+                dataset_id="",
+                dataset_digest="",
+                code_version="",
+                config_digest="",
+                sealed_access=False,
+                run_id="",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "EXP-H02.json"
+            record = opened_h2()
+            save_record(path, record)
+            with patch("research.evaluate.sealed_returns", side_effect=AssertionError("sealed read")):
+                with patch("research.evaluate.code_version", return_value="abc123+dirty"):
+                    with self.assertRaises(RuntimeError):
+                        confirm_h2(
+                            close,
+                            record,
+                            opened_h1(),
+                            dataset_id="btcusdt-1m",
+                            dataset_digest=digest,
+                            root=".",
+                            record_path=path,
+                            config=config,
+                        )
+                with patch("research.evaluate.code_version", return_value="abc123"):
+                    with self.assertRaises(RuntimeError):
+                        confirm_h2(
+                            close,
+                            record,
+                            opened_h1(decision="", result="", status="Proposed", sealed_access=False, run_id=""),
+                            dataset_id="btcusdt-1m",
+                            dataset_digest=digest,
+                            root=".",
+                            record_path=path,
+                            config=config,
+                        )
+            self.assertFalse(load_record(path).sealed_access)
+            seen: dict[str, pd.Index] = {}
+
+            def spy_fit(returns, **kwargs):
+                seen["index"] = returns.index
+                return fit_clocked_gaussian_hmm(returns, **kwargs)
+
+            with patch("research.evaluate.code_version", return_value="abc123"):
+                with patch("research.evaluate.fit_clocked_gaussian_hmm", side_effect=spy_fit):
+                    confirmed = confirm_h2(
+                        close,
+                        record,
+                        opened_h1(),
+                        dataset_id="btcusdt-1m",
+                        dataset_digest=digest,
+                        root=".",
+                        record_path=path,
+                        config=config,
+                    )
+            self.assertTrue((seen["index"] < confirmed.boundary).all())
+            loaded = load_record(path)
+            self.assertTrue(confirmed.record.sealed_access)
+            self.assertEqual(loaded, confirmed.record)
+            self.assertEqual(confirmed.benchmark, "gaussian")
+            self.assertEqual(set(confirmed.scores["origin"]), {"sealed"})
+            self.assertTrue((confirmed.scores["sealed_access"] == True).all())
+            self.assertEqual(set(confirmed.scores["model"]), {"gaussian", "regime_mixture"})
+            verdict = h2_development_decision(
+                h2_log_score_comparison(confirmed.scores), confirmed.benchmark
+            ).iloc[0]
+            self.assertEqual(loaded.result, verdict.benchmark)
+            self.assertEqual(loaded.decision, "retain" if verdict.null_decision == "reject" else "reject")
+            self.assertEqual(loaded.dataset_digest, digest)
+            self.assertEqual(len(loaded.run_id), 16)
+            built = horizon_log_returns(close, 5)
+            development, _ = development_returns(built.returns, 5, confirmed.boundary)
+            sealed = sealed_returns(built.returns, 5, confirmed.boundary, confirmatory=True)
+            self.assertTrue(set(development.index).isdisjoint(sealed.index))
+            with patch("research.evaluate.code_version", return_value="abc123"):
+                with self.assertRaises(RuntimeError):
+                    confirm_h2(
+                        close,
+                        loaded,
+                        opened_h1(),
+                        dataset_id="btcusdt-1m",
+                        dataset_digest=digest,
+                        root=".",
+                        record_path=path,
+                        config=config,
+                    )
+            self.assertEqual(load_record(path), loaded)
+            other = Path(tmp) / "again.json"
+            save_record(other, opened_h2())
+            shifted = close.copy()
+            shifted.loc[shifted.index >= confirmed.boundary] *= 1.2
+            with patch("research.evaluate.code_version", return_value="abc123"):
+                moved = confirm_h2(
+                    shifted,
+                    opened_h2(),
+                    opened_h1(),
+                    dataset_id="btcusdt-1m",
+                    dataset_digest=digest,
+                    root=".",
+                    record_path=other,
+                    config=config,
+                )
+            self.assertNotAlmostEqual(
+                float(confirmed.scores["mean_log_score"].iloc[0]),
+                float(moved.scores["mean_log_score"].iloc[0]),
+            )
+            rejected_path = Path(tmp) / "bad-digest.json"
+            save_record(rejected_path, opened_h2())
+            with patch("research.evaluate.sealed_returns", side_effect=AssertionError("sealed read")):
+                with patch("research.evaluate.code_version", return_value="abc123"):
+                    with self.assertRaises(RuntimeError):
+                        confirm_h2(
+                            close,
+                            opened_h2(),
+                            opened_h1(dataset_digest="b" * 64),
+                            dataset_id="btcusdt-1m",
+                            dataset_digest=digest,
+                            root=".",
+                            record_path=rejected_path,
+                            config=config,
+                        )
+            self.assertFalse(load_record(rejected_path).sealed_access)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,890 @@
+{
+  "alignment_exclusions": 2496841,
+  "bucket": "trading-data-centheos",
+  "dataset_id": "cross-market-1m",
+  "digest": "ee0a479c6ead2e2559075b5c0f8b2352683289d753122512973e728729dbe9e4",
+  "end": "2026-10-19T01:39:00+00:00",
+  "members": [
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-btcusdt",
+      "digest": "a486a8c4f4a58984aeb9345ae02348975c7c332a4f77da308f64f89a760db328",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "21230ccfcadb8e9d453f6140c4cae35a-2",
+          "key": "ohlcv/binance/BTCUSDT/1m.parquet",
+          "size": 101746188,
+          "version_id": "2ID349llU2NTv.oYdRWCaAc7Uym83TA4"
+        },
+        {
+          "etag": "a43efdd76cf3a0b96ef227ee17575f97",
+          "key": "ohlcv/binance/BTCUSDT/1m/2026.parquet",
+          "size": 5542901,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T00:00:00+00:00",
+      "symbol": "BTCUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-ethusdt",
+      "digest": "fe0827a4c8bd734451b0d606ffee7edefaddf5ea8b377970d494261f200ee62e",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "695c91867b34da5eedc82c1b5adbc78f-2",
+          "key": "ohlcv/binance/ETHUSDT/1m.parquet",
+          "size": 92455903,
+          "version_id": "24_TzoOu0yrDHp_BTCaWTA9z.UomIdj0"
+        },
+        {
+          "etag": "c3fc885f84f0c15dcc7745152d06549c",
+          "key": "ohlcv/binance/ETHUSDT/1m/2026.parquet",
+          "size": 5110121,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T00:00:00+00:00",
+      "symbol": "ETHUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-bnbusdt",
+      "digest": "9840983e6e04e4e9551d97c00f03f7d96b7f73eefd6ee655c042437cc4d0f4de",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "1520df17d05345bc391458f015d43dda-2",
+          "key": "ohlcv/binance/BNBUSDT/1m.parquet",
+          "size": 70959601,
+          "version_id": "JHxKIEBYOUL.8BDnSOujKeQQib5m83a6"
+        },
+        {
+          "etag": "757f29ac2f8b0a3ae7bd8fe750c7c7bb",
+          "key": "ohlcv/binance/BNBUSDT/1m/2026.parquet",
+          "size": 3733145,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-02-10T08:01:00+00:00",
+      "symbol": "BNBUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-xrpusdt",
+      "digest": "01efb02a6ed63cae86f69cc6572abdc429c9a750c6ca945088d0e17badbb6813",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "15085bb5b9b86f74b86842610fde327c",
+          "key": "ohlcv/binance/XRPUSDT/1m/2020.parquet",
+          "size": 9807355,
+          "version_id": "3tQUyt9pHOCwCiuik.ZhH..eO.ZxtQV9"
+        },
+        {
+          "etag": "2ef509a8e286c123fb85c1d3120f43d5",
+          "key": "ohlcv/binance/XRPUSDT/1m/2021.parquet",
+          "size": 10946880,
+          "version_id": "ii1faH6FH_e6HY6Bgqc9gkDGlhl1fFSm"
+        },
+        {
+          "etag": "3095d12118583fdd09161abf327a79c1",
+          "key": "ohlcv/binance/XRPUSDT/1m/2022.parquet",
+          "size": 10217514,
+          "version_id": "yF2vlFj_MAQF5r5HNb01CgdaMEAk7mPs"
+        },
+        {
+          "etag": "ef0da485699b6647541fa9fbab5fee00",
+          "key": "ohlcv/binance/XRPUSDT/1m/2023.parquet",
+          "size": 10203011,
+          "version_id": "PrUliVVVDK5Lgf70UqG5SwQ4pEMqN05l"
+        },
+        {
+          "etag": "2a1fba15368d32e99f7bbe6ba2ea81fe",
+          "key": "ohlcv/binance/XRPUSDT/1m/2024.parquet",
+          "size": 11014164,
+          "version_id": "bjSMvg8IyB.5dmllNN5N7CWQMwo4JPnm"
+        },
+        {
+          "etag": "f2e13c37b7f39e4259a31d06ff844ecc",
+          "key": "ohlcv/binance/XRPUSDT/1m/2025.parquet",
+          "size": 11012370,
+          "version_id": "FUgEB0NfNnnef7_UF7kfvunoYd_7TSHS"
+        },
+        {
+          "etag": "8c00212903663fa5732d80cf20375d91",
+          "key": "ohlcv/binance/XRPUSDT/1m/2026.parquet",
+          "size": 8619577,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-06T08:21:00+00:00",
+      "symbol": "XRPUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-adausdt",
+      "digest": "3850466df24b7eec2f6910841a7550434630ccfa5953f63b464bcbeee0e0197d",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "ad013fd6e51ab610e1f0bdb42112ed18-2",
+          "key": "ohlcv/binance/ADAUSDT/1m.parquet",
+          "size": 66427270,
+          "version_id": "lelw.Vt2BIoFhHz_GqUnm9Aj.AS8zXDT"
+        },
+        {
+          "etag": "d51297715926498ab5f204e59ed8beb5",
+          "key": "ohlcv/binance/ADAUSDT/1m/2026.parquet",
+          "size": 3559187,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-31T08:01:00+00:00",
+      "symbol": "ADAUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-solusdt",
+      "digest": "384dcea9e6335b763a189aaf0a8c496348a1700c64827bdfe23eeb03f75c261b",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 0,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "06aac33a7ae5dc5d3d477107360f208b-2",
+          "key": "ohlcv/binance/SOLUSDT/1m.parquet",
+          "size": 65446689,
+          "version_id": "5EdkhYSbny2oUPdgtwpnJhvcbcfs7nlL"
+        },
+        {
+          "etag": "87ec8f6ab12b0178a1a5a33a916b9020",
+          "key": "ohlcv/binance/SOLUSDT/1m/2026.parquet",
+          "size": 4069437,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-09-14T07:00:00+00:00",
+      "symbol": "SOLUSDT",
+      "timeframe": "1m",
+      "venue": "binance"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-spx500_usd",
+      "digest": "aa3e99df1b83dcd1a2ef17683ff35e05f76ff7d5dc972c2ec7f47d0cdd7aaf40",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1250269,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "04caa5e3d23b49568a5cd52f651aa96d",
+          "key": "ohlcv/oanda/SPX500_USD/1m/2020.parquet",
+          "size": 5333717,
+          "version_id": "2VVFrdobxGULzgzxmbP5WAqmH.YhV94p"
+        },
+        {
+          "etag": "9bd0db4954beb6c42c0a5f146963b1a6",
+          "key": "ohlcv/oanda/SPX500_USD/1m/2021.parquet",
+          "size": 5346908,
+          "version_id": "HManfwYwJfLDBGsdDSxTcZeUJ8fKrsgY"
+        },
+        {
+          "etag": "97a242509a2a822efdf33b41c574bfdf",
+          "key": "ohlcv/oanda/SPX500_USD/1m/2022.parquet",
+          "size": 5580641,
+          "version_id": "87_Ksbd.Y._UymT0EqXuxTawt0.xS5LV"
+        },
+        {
+          "etag": "d5d5265f51f260d9385650f719e55b02",
+          "key": "ohlcv/oanda/SPX500_USD/1m/2023.parquet",
+          "size": 5209636,
+          "version_id": "ZPXjbuEDHGGKbPMrAbPrxz22KCyBXAt6"
+        },
+        {
+          "etag": "12ec9302e54f403e9b3a101cf74e381e",
+          "key": "ohlcv/oanda/SPX500_USD/1m/2024.parquet",
+          "size": 5242204,
+          "version_id": "av4b5js6PyYhgT4KC9SUxrIXbEU2gpa9"
+        },
+        {
+          "etag": "a62041a037390d2e5e762a8e28024fb4",
+          "key": "ohlcv/oanda/SPX500_USD/1m/2025.parquet",
+          "size": 5757002,
+          "version_id": "FxQ.nI3CEAktFdRRGxxTxyNlwD5y9M8x"
+        },
+        {
+          "etag": "a98f5507b54b96bbd36e6455d47cdc7e",
+          "key": "ohlcv/oanda/SPX500_USD/1m/2026.parquet",
+          "size": 4571051,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T23:00:00+00:00",
+      "symbol": "SPX500_USD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-usb10y_usd",
+      "digest": "42b4d5a4fb4ee6ef7b02e51b225b975a00c77518896810f577f9030f5cbc9d75",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 2307682,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "3c0732eefe4b450caf3d59709e071f11",
+          "key": "ohlcv/oanda/USB10Y_USD/1m/2020.parquet",
+          "size": 2683210,
+          "version_id": "I_skf8jSMH5mHdGLZ4VYlujAnWsbkDpz"
+        },
+        {
+          "etag": "b789665d58f1afa4e010f09fa1bde6d2",
+          "key": "ohlcv/oanda/USB10Y_USD/1m/2021.parquet",
+          "size": 2586251,
+          "version_id": "MZu.sTdl_HL2zD_aAl8vvJvttYLTxhRj"
+        },
+        {
+          "etag": "56bdefd4e4746b73bbd38a6d33380778",
+          "key": "ohlcv/oanda/USB10Y_USD/1m/2022.parquet",
+          "size": 3966447,
+          "version_id": "f_yn6_vL9DyXAYbgZzfOkN9TEoVj86b6"
+        },
+        {
+          "etag": "af46f6f334bb89b4161cf2addc31d91d",
+          "key": "ohlcv/oanda/USB10Y_USD/1m/2023.parquet",
+          "size": 3307030,
+          "version_id": "XU457H1VWiSKQfCLpz8ydBtb5iyZuhMV"
+        },
+        {
+          "etag": "55589c2c3f82c13c4ca4f49385e6706e",
+          "key": "ohlcv/oanda/USB10Y_USD/1m/2024.parquet",
+          "size": 2622865,
+          "version_id": "JiHbjU_HberYvaIfGdA37PbB0Q9wfcaN"
+        },
+        {
+          "etag": "43e9c0c8fa74f91419bf8f54558ed579",
+          "key": "ohlcv/oanda/USB10Y_USD/1m/2025.parquet",
+          "size": 2406710,
+          "version_id": "b6NwfaWIvDIehEHw7.nl9LzYT5c2ILzW"
+        },
+        {
+          "etag": "4dd8aac12429cf5f50f33799a8555e82",
+          "key": "ohlcv/oanda/USB10Y_USD/1m/2026.parquet",
+          "size": 2074504,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T23:00:00+00:00",
+      "symbol": "USB10Y_USD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-xau_usd",
+      "digest": "82ba52069f1dbdd2338227692a180e6277e393926f2ab7d5aa0539cd96cb21b7",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1176405,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "3d6be132f73657182f0bdeb59f59604d",
+          "key": "ohlcv/oanda/XAU_USD/1m/2020.parquet",
+          "size": 10424438,
+          "version_id": "lt7VFEAIiRGBxbOh86AG8woWCEJjrG56"
+        },
+        {
+          "etag": "8ceb6af44050458b3edcf0ded2b47a2f",
+          "key": "ohlcv/oanda/XAU_USD/1m/2021.parquet",
+          "size": 7851145,
+          "version_id": "VUjOglDcwxbiTiIX8LLt4pGAvGnYnBxe"
+        },
+        {
+          "etag": "5e7882a4042f8998e144b453c4417ac8",
+          "key": "ohlcv/oanda/XAU_USD/1m/2022.parquet",
+          "size": 7619218,
+          "version_id": "ZnsvkYPknuNFXZJW5Nan.ailYTtM4ROH"
+        },
+        {
+          "etag": "6fab911591ef54bb8455fc99bbaae32f",
+          "key": "ohlcv/oanda/XAU_USD/1m/2023.parquet",
+          "size": 6806024,
+          "version_id": "85ucBdkVMP7G6l5aJ.TxO2.zWqojbY2c"
+        },
+        {
+          "etag": "bcea786a7e79cf49babe28b8b126edbf",
+          "key": "ohlcv/oanda/XAU_USD/1m/2024.parquet",
+          "size": 8186197,
+          "version_id": "qxefCOalWRwgzWUL6paN.U.ixY2s370l"
+        },
+        {
+          "etag": "a49927b78a75c31f6697bf0fe0f1699d",
+          "key": "ohlcv/oanda/XAU_USD/1m/2025.parquet",
+          "size": 9577075,
+          "version_id": "Ht2sjXXet94wy9DXCSvGoNLPNO04iMw2"
+        },
+        {
+          "etag": "21c437ccaffb4e71e18282cef07f659e",
+          "key": "ohlcv/oanda/XAU_USD/1m/2026.parquet",
+          "size": 8431424,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T23:00:00+00:00",
+      "symbol": "XAU_USD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-wtico_usd",
+      "digest": "0628684756bbf80b80349ea470d9314683755a5041303e8e246e7a204ee8e1e2",
+      "end": "2026-10-19T01:44:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1220878,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "5e7a11222cafe197bbffbd3ec66d5655",
+          "key": "ohlcv/oanda/WTICO_USD/1m/2020.parquet",
+          "size": 6280504,
+          "version_id": "02lLY8rD70gE.sBrJ604T7SFlmaSP.eU"
+        },
+        {
+          "etag": "78502150dbdf774c0985551932540f54",
+          "key": "ohlcv/oanda/WTICO_USD/1m/2021.parquet",
+          "size": 6085701,
+          "version_id": "IT.ov8iDwVJHXykVKB0HxpNehwKdvsRt"
+        },
+        {
+          "etag": "5cbabdb650b813eb79fa15b9025f3aed",
+          "key": "ohlcv/oanda/WTICO_USD/1m/2022.parquet",
+          "size": 6695523,
+          "version_id": "yw1zfND7ex_1ODIlxYOsmg0kyI1KD3gj"
+        },
+        {
+          "etag": "7b61627496b7f035cd2383a7c0f021ca",
+          "key": "ohlcv/oanda/WTICO_USD/1m/2023.parquet",
+          "size": 5827171,
+          "version_id": "_ErjBmiQet9FQYJlKqpod91ZxUjSlYRf"
+        },
+        {
+          "etag": "0aa3e9e020c4224bb84561eb96a71e77",
+          "key": "ohlcv/oanda/WTICO_USD/1m/2024.parquet",
+          "size": 5751221,
+          "version_id": "aZQzw8EotedmIfP8E8nmAoeqaie91xYZ"
+        },
+        {
+          "etag": "625a168f099998b9593e56efa7e0b84e",
+          "key": "ohlcv/oanda/WTICO_USD/1m/2025.parquet",
+          "size": 5791885,
+          "version_id": "zagzA37KAtJiW6BsnZa4XF0ZBrHE_L6."
+        },
+        {
+          "etag": "7b3629e42fc13cbfdb538a579e2929e5",
+          "key": "ohlcv/oanda/WTICO_USD/1m/2026.parquet",
+          "size": 5600727,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T23:00:00+00:00",
+      "symbol": "WTICO_USD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-eur_usd",
+      "digest": "1219b505a08da3d157e6264fe88cda1312059b5a05e1cf906962a5021f4bb08a",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1076470,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "f25c6efea570fb9a534a225f3489d4d6",
+          "key": "ohlcv/oanda/EUR_USD/1m/2020.parquet",
+          "size": 6194927,
+          "version_id": "CHfm9NlZPC05hWXUNkTtpmXjfhw9VnZP"
+        },
+        {
+          "etag": "dc4d82e7e5c0fa6ec22bf92d51412f68",
+          "key": "ohlcv/oanda/EUR_USD/1m/2021.parquet",
+          "size": 6004261,
+          "version_id": "m6fT25y7ZYG4C_9Pb9U38p9Vz5LvgdeC"
+        },
+        {
+          "etag": "6ba2ab6f9fe124db70a0ad406fc09826",
+          "key": "ohlcv/oanda/EUR_USD/1m/2022.parquet",
+          "size": 6627304,
+          "version_id": "utXMmU.qrbZpNACSqqWcqsH9I3conQBG"
+        },
+        {
+          "etag": "1798b519ecf690dea5c579b8e26acc61",
+          "key": "ohlcv/oanda/EUR_USD/1m/2023.parquet",
+          "size": 5833814,
+          "version_id": "mkHU26tgCAwUXrbS6hrYN4kPKCUtH.l_"
+        },
+        {
+          "etag": "4f14ce405e93272ecaaea8b1a32347d6",
+          "key": "ohlcv/oanda/EUR_USD/1m/2024.parquet",
+          "size": 6012981,
+          "version_id": "YQ14Bp90nlIfkhye4HHShCse9v9N0slB"
+        },
+        {
+          "etag": "a2651ae0eb05046deb934b93e1415d09",
+          "key": "ohlcv/oanda/EUR_USD/1m/2025.parquet",
+          "size": 6325020,
+          "version_id": "ArfIgGHk_d8O_K9xtAMmxIAYb_fEvWqi"
+        },
+        {
+          "etag": "2db318d4279b1fe14f190f32214aaff7",
+          "key": "ohlcv/oanda/EUR_USD/1m/2026.parquet",
+          "size": 4968311,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T22:00:00+00:00",
+      "symbol": "EUR_USD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-gbp_usd",
+      "digest": "8b80920e7635caa681c650c6c19a255dd6ba88f67ace64a93a60af74d21433bc",
+      "end": "2026-10-19T01:44:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1089654,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "e4a44c736a4e30135b190c27faf9b3e4",
+          "key": "ohlcv/oanda/GBP_USD/1m/2020.parquet",
+          "size": 6451665,
+          "version_id": "_RoMYF45vCkieF_zu7RW3f.SVQ1sKRO3"
+        },
+        {
+          "etag": "66e9645881d8ae4a9f1ec45bc7e34490",
+          "key": "ohlcv/oanda/GBP_USD/1m/2021.parquet",
+          "size": 5836938,
+          "version_id": "cr0mVkAwUdTwy3q8UhxwHmxKGhQbL7yw"
+        },
+        {
+          "etag": "50d195298b9c0782176aa98ccfa01675",
+          "key": "ohlcv/oanda/GBP_USD/1m/2022.parquet",
+          "size": 6806655,
+          "version_id": "kBJ4UEpKULdP.VaYS30yVQLcnVmJpIt4"
+        },
+        {
+          "etag": "6101734b21bd91d2f571135ea9aca629",
+          "key": "ohlcv/oanda/GBP_USD/1m/2023.parquet",
+          "size": 6199681,
+          "version_id": "RaGStZjO9qFs6agzPXCCuuG0apgKKxa6"
+        },
+        {
+          "etag": "633b4459e021ba88ace789cdb4fe73c0",
+          "key": "ohlcv/oanda/GBP_USD/1m/2024.parquet",
+          "size": 6128304,
+          "version_id": "x3.mqxp0mBRhQMdFEDZg0psPy1zcgN8m"
+        },
+        {
+          "etag": "63105d0b6ad4fd72330908211afdcc52",
+          "key": "ohlcv/oanda/GBP_USD/1m/2025.parquet",
+          "size": 6353680,
+          "version_id": "07oHGJX8CNMX8NNqJnbaoCOmTmU5pG3x"
+        },
+        {
+          "etag": "78e31c32bbbb78ffefbc0a00a66ec149",
+          "key": "ohlcv/oanda/GBP_USD/1m/2026.parquet",
+          "size": 4772664,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T22:00:00+00:00",
+      "symbol": "GBP_USD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-aud_usd",
+      "digest": "8ef95fa8630a8b416ecca59800296386e3f7b83ff6135d6086b415954ad12a43",
+      "end": "2026-10-19T01:44:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1120766,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "a71f18161ecbd1ac91a0c7895094c6fa",
+          "key": "ohlcv/oanda/AUD_USD/1m/2020.parquet",
+          "size": 6118449,
+          "version_id": "hOpJ05.V4y3yne_dgLy.TQESgdfrzKJO"
+        },
+        {
+          "etag": "35c365c3456fcc10ffdb23e77d92a445",
+          "key": "ohlcv/oanda/AUD_USD/1m/2021.parquet",
+          "size": 5632697,
+          "version_id": "4fsTpzAQCXLN9e1LA0NBgRKLGmqOBmpd"
+        },
+        {
+          "etag": "48e7e6efd64649136f3240608605d561",
+          "key": "ohlcv/oanda/AUD_USD/1m/2022.parquet",
+          "size": 6124338,
+          "version_id": "EsQCeuV489tFPtUVtBMlj4St7TjjFaB_"
+        },
+        {
+          "etag": "8cd1e0d638a9081a87716e1f03d6c394",
+          "key": "ohlcv/oanda/AUD_USD/1m/2023.parquet",
+          "size": 5990151,
+          "version_id": "ai1uO57OuPMemNmXcV1HK18uq3bkSDgv"
+        },
+        {
+          "etag": "ad60052045fdbdfcd80a595ca4174c25",
+          "key": "ohlcv/oanda/AUD_USD/1m/2024.parquet",
+          "size": 5732708,
+          "version_id": "95jHlczAnvgW62NojJZy_SStly4ZiKYx"
+        },
+        {
+          "etag": "6e74a034b0a6e134db2657e6342a1ac0",
+          "key": "ohlcv/oanda/AUD_USD/1m/2025.parquet",
+          "size": 5822690,
+          "version_id": "YsyReeRKVHGDyaMdh0UUHIkaoZFHpd7S"
+        },
+        {
+          "etag": "089396e5117e0d412d7a6199ed93ff67",
+          "key": "ohlcv/oanda/AUD_USD/1m/2026.parquet",
+          "size": 4644423,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T22:00:00+00:00",
+      "symbol": "AUD_USD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-usd_jpy",
+      "digest": "0f967f98f31454429159d53b016e13c08b3ca40ae9bfd20faa8d74e48730f724",
+      "end": "2026-10-19T01:44:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1074109,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "42f5d91937910f26de464f7f266a896a",
+          "key": "ohlcv/oanda/USD_JPY/1m/2020.parquet",
+          "size": 5882742,
+          "version_id": "FkhmMywSLW1XG5F5ec7qfuVIrVK6vjvX"
+        },
+        {
+          "etag": "16855c9206f768bc71166eda07fa7b70",
+          "key": "ohlcv/oanda/USD_JPY/1m/2021.parquet",
+          "size": 5877307,
+          "version_id": "2fO1kPZOr43c_FrdX56e1kIePTxpmJvr"
+        },
+        {
+          "etag": "00ca0021303898428a49cc1588d19fca",
+          "key": "ohlcv/oanda/USD_JPY/1m/2022.parquet",
+          "size": 6774992,
+          "version_id": "adJiWRNfJ_V3ZPEMoBwH0KEi4PZqT7gv"
+        },
+        {
+          "etag": "16430a771cb26d03db0ed5d9e20797d9",
+          "key": "ohlcv/oanda/USD_JPY/1m/2023.parquet",
+          "size": 6426303,
+          "version_id": "2oCRWRRn7rY8HHCzTtdRBvyk5pkdEU7v"
+        },
+        {
+          "etag": "eec86cb1ee56e6cf94359c6cbabd3af9",
+          "key": "ohlcv/oanda/USD_JPY/1m/2024.parquet",
+          "size": 6459292,
+          "version_id": "dMrBfl1Hq6SiF5l0xGhDYsJB84577Kd8"
+        },
+        {
+          "etag": "fdedd75b1bed40a67283256082312431",
+          "key": "ohlcv/oanda/USD_JPY/1m/2025.parquet",
+          "size": 6395564,
+          "version_id": "9RYkFsa10RIFYJE6NW6GZLwPYgDuxicU"
+        },
+        {
+          "etag": "f6579697f89d9e914d58abd6111ecf08",
+          "key": "ohlcv/oanda/USD_JPY/1m/2026.parquet",
+          "size": 4956286,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T22:00:00+00:00",
+      "symbol": "USD_JPY",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-usd_cad",
+      "digest": "47dc6198250019a80e379a4cab5fb960ce4b4f4f272630a68f00f51a0c1a5a71",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1092609,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "39ea8cbc9ec70e69ba227dccc39f41cd",
+          "key": "ohlcv/oanda/USD_CAD/1m/2020.parquet",
+          "size": 6341210,
+          "version_id": "SzBFCcnRygq1Xo_2RFd.U5fhC9M1_r4T"
+        },
+        {
+          "etag": "1bef1cb54a63cb41a3ef8e17daac0fe7",
+          "key": "ohlcv/oanda/USD_CAD/1m/2021.parquet",
+          "size": 5863331,
+          "version_id": "kybWAzFNGXuF37qtn8eMy1iDBbhGILKH"
+        },
+        {
+          "etag": "7f9da4ffece7b9cb8a2a33f839026154",
+          "key": "ohlcv/oanda/USD_CAD/1m/2022.parquet",
+          "size": 6210463,
+          "version_id": "aTPWO.gERlYeGGvkqWW.mYy9WOhjvnsY"
+        },
+        {
+          "etag": "cac9cb09e010ef770641f095811b361b",
+          "key": "ohlcv/oanda/USD_CAD/1m/2023.parquet",
+          "size": 5838036,
+          "version_id": "jydo6RMQW0JPoui_jWPRlvjSLQrnyUcW"
+        },
+        {
+          "etag": "92d5e011b1aef445d699ac1fed2a6f68",
+          "key": "ohlcv/oanda/USD_CAD/1m/2024.parquet",
+          "size": 6128550,
+          "version_id": "U1DCJXhh4cYkbnMFK4d.VOh5A1CuFmH5"
+        },
+        {
+          "etag": "8a1db4249f412f7c7a6929ef6259576e",
+          "key": "ohlcv/oanda/USD_CAD/1m/2025.parquet",
+          "size": 6160658,
+          "version_id": "3mIHUKQTD5BKyfUMYVy4GtYUCJ0I9qN_"
+        },
+        {
+          "etag": "85bdd9ec9dc668d49e774f82329aa7d3",
+          "key": "ohlcv/oanda/USD_CAD/1m/2026.parquet",
+          "size": 4750183,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T22:00:00+00:00",
+      "symbol": "USD_CAD",
+      "timeframe": "1m",
+      "venue": "oanda"
+    },
+    {
+      "bucket": "trading-data-centheos",
+      "dataset_id": "cross-market-1m-usd_chf",
+      "digest": "695a78442ac5e35ff631c37cb88f10714366d35d60a8e8d2be1f4f9bfce8535e",
+      "end": "2026-10-19T01:45:00+00:00",
+      "exclusions": {
+        "duplicate_timestamps": 0,
+        "inconsistent_ohlc": 0,
+        "missing_minutes": 1201367,
+        "nonpositive_prices": 0,
+        "off_grid_timestamps": 0
+      },
+      "objects": [
+        {
+          "etag": "a09d6a139a693d3b2ebe1dde88a76215",
+          "key": "ohlcv/oanda/USD_CHF/1m/2020.parquet",
+          "size": 5280192,
+          "version_id": "L72WUi601aVpAVw1Dtf5QqfNTFEqNOTa"
+        },
+        {
+          "etag": "d371d931245353b3a925a69eb75fdd4e",
+          "key": "ohlcv/oanda/USD_CHF/1m/2021.parquet",
+          "size": 4763886,
+          "version_id": "C2i03hIztUxkaJx3hcA01zFN9myF0RmP"
+        },
+        {
+          "etag": "861e7039439b92a011c5645656ce817b",
+          "key": "ohlcv/oanda/USD_CHF/1m/2022.parquet",
+          "size": 5932997,
+          "version_id": "nGIQUSmML6sIiQow3LWWhOiJHIhBaTS5"
+        },
+        {
+          "etag": "121de8df278489358586a75acb50aad3",
+          "key": "ohlcv/oanda/USD_CHF/1m/2023.parquet",
+          "size": 6001960,
+          "version_id": "A0MkEMBNKyPZiqVi9gnD4o6ea0hj1zEd"
+        },
+        {
+          "etag": "4a60132938830182982054efb5c7f422",
+          "key": "ohlcv/oanda/USD_CHF/1m/2024.parquet",
+          "size": 5813887,
+          "version_id": "Qf_UjNTMRTOT8Xy303AkLNRI1Fyq6toi"
+        },
+        {
+          "etag": "26f08ea8421acb67e9ac9026768e3ebf",
+          "key": "ohlcv/oanda/USD_CHF/1m/2025.parquet",
+          "size": 6182988,
+          "version_id": "SETmxMLdoJ.bJAStpOD7zoS7AwvA7whi"
+        },
+        {
+          "etag": "4cf3228fe9e6de03ae262894aaa125b1",
+          "key": "ohlcv/oanda/USD_CHF/1m/2026.parquet",
+          "size": 4692359,
+          "version_id": "null"
+        }
+      ],
+      "profile": "trading",
+      "schema_version": "minute-bars-v1",
+      "start": "2020-01-01T22:00:00+00:00",
+      "symbol": "USD_CHF",
+      "timeframe": "1m",
+      "venue": "oanda"
+    }
+  ],
+  "profile": "trading",
+  "schema_version": "minute-bars-v1",
+  "start": "2020-09-14T07:00:00+00:00",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "SOLUSDT",
+    "SPX500_USD",
+    "USB10Y_USD",
+    "XAU_USD",
+    "WTICO_USD",
+    "EUR_USD",
+    "GBP_USD",
+    "AUD_USD",
+    "USD_JPY",
+    "USD_CAD",
+    "USD_CHF"
+  ],
+  "timeframe": "1m",
+  "venue": "cross-venue"
+}

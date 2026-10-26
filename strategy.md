@@ -39,11 +39,11 @@ Live eligibility is a review state. It is not a commitment to place real orders.
 |---|---|
 | **Current design** | Architectural commitments that subsequent research, data, implementation, and testing documents must respect. |
 | **Candidate hypothesis** | A falsifiable claim. Not a fact. May be rejected. |
-| **Validated component** | A claim that has survived its declared experiment protocol **and** the promotion state in §23. None of H1–H19 is validated at the time of writing. |
+| **Validated component** | A claim that has survived its declared experiment protocol **and** the promotion state in §23. None of H1–H20 is validated at the time of writing. |
 | **Future extension** | Intentionally deferred. Must not become a hidden assumption of the initial research programme. |
 | **Lifecycle state** | Where a hypothesis sits on the path in §23. Economic hypotheses are **Proposed** unless a registered experiment says otherwise. |
 
-The historical design document `docs/history/strategy_v1.md` records an earlier, implementation-oriented V1 (deterministic Tide bias, Wave permission matrix, Ripple bounce/breakout). It may be used for terminology, feature definitions, and engineering history. **It is not the current strategy specification.** Do not treat its defaults, state machines, or trade archetypes as established truth. Existing notebooks `notebooks/00`–`09` walk through that V1. They are not the hypothesis notebooks in §27, and their outputs are not confirmatory evidence for H1–H19. The frozen V1 application remains runnable as a benchmark. New research lives in `research/` and `notebooks/research/`; it does not modify V1 behaviour.
+The historical design document `docs/history/strategy_v1.md` records an earlier, implementation-oriented V1 (deterministic Tide bias, Wave permission matrix, Ripple bounce/breakout). It may be used for terminology, feature definitions, and engineering history. **It is not the current strategy specification.** Do not treat its defaults, state machines, or trade archetypes as established truth. Existing notebooks `notebooks/00`–`09` walk through that V1. They are not the hypothesis notebooks in §27, and their outputs are not confirmatory evidence for H1–H20. The frozen V1 application remains runnable as a benchmark. New research lives in `research/` and `notebooks/research/`; it does not modify V1 behaviour.
 
 This document is **not**:
 
@@ -575,13 +575,14 @@ Potential $\mathcal{F}_t$ contents (include only with evidence of incremental in
 - trend efficiency
 - VWAP and other statistical anchors
 - classical technicals (Bollinger / RSI / MACD) **only if they add information beyond simpler features**
-- cross-asset returns
+- cross-asset crypto returns
+- external-market returns, including equities, equity volatility, USD, rates, gold, and oil
 - PCA / factor exposures and residuals
 - HMM regime probabilities
 - macro variables
 - structured news/event state (§12)
 
-Avoid indicator accumulation. Each feature class is an ablation candidate.
+Avoid indicator accumulation. Each feature class is an ablation candidate. Crypto cross-asset state is H3. External-market state is H20 and is not added to H3.
 
 Useful structural quantities from the historical programme, retained as *candidates*:
 
@@ -1166,7 +1167,8 @@ Support staged information sets, for example:
 market data only
   → + technical / structural features
   → + HMM
-  → + PCA / factors
+  → + crypto PCA / factors
+  → + external-market factors
   → + Tide risk state
   → + news/event state
   → + order flow
@@ -1482,56 +1484,60 @@ predictive target before any separate economic promotion test.
 
 **H2 (regimes).** Regime probabilities $\pi_t$ improve density/first-passage forecasts relative to the unconditional distribution retained by H1. That benchmark is Student-$t$ only if H1 retains it; otherwise it is Gaussian.
 
-*Implementation.* Hard prerequisite: the unconditional distribution retained by the H1 experiment. Rejection of Student-\(t\) leaves Gaussian as that benchmark and does not block H2. Filtered \(\pi_{t\mid t}\) only. Notebook: `03_regime_models`. Component: regime-state estimator consumed by Wave and Tide. Gate: forecast gate against the retained unconditional model, not an economic promotion by itself. Registry: `EXP-H02`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: the unconditional distribution retained by the H1 experiment. Rejection of Student-\(t\) leaves Gaussian as that benchmark and does not block H2. Filtered \(\pi_{t\mid t}\) only. Notebook: `03_regime_models`. Component: regime-state estimator consumed by Wave and Tide. Gate: forecast gate against the retained unconditional model, not an economic promotion by itself. Registry: `EXP-H02`. Status: **Exploratory**. Development rejected the null: the regime mixture beat the Student-\(t\) benchmark at every origin and horizon. It is not retained until the sealed year confirms it after H1.
 
-**H3 (factors).** PCA/factor residuals contain incremental information about $R_{t:t+h}$ beyond own-price history.
+**H3 (crypto factors).** Lagged PCA/factor residuals from a frozen panel of crypto majors contain incremental information about BTC $R_{t:t+h}$ beyond own-price history.
 
-*Implementation.* Hard prerequisite: own-price baseline (H1). Useful prerequisite: a frozen cross-asset panel. Notebook: `04_factor_models`. Component: factor-state estimator consumed by Wave and Tide. Contemporaneous factor returns are not an implementable forecast unless lagged. Registry: `EXP-H03`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: own-price baseline (H1). The panel is other cryptocurrencies, not equities, rates, FX, or commodities. Notebook: `04_factor_models`. Component: crypto factor-state estimator consumed by Wave and Tide. Contemporaneous factor returns are not an implementable forecast unless lagged. Registry: `EXP-H03`. Status: **Exploratory**. A negative crypto-panel result does not answer whether markets outside crypto explain or forecast BTC. That question is H20.
+
+**H20 (external-market factors).** Lagged state from markets outside crypto contains incremental information about BTC $R_{t:t+h}$ beyond own-price history. The frozen series are `SPX500_USD`, `USB10Y_USD`, `XAU_USD`, `WTICO_USD`, and a signed equal-weight USD factor from `EUR_USD`, `GBP_USD`, `AUD_USD`, `USD_JPY`, `USD_CAD`, and `USD_CHF`. Equity implied volatility is absent from the versioned store and is not proxied. The nested sequence is own-price, then own-price plus the H3 single-factor crypto residual, then own-price plus lagged external state, then both together.
+
+*Implementation.* Hard prerequisites: the H1 density family and one frozen, versioned cross-market panel. H3 is a useful ablation, not an assumed result: its single-factor residual is included whether or not H3 is retained. Notebook: `05_cross_market_factors`. Component: external-market factor-state estimator consumed by Wave and Tide. Features must be lagged to the decision clock. Traditional sessions are not filled forward across closures; missing observations are counted and excluded. The test is predictive only. Registry: `EXP-H20`. Status: **Exploratory**. Development accepts the null and names own-price as the working forecast. The lifecycle decision stays blank until sealed confirmation.
 
 **H4 (Wave decisions).** Decisions using $p(R\mid\mathcal{F}_t)$,
 unrestricted target-before-stop probability, or its finite-horizon counterpart
 improve after-cost risk-adjusted outcomes versus hard-label Wave or
 always-in-market baselines.
 
-*Implementation.* Hard prerequisite: a declared forecast object (H1; H2/H3 only if retained) and a frozen dumb sizer so the test is not a joint search over utility. Notebook: `05_wave_probability`. Component: Wave forecast and a decision experiment, not yet the live sizer. Downstream: H5, H14. Registry: `EXP-H04`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: a declared forecast object (H1; H2/H3/H20 only if retained) and a frozen dumb sizer so the test is not a joint search over utility. Notebook: `06_wave_probability`. Component: Wave forecast and a decision experiment, not yet the live sizer. Downstream: H5, H14. Registry: `EXP-H04`. Status: **Exploratory**.
 
 **H5 (Tide constraints).** Imposing $\mathrm{ES}_\alpha(R_p)\le B_t$ (and liquidation/margin constraints) improves left-tail outcomes without fully destroying mean performance relative to unconstrained Wave.
 
-*Implementation.* Hard prerequisite: an unconstrained parent decision (H4 or an explicitly declared simpler parent). Notebook: `06_tide_risk`. Component: ES / risk-budget constraint consumed by Decision. Registry: `EXP-H05`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: an unconstrained parent decision (H4 or an explicitly declared simpler parent). Notebook: `07_tide_risk`. Component: ES / risk-budget constraint consumed by Decision. Registry: `EXP-H05`. Status: **Proposed**.
 
 **H6 (RORAC allocation).** Allocation using an opportunity/risk ratio evaluated at decision time outperforms naive equal or volatility-targeted sizing under the same ES budget.
 
-*Implementation.* Hard prerequisite: H5’s budget, with the ratio defined in the experiment protocol before fitting. Notebook: `07_allocation`. Component: candidate allocator. A vol-targeted or fixed-notional sizer remains the nested control and the default sizer until H6 is retained. Registry: `EXP-H06`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: H5’s budget, with the ratio defined in the experiment protocol before fitting. Notebook: `08_allocation`. Component: candidate allocator. A vol-targeted or fixed-notional sizer remains the nested control and the default sizer until H6 is retained. Registry: `EXP-H06`. Status: **Proposed**.
 
 **H7 (Ripple increment).** $O_t$ improves short-horizon forecasts or first-passage probabilities after conditioning on Wave/Tide.
 
-*Implementation.* Hard prerequisites: prospective L2 with dual timestamps, and a frozen Wave/Tide conditioning set. Parallel workstream: the running L2 collector. Notebook: `08_ripple_information`. Component: order-flow feature engine. This is an information hypothesis; economic use is a separate after-cost test. Registry: `EXP-H07`. Status: **Proposed**. Confirmatory sample is prospective only.
+*Implementation.* Hard prerequisites: prospective L2 with dual timestamps, and a frozen Wave/Tide conditioning set. Parallel workstream: the running L2 collector. Notebook: `09_ripple_information`. Component: order-flow feature engine. This is an information hypothesis; economic use is a separate after-cost test. Registry: `EXP-H07`. Status: **Proposed**. Confirmatory sample is prospective only.
 
 **H8 (execution).** The best declared fixed execution policy with realistic
 fill mechanics reduces $C_{\text{execution}}$ or improves fill quality versus
 naive market-on-signal, holding the parent decision fixed.
 
-*Implementation.* Hard prerequisite: a frozen parent decision stream. 1-minute cost proxies may support exploration only and must be labelled as proxies. Confirmatory fill mechanics need prospective L2 and a declared fill model. Notebook: `09_execution_baselines`. Component: fixed-policy execution simulator consumed by H17. Registry: `EXP-H08`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: a frozen parent decision stream. 1-minute cost proxies may support exploration only and must be labelled as proxies. Confirmatory fill mechanics need prospective L2 and a declared fill model. Notebook: `10_execution_baselines`. Component: fixed-policy execution simulator consumed by H17. Registry: `EXP-H08`. Status: **Proposed**.
 
 **H9 (archetypes).** Bounce and/or breakout policies beat nested non-microstructure policies after costs. Either or both may fail.
 
-*Implementation.* Hard prerequisite: prospective L2 sufficient to define walls without synthetic books, plus frozen archetype parameters or a pre-registered search. Notebook: `10_archetypes`. Component: candidate policy only if retained. Not the default product. Registry: `EXP-H09`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: prospective L2 sufficient to define walls without synthetic books, plus frozen archetype parameters or a pre-registered search. Notebook: `11_archetypes`. Component: candidate policy only if retained. Not the default product. Registry: `EXP-H09`. Status: **Proposed**.
 
 **H10 (complexity).** The full hierarchical system beats the best simpler rung on the benchmark ladder after costs and on untouched data.
 
-*Implementation.* Hard prerequisite: a composed event-time pipeline whose retained pieces have passed their own gates, plus the untouched test set still unused for selection. Notebook: `11_composition`. Component: the composed strategy under test, not an automatic paper system. Registry: `EXP-H10`. Status: **Proposed**. Rejection stops live eligibility; it does not invalidate a completed Tide/Wave thesis.
+*Implementation.* Hard prerequisite: a composed event-time pipeline whose retained pieces have passed their own gates, plus the untouched test set still unused for selection. Notebook: `12_composition`. Component: the composed strategy under test, not an automatic paper system. Registry: `EXP-H10`. Status: **Proposed**. Rejection stops live eligibility; it does not invalidate a completed Tide/Wave thesis.
 
 **H11 (non-stationarity).** Predictive maps degrade across identified structural breaks more than across ordinary regime switches; monitoring for model change has value.
 
-*Implementation.* Useful prerequisite: at least one retained or candidate predictive map (H1–H4). Independent as a diagnostic; it does not block H1. Notebook: `12_nonstationarity`. Component: drift / model-break monitor consumed by safety and by any later paper protocol. Registry: `EXP-H11`. Status: **Proposed**.
+*Implementation.* Useful prerequisite: at least one retained or candidate predictive map (H1–H4). Independent as a diagnostic; it does not block H1. Notebook: `13_nonstationarity`. Component: drift / model-break monitor consumed by safety and by any later paper protocol. Registry: `EXP-H11`. Status: **Proposed**.
 
 **H12 (news).** Structured event state improves Wave/Tide forecasts after timestamp-safe construction. The LLM-as-trader null is that unconstrained LLM actions add only noise or leakage.
 
-*Implementation.* Independent of the 1-minute ladder. Hard prerequisite: a timestamp-safe corpus. Without it, the hypothesis stays proposed and produces no Wave features. Notebook: `13_news`. Component: structured event state only; never an order. Registry: `EXP-H12`. Status: **Proposed**. Data-blocked for confirmatory tests.
+*Implementation.* Independent of the 1-minute ladder. Hard prerequisite: a timestamp-safe corpus. Without it, the hypothesis stays proposed and produces no Wave features. Notebook: `14_news`. Component: structured event state only; never an order. Registry: `EXP-H12`. Status: **Proposed**. Data-blocked for confirmatory tests.
 
 **H13 (FX, deferred).** Separating USD/AUD from BTC/USD risk improves AUD-denominated ES relative to ignoring FX.
 
-*Implementation.* Not on the initial critical path. Immediate accounting need is a declared numeraire for P&L, not a hedge book. Notebook: `14_fx`, only if the hypothesis is later un-deferred. Registry: `EXP-H13`. Status: **Deferred**.
+*Implementation.* Not on the initial critical path. Immediate accounting need is a declared numeraire for P&L, not a hedge book. Notebook: `15_fx`, only if the hypothesis is later un-deferred. Registry: `EXP-H13`. Status: **Deferred**.
 
 **H14 (dynamic binary exit; candidate).** Sequential binary hold/full-exit
 decisions, using only information in $\mathcal{F}_t$ at each management
@@ -1542,7 +1548,7 @@ re-authorisation hypothesis. **Null:** no incremental value relative to those
 nested static-exit controls. The microstructure-conditioned branch is
 confirmatory only after sufficient prospective L2 exists.
 
-*Implementation.* Hard prerequisite: a frozen entry stream. Useful prerequisite: H4. Size stays fixed; H15 and H19 are not part of this test. Notebook: `15_dynamic_exit`. Component: binary exit policy. 1-minute sequential tests may proceed now; the L2-conditioned branch waits on the collector. Registry: `EXP-H14`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: a frozen entry stream. Useful prerequisite: H4. Size stays fixed; H15 and H19 are not part of this test. Notebook: `16_dynamic_exit`. Component: binary exit policy. 1-minute sequential tests may proceed now; the L2-conditioned branch waits on the collector. Registry: `EXP-H14`. Status: **Proposed**.
 
 **H15 (continuous Tide risk authorisation; candidate).** Re-evaluating Tide
 risk while a position is open, and allowing only risk reduction, hedge
@@ -1552,7 +1558,7 @@ exit (H14), **not** scaling (H19), and **not** execution selection (H17).
 **Null:** no incremental value relative to the nested entry-only
 risk-authorisation model.
 
-*Implementation.* Hard prerequisite: an entry-only Tide authorisation model (H5 or a declared simpler budget). Not an exit model and not a sizer. Notebook: `16_continuous_tide`. Component: open-position risk authoriser that may only reduce, hedge-require, or refuse added exposure. Registry: `EXP-H15`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: an entry-only Tide authorisation model (H5 or a declared simpler budget). Not an exit model and not a sizer. Notebook: `17_continuous_tide`. Component: open-position risk authoriser that may only reduce, hedge-require, or refuse added exposure. Registry: `EXP-H15`. Status: **Proposed**.
 
 **H16 (dynamic liquidity-wall information; candidate).** Dynamic liquidity-wall
 state provides incremental information about penetration, rejection,
@@ -1561,7 +1567,7 @@ information. **Null:** no incremental value relative to nested no-wall and
 static-wall controls. This is an information hypothesis; an economic wall
 policy requires a separate after-cost test and sufficient prospective L2.
 
-*Implementation.* Hard prerequisite: prospective L2. Useful prerequisite: the order-flow features from the H7 workstream, without treating H7’s result as assumed. Notebook: `17_dynamic_walls`. Component: liquidity/wall-state estimator. Information test first; economic policy is a later gate. Registry: `EXP-H16`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: prospective L2. Useful prerequisite: the order-flow features from the H7 workstream, without treating H7’s result as assumed. Notebook: `18_dynamic_walls`. Component: liquidity/wall-state estimator. Information test first; economic policy is a later gate. Registry: `EXP-H16`. Status: **Proposed**.
 
 **H17 (dynamic execution-method selection; candidate).** Choosing among
 feasible execution actions, including wait, reprice, cancel, and
@@ -1572,7 +1578,7 @@ exposure fixed**. **Null:** no incremental value relative to that nested
 fixed-style model. Confirmatory testing depends on prospective L2 and
 order-outcome data.
 
-*Implementation.* Hard prerequisites: H8’s best fixed style, prospective L2, and a frozen authorised-exposure stream. Notebook: `18_dynamic_execution`. Component: execution-policy selector and simulator. Registry: `EXP-H17`. Status: **Proposed**.
+*Implementation.* Hard prerequisites: H8’s best fixed style, prospective L2, and a frozen authorised-exposure stream. Notebook: `19_dynamic_execution`. Component: execution-policy selector and simulator. Registry: `EXP-H17`. Status: **Proposed**.
 
 **H18 (conditional liquidity provision; candidate).** Under identifiable
 liquidity conditions, passive liquidity provision improves net execution
@@ -1581,7 +1587,7 @@ no incremental value relative to the nested simpler execution model that does
 not rest quotes. Confirmatory testing depends on prospective L2 and
 order-outcome data. This is not a full market-making strategy.
 
-*Implementation.* Hard prerequisites: H8, and H17 if a dynamic parent is the nested control; otherwise the nested control is the simpler non-quoting execution model named in the protocol. Prospective L2 and order outcomes are required for confirmation. Notebook: `19_liquidity_provision`. Component: conditional passive-execution policy. Registry: `EXP-H18`. Status: **Proposed**.
+*Implementation.* Hard prerequisites: H8, and H17 if a dynamic parent is the nested control; otherwise the nested control is the simpler non-quoting execution model named in the protocol. Prospective L2 and order outcomes are required for confirmation. Notebook: `20_liquidity_provision`. Component: conditional passive-execution policy. Registry: `EXP-H18`. Status: **Proposed**.
 
 **H19 (scaling / partial reduction; candidate).** Policies that change
 position size after entry—scale-in, partial reduction, or partial exit—
@@ -1591,7 +1597,7 @@ exit policy fixed. **Null:** no incremental value relative to that nested
 dynamic-exit model. Confirmatory testing depends on sufficient prospective
 L2. H19 is not a restatement of H14 or H15.
 
-*Implementation.* Hard prerequisite: the retained or declared best H14 binary policy, with entries frozen. Notebook: `20_scaling_management`. Component: post-entry size path. Registry: `EXP-H19`. Status: **Proposed**.
+*Implementation.* Hard prerequisite: the retained or declared best H14 binary policy, with entries frozen. Notebook: `21_scaling_management`. Component: post-entry size path. Registry: `EXP-H19`. Status: **Proposed**.
 
 Rejection of H7–H9 or H14–H19 still leaves a viable Tide/Wave research thesis.
 Rejection of H10 is an acceptable academic outcome and a practical stop-ship
@@ -1663,7 +1669,7 @@ These are unanswered by design.
 
 1. Which forecast horizon $h$ and which barrier definition make first-passage objects decision-relevant on 1-minute data?  
 2. Is $\pi_t$ better implemented as HMM, change-point, or another latent-state model? What $K$?  
-3. Does factor structure in a small crypto universe justify PCA beyond a single market factor?  
+3. Does factor structure in a small crypto universe justify PCA beyond a single market factor? H3 addresses this question. It does not test markets outside crypto; that is H20.
 4. What $\alpha$ and what $B_t$ policy (static vs vol-targeted vs stress-scaled) are operationally meaningful?  
 5. Can ES be estimated well enough, with parameter and model uncertainty, to bind live decisions without false precision?  
 6. What is the right decision criterion if $U$ is left unspecified — constraint satisfaction, growth, or a family of utilities with robustness checks?  
@@ -1792,7 +1798,7 @@ Side exits, available from any pre-validation state: **Rejected**, **Revised**
 - **Revise** when exploration shows the question was ill posed. Close the id. Open a new id. Do not edit the original hypothesis so that it matches what was found.
 - **Defer** when a hard dependency or dataset does not yet exist. Deferred is not rejected. H13 starts deferred. Confirmatory L2 branches stay proposed on the parent id and cannot be confirmed on 1-minute proxies.
 
-H1–H12 and H14–H19 are **Proposed**. H13 is **Deferred**. Nothing in the historical V1 notebooks, optimiser reports, or HMM smoke tests moves these states. Those artefacts were not run under this protocol.
+Lifecycle status in this section is a summary. The experiment registry is authoritative. H20 is **Exploratory**. H13 is **Deferred**. Nothing in the historical V1 notebooks, optimiser reports, or HMM smoke tests moves these states. Those artefacts were not run under this protocol.
 
 ---
 
@@ -1851,24 +1857,25 @@ No row below is a result. Status is the lifecycle state, not a performance claim
 | Id | Research question | Required data | Notebook | Dependencies | Research output | Reusable component | Integration target | Validation gate | Status |
 |---|---|---|---|---|---|---|---|---|---|
 | H1 | Does a Student-\(t\) model calibrate better than Gaussian for density, VaR, and ES? | ~5y 1-minute prices | `02_return_distributions` | Versioned 1-minute set | Calibration and density comparison | Tail / distribution estimator | Tide risk; Wave densities | Statistical + calibration | Proposed |
-| H2 | Do filtered regime probabilities improve those forecasts vs the unconditional distribution retained by H1? | Same, plus a declared state model | `03_regime_models` | Retained H1 benchmark; Student-\(t\) rejection does not block it | \(\pi_{t\mid t}\) forecast increment | Regime-state estimator | Wave and Tide inputs | Forecast increment vs retained unconditional model | Proposed |
-| H3 | Do lagged factor/PCA residuals add information beyond own-price history? | 1-minute plus a frozen cross-asset panel | `04_factor_models` | H1; panel is a useful prerequisite | Factor-residual increment | Factor-state estimator | Wave and Tide inputs | Forecast increment vs own-price | Proposed |
-| H4 | Do distribution or first-passage decisions improve after-cost outcomes vs hard-label Wave and always-in-market? | 1-minute; costs declared | `05_wave_probability` | H1; H2/H3 only if retained; frozen dumb sizer | Decision-quality result | Wave forecast used by a decision experiment | Wave → Decision | Economic, after cost, component isolation | Proposed |
-| H5 | Does an ES/margin budget improve the left tail vs unconstrained Wave? | Same parent decisions as the control | `06_tide_risk` | Unconstrained parent (H4 or a declared simpler parent) | Constrained vs unconstrained outcomes | Risk-budget constraint | Decision, under Tide | Economic + risk | Proposed |
-| H6 | Does a pre-registered opportunity/risk ratio beat equal or vol-targeted sizing under the same budget? | Same | `07_allocation` | H5 | Sizing comparison | Candidate allocator | Decision | Economic under a common ES budget | Proposed |
-| H7 | Does \(O_t\) still move short-horizon or first-passage forecasts after Tide/Wave? | Prospective L2 only | `08_ripple_information` | Running L2 collector; frozen Tide/Wave state | Information increment | Order-flow feature engine | Ripple information | Forecast increment; economic test is separate | Proposed |
-| H8 | Does the best fixed execution policy beat market-on-signal with the parent decision held fixed? | Frozen parent decisions; L2 for confirmatory fills; 1-minute proxies are exploration only | `09_execution_baselines` | Frozen parent stream; L2 for confirmation | Fixed-policy implementation shortfall | Execution simulator | Execution, under Ripple | Execution gate; counterfactual parent | Proposed |
-| H9 | Do frozen bounce/breakout policies beat nested non-microstructure policies after costs? | Prospective L2 | `10_archetypes` | L2 sufficient for walls; pre-registered parameters | Archetype increment or rejection | Candidate policy only if retained | Ripple policy | Economic after cost | Proposed |
-| H10 | Does the composed system beat the best simpler rung after costs on untouched data? | The composed event stream | `11_composition` | Retained pieces integrated; untouched test unused for selection | Stack increment or rejection | Composed strategy under test | Full pipeline | Full §19 plus composition | Proposed |
-| H11 | Do predictive maps break more across structural change than across ordinary regime moves? | The maps under test | `12_nonstationarity` | Useful once H1–H4 exist; does not block them | Break vs regime comparison | Model-break monitor | Safety / paper monitoring | Diagnostic protocol | Proposed |
-| H12 | Does timestamp-safe event state improve Tide/Wave forecasts? | A corpus with earliest-available timestamps | `13_news` | Independent; corpus is hard | Event-state increment | Structured event features, never orders | Tide/Wave inputs | Leakage audit plus forecast increment | Proposed |
-| H13 | Does separating USD/AUD from BTC/USD improve AUD ES? | AUD FX path aligned to the book | `14_fx` | Deferred | Not started | None until un-deferred | Portfolio risk | Not open | Deferred |
-| H14 | Do sequential binary hold/full-exit rules beat static exits at fixed size? | 1-minute for the non-L2 branch; L2 only for the microstructure branch | `15_dynamic_exit` | Frozen entries; H4 useful | Binary-exit increment | Binary exit policy | Position management | Post-entry sequential; size fixed | Proposed |
-| H15 | Does open-position Tide re-authorisation beat entry-only risk approval? | Parent entries; risk state | `16_continuous_tide` | H5 or a declared entry-only budget | Risk-path comparison | Open-position risk authoriser | Tide → Decision while in position | Isolated from H14 and H19 | Proposed |
-| H16 | Do dynamic walls add information on penetration, rejection, absorption, replenishment, withdrawal? | Prospective L2 | `17_dynamic_walls` | L2; H7 features useful, not assumed true | Wall-information increment | Wall-state estimator | Ripple liquidity | Information first; economic policy separate | Proposed |
-| H17 | Does choosing among wait, reprice, cancel, and passive/aggressive styles beat the best H8 style? | Prospective L2 and order outcomes; authorised size fixed | `18_dynamic_execution` | H8 | Dynamic vs fixed implementation shortfall | Execution selector | Execution | Execution attribution | Proposed |
-| H18 | Does conditional passive liquidity provision improve net execution without unacceptable adverse selection or inventory? | Prospective L2 and order outcomes | `19_liquidity_provision` | H8; H17 only if that is the named parent | Passive-provision increment | Conditional passive policy | Execution | Execution + inventory | Proposed |
-| H19 | Does changing size after entry beat the best H14 binary policy? | Frozen H14 parent; L2 for confirmation | `20_scaling_management` | H14 | Scale vs binary comparison | Post-entry size path | Position management | Isolated from H14 and H15 | Proposed |
+| H2 | Do filtered regime probabilities improve those forecasts vs the unconditional distribution retained by H1? | Same, plus a declared state model | `03_regime_models` | Retained H1 benchmark; Student-\(t\) rejection does not block it | \(\pi_{t\mid t}\) forecast increment | Regime-state estimator | Wave and Tide inputs | Forecast increment vs retained unconditional model | Exploratory |
+| H3 | Do lagged crypto-major factor/PCA residuals add information about BTC beyond own-price history? | 1-minute crypto-major panel | `04_factor_models` | H1 | Crypto factor-residual increment | Crypto factor-state estimator | Wave and Tide inputs | Forecast increment vs own-price | Exploratory |
+| H20 | Do lagged SPX, US 10-year, gold, WTI, and USD-factor states add information about BTC beyond own-price history and the crypto factor residual? | Frozen cross-market panel aligned to BTC 1-minute labels | `05_cross_market_factors` | H1 hard; H3 useful as an ablation | External-market forecast increment | External-market factor-state estimator | Wave and Tide inputs | Predictive increment vs own-price, then vs crypto factors | Exploratory |
+| H4 | Do distribution or first-passage decisions improve after-cost outcomes vs hard-label Wave and always-in-market? | 1-minute; costs declared | `06_wave_probability` | H1; H2/H3/H20 only if retained; frozen dumb sizer | Decision-quality result | Wave forecast used by a decision experiment | Wave → Decision | Economic, after cost, component isolation | Exploratory |
+| H5 | Does an ES/margin budget improve the left tail vs unconstrained Wave? | Same parent decisions as the control | `07_tide_risk` | Unconstrained parent (H4 or a declared simpler parent) | Constrained vs unconstrained outcomes | Risk-budget constraint | Decision, under Tide | Economic + risk | Proposed |
+| H6 | Does a pre-registered opportunity/risk ratio beat equal or vol-targeted sizing under the same budget? | Same | `08_allocation` | H5 | Sizing comparison | Candidate allocator | Decision | Economic under a common ES budget | Proposed |
+| H7 | Does \(O_t\) still move short-horizon or first-passage forecasts after Tide/Wave? | Prospective L2 only | `09_ripple_information` | Running L2 collector; frozen Tide/Wave state | Information increment | Order-flow feature engine | Ripple information | Forecast increment; economic test is separate | Proposed |
+| H8 | Does the best fixed execution policy beat market-on-signal with the parent decision held fixed? | Frozen parent decisions; L2 for confirmatory fills; 1-minute proxies are exploration only | `10_execution_baselines` | Frozen parent stream; L2 for confirmation | Fixed-policy implementation shortfall | Execution simulator | Execution, under Ripple | Execution gate; counterfactual parent | Proposed |
+| H9 | Do frozen bounce/breakout policies beat nested non-microstructure policies after costs? | Prospective L2 | `11_archetypes` | L2 sufficient for walls; pre-registered parameters | Archetype increment or rejection | Candidate policy only if retained | Ripple policy | Economic after cost | Proposed |
+| H10 | Does the composed system beat the best simpler rung after costs on untouched data? | The composed event stream | `12_composition` | Retained pieces integrated; untouched test unused for selection | Stack increment or rejection | Composed strategy under test | Full pipeline | Full §19 plus composition | Proposed |
+| H11 | Do predictive maps break more across structural change than across ordinary regime moves? | The maps under test | `13_nonstationarity` | Useful once H1–H4 exist; does not block them | Break vs regime comparison | Model-break monitor | Safety / paper monitoring | Diagnostic protocol | Proposed |
+| H12 | Does timestamp-safe event state improve Tide/Wave forecasts? | A corpus with earliest-available timestamps | `14_news` | Independent; corpus is hard | Event-state increment | Structured event features, never orders | Tide/Wave inputs | Leakage audit plus forecast increment | Proposed |
+| H13 | Does separating USD/AUD from BTC/USD improve AUD ES? | AUD FX path aligned to the book | `15_fx` | Deferred | Not started | None until un-deferred | Portfolio risk | Not open | Deferred |
+| H14 | Do sequential binary hold/full-exit rules beat static exits at fixed size? | 1-minute for the non-L2 branch; L2 only for the microstructure branch | `16_dynamic_exit` | Frozen entries; H4 useful | Binary-exit increment | Binary exit policy | Position management | Post-entry sequential; size fixed | Proposed |
+| H15 | Does open-position Tide re-authorisation beat entry-only risk approval? | Parent entries; risk state | `17_continuous_tide` | H5 or a declared entry-only budget | Risk-path comparison | Open-position risk authoriser | Tide → Decision while in position | Isolated from H14 and H19 | Proposed |
+| H16 | Do dynamic walls add information on penetration, rejection, absorption, replenishment, withdrawal? | Prospective L2 | `18_dynamic_walls` | L2; H7 features useful, not assumed true | Wall-information increment | Wall-state estimator | Ripple liquidity | Information first; economic policy separate | Proposed |
+| H17 | Does choosing among wait, reprice, cancel, and passive/aggressive styles beat the best H8 style? | Prospective L2 and order outcomes; authorised size fixed | `19_dynamic_execution` | H8 | Dynamic vs fixed implementation shortfall | Execution selector | Execution | Execution attribution | Proposed |
+| H18 | Does conditional passive liquidity provision improve net execution without unacceptable adverse selection or inventory? | Prospective L2 and order outcomes | `20_liquidity_provision` | H8; H17 only if that is the named parent | Passive-provision increment | Conditional passive policy | Execution | Execution + inventory | Proposed |
+| H19 | Does changing size after entry beat the best H14 binary policy? | Frozen H14 parent; L2 for confirmation | `21_scaling_management` | H14 | Scale vs binary comparison | Post-entry size path | Position management | Isolated from H14 and H15 | Proposed |
 
 ---
 
@@ -1888,9 +1895,11 @@ DATA FOUNDATION
         ↓                              ↓
        H1 tails                     L2 ACCUMULATION
         ├── hard → H2 regimes          │
-        └── hard → H3 factors          ├── hard → H7 information
+        └── hard → H3 crypto factors   ├── hard → H7 information
                  │                     │         ↓ useful
                  ↓ useful              │        H16 walls
+            H20 external markets       │
+                 ↓ useful              │
             H4 Wave decisions          │         │
                    ↓ hard (parent)     │         │
             H5 Tide budget             │         │
@@ -1929,9 +1938,10 @@ DATA FOUNDATION
 Reading the graph:
 
 - **Hard.** H2’s nested benchmark is the unconditional distribution retained by H1, which remains Gaussian when Student-\(t\) is rejected. H5 needs a parent decision. H6 needs H5’s budget. H17 needs H8’s best fixed style. H19 needs H14’s binary policy. H10 needs a composed pipeline. Confirmatory H7, H9, H16, H17, and H18 need prospective L2.
-- **Useful, not hard.** H3 before H4. H4 before H14. H7’s features before H16. A cross-asset panel before H3. H1–H4 before H11 is interpreted.
+- **Useful, not hard.** H3 before H20. H20 before H4. H4 before H14. H7’s features before H16. H1–H4 before H11 is interpreted.
+- **Next build.** H20 is implemented in `05_cross_market_factors`. It is not blocked by retaining H3.
 - **Independent.** H11 can be designed as soon as one map exists and does not block H1. H12 waits on a corpus, not on H4. H9 is not on the path to H4; rejection of H9 leaves Tide/Wave intact.
-- **Parallel now.** 1-minute work on H1–H6, H11, H14’s non-L2 branch, and H15 proceeds while the L2 collector runs. Those streams are not merged into one result.
+- **Parallel now.** After H20 is specified, 1-minute work on H4–H6, H11, H14’s non-L2 branch, and H15 can proceed while the L2 collector runs. Those streams are not merged into one result.
 - **Not dependencies.** H14, H15, and H19 stay separate experiments. H8, H17, and H18 stay separate. Forecast value, management value, and execution value stay attributable by freezing the upstream parent (§10.8).
 
 ---
@@ -1945,8 +1955,13 @@ New work uses the ids below and must not overwrite those files. The first
 physical notebooks are `notebooks/research/00_data_validation.ipynb`,
 `notebooks/research/01_baselines.ipynb`,
 `notebooks/research/02_return_distributions.ipynb`, and
-`notebooks/research/03_regime_models.ipynb`. Later physical paths are
-recorded in the experiment registry (§34).
+`notebooks/research/03_regime_models.ipynb`, and
+`notebooks/research/04_factor_models.ipynb`,
+`notebooks/research/05_cross_market_factors.ipynb`, and
+`notebooks/research/06_wave_probability.ipynb`, and
+`notebooks/research/07_tide_risk.ipynb`. The next physical notebook is
+`notebooks/research/08_allocation.ipynb`. Later paths are recorded in the
+experiment registry (§34).
 
 | Notebook | Work |
 |---|---|
@@ -1954,23 +1969,24 @@ recorded in the experiment registry (§34).
 | `01_baselines` | Benchmark ladder in §10.4, including vol-matched and cost-matched controls. |
 | `02_return_distributions` | H1 |
 | `03_regime_models` | H2 |
-| `04_factor_models` | H3 |
-| `05_wave_probability` | H4 |
-| `06_tide_risk` | H5 |
-| `07_allocation` | H6 |
-| `08_ripple_information` | H7 |
-| `09_execution_baselines` | H8 |
-| `10_archetypes` | H9 |
-| `11_composition` | H10 |
-| `12_nonstationarity` | H11 |
-| `13_news` | H12 |
-| `14_fx` | H13, only if un-deferred |
-| `15_dynamic_exit` | H14 |
-| `16_continuous_tide` | H15 |
-| `17_dynamic_walls` | H16 |
-| `18_dynamic_execution` | H17 |
-| `19_liquidity_provision` | H18 |
-| `20_scaling_management` | H19 |
+| `04_factor_models` | H3, crypto majors only |
+| `05_cross_market_factors` | H20 |
+| `06_wave_probability` | H4 |
+| `07_tide_risk` | H5 |
+| `08_allocation` | H6 |
+| `09_ripple_information` | H7 |
+| `10_execution_baselines` | H8 |
+| `11_archetypes` | H9 |
+| `12_composition` | H10 |
+| `13_nonstationarity` | H11 |
+| `14_news` | H12 |
+| `15_fx` | H13, only if un-deferred |
+| `16_dynamic_exit` | H14 |
+| `17_continuous_tide` | H15 |
+| `18_dynamic_walls` | H16 |
+| `19_dynamic_execution` | H17 |
+| `20_liquidity_provision` | H18 |
+| `21_scaling_management` | H19 |
 
 H14–H19 do not share a single “position management” notebook. Forecast,
 management, and execution questions stay in different notebooks so their
@@ -2032,7 +2048,8 @@ infrastructure, until its safety behaviour is defined. Examples, not APIs:
 |---|---|
 | H1 | Distribution estimator → tail-risk model → risk-model library → Tide risk component |
 | H2 | Regime estimator → regime-state component → Wave/Tide input |
-| H3 | Factor model → factor-state component → Wave/Tide input |
+| H3 | Crypto factor model → crypto factor-state component → Wave/Tide input |
+| H20 | External-market factor model → external factor-state component → Wave/Tide input |
 | H4 | Forecast and first-passage objects → Wave research component |
 | H5–H6 | Risk budget and candidate allocator → Decision inputs |
 | H7 | Order-flow feature engine → Ripple information component |
@@ -2104,7 +2121,7 @@ Without this, later notebooks cannot be confirmatory.
 
 Gaussian and Student-\(t\) models, regime models, factor/PCA models, return
 distributions, and first-passage labels with an explicit intra-bar rule.
-Supports H1–H3. Filtered probabilities only.
+Supports H1–H3 and H20. H20 is the external-market factor notebook in this phase. Filtered probabilities only.
 
 ### Phase 3 — Wave
 
@@ -2113,7 +2130,7 @@ calibration, and Wave decision experiments under a frozen sizer. Supports H4.
 
 ### Phase 4 — Tide
 
-Portfolio and risk state, covariance or factor state as far as H3 justifies,
+Portfolio and risk state, covariance or factor state as far as H3 and H20 justify,
 ES, stress, budgets, candidate allocation, and RORAC only as a pre-registered
 candidate. Supports H5–H6. Entry-only authorisation is the baseline that H15
 will later challenge.
@@ -2232,7 +2249,7 @@ why it was refused, without reconstructing the argument from memory.
 ## 34. Experiment registry
 
 The registry is a concept. Storage technology is not specified. Each
-experiment has a stable id: `EXP-H01` … `EXP-H19`. A revision is a new id
+experiment has a stable id: `EXP-H01` … `EXP-H20`. A revision is a new id
 (`EXP-H01b`), not an overwrite.
 
 Tracked fields:
@@ -2397,7 +2414,8 @@ system.
                 ↓
 ┌───────────────────────────────┐
 │ STATISTICAL FOUNDATION        │
-│ H1, then H2 and H3 in parallel│
+│ H1, then H2 and H3           │
+│ then H20 before H4           │
 └───────────────┬───────────────┘
                 ↓
 ┌───────────────────────────────┐

@@ -1,0 +1,22 @@
+{
+  "code_version": "",
+  "component": "research.allocation",
+  "config_digest": "",
+  "dataset_digest": "",
+  "dataset_id": "btcusdt-1m",
+  "decision": "",
+  "experiment_id": "EXP-H06",
+  "horizons": [
+    5,
+    15,
+    60
+  ],
+  "hypothesis": "Allocation using a pre-registered opportunity/risk ratio at decision time improves after-cost Sharpe versus equal-notional and volatility-targeted sizing under the same retained H5 ES budget.",
+  "notebook": "notebooks/research/08_allocation.ipynb",
+  "null": "The RORAC allocator does not beat both equal-notional and volatility-targeted sizing in after-cost Sharpe at every horizon under Holm correction while satisfying the same point-in-time ES budget.",
+  "parent_hypothesis": "EXP-H05",
+  "result": "",
+  "run_id": "",
+  "sealed_access": false,
+  "status": "Proposed"
+}

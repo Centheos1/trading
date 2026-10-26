@@ -1,0 +1,22 @@
+{
+  "code_version": "ad29123c1ddb52450245342d704ab33b3ec748e4+dirty",
+  "component": "research.factors",
+  "config_digest": "b9e25cf08d6e002f8070876d78b2a49e67752715453cea29809349663d9c3266",
+  "dataset_digest": "ee0a479c6ead2e2559075b5c0f8b2352683289d753122512973e728729dbe9e4",
+  "dataset_id": "cross-market-1m",
+  "decision": "",
+  "experiment_id": "EXP-H20",
+  "horizons": [
+    5,
+    15,
+    60
+  ],
+  "hypothesis": "Lagged equity, US-rate, gold, oil, and USD-factor state improves 5-, 15-, and 60-minute BTC density forecasts beyond own-price history.",
+  "notebook": "notebooks/research/05_cross_market_factors.ipynb",
+  "null": "Lagged external-market state adds no density-forecast value beyond own-price history.",
+  "parent_hypothesis": "EXP-H01",
+  "result": "own_price",
+  "run_id": "",
+  "sealed_access": false,
+  "status": "Exploratory"
+}

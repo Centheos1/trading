@@ -1,0 +1,22 @@
+{
+  "code_version": "ad29123c1ddb52450245342d704ab33b3ec748e4+dirty",
+  "component": "research.tide",
+  "config_digest": "dee630c631ab1c41aa2ca392249fc3b99f7deb7572fbf344999c899786f3e7ac",
+  "dataset_digest": "c1192eca8fa673c386b4ff3aad751f4f2d4895e2b02d7b693a42aac1ecd28188",
+  "dataset_id": "btcusdt-1m",
+  "decision": "",
+  "experiment_id": "EXP-H05",
+  "horizons": [
+    5,
+    15,
+    60
+  ],
+  "hypothesis": "Entry-time ES, margin, and liquidation constraints improve left-tail outcomes without retaining less than 80% of unconstrained Wave mean after-cost return.",
+  "notebook": "notebooks/research/07_tide_risk.ipynb",
+  "null": "No registered Tide budget policy reduces 97.5% realised ES at every horizon while retaining at least 80% of the parent mean after-cost return under the Holm-corrected policy family.",
+  "parent_hypothesis": "EXP-H04",
+  "result": "unconstrained_h4",
+  "run_id": "",
+  "sealed_access": false,
+  "status": "Exploratory"
+}

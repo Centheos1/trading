@@ -150,6 +150,21 @@ class PracticeBroker:
                 held[instrument] = net
         return held
 
+    def margin_rates(self, instruments: list[str]) -> dict[str, float]:
+        """Read each instrument's margin rate. Missing or invalid rates raise."""
+        details = self._instrument_details(instruments)
+        rates: dict[str, float] = {}
+        for name in instruments:
+            try:
+                rate = float(details[name]["marginRate"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"{name} has no marginRate") from exc
+            if rate <= 0 or not math.isfinite(rate):
+                raise RuntimeError(f"{name} marginRate={rate}")
+            rates[name] = rate
+        logger.info("Loaded margin rates for %d instruments", len(rates))
+        return rates
+
     def trade_steps(self, instruments: list[str]) -> dict[str, float]:
         details = self._instrument_details(instruments)
         steps = {name: trade_step(details[name]) for name in instruments}
@@ -276,13 +291,16 @@ class PracticeBroker:
         current_utilization = margin_used / margin_capacity
         margin_budget = margin_capacity * MARGIN_CEILING
         call_percent = summary.get("marginCallPercent")
+        closeout_percent = summary.get("marginCloseoutPercent")
         logger.info(
             "Execution margin NAV=%.2f used=%.2f available=%.2f "
-            "utilization=%.2f target=%.0f%% ceiling=%.0f%% margin_call_percent=%s",
+            "used/capacity=%.2f%% closeout=%s target_used=%.0f%% "
+            "ceiling_used=%.0f%% margin_call_percent=%s",
             nav,
             margin_used,
             margin_available,
-            current_utilization,
+            current_utilization * 100,
+            closeout_percent,
             margin_utilization * 100,
             MARGIN_CEILING * 100,
             call_percent,

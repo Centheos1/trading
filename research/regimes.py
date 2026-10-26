@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 MIN_OBSERVATIONS = 30
 BENCHMARK_MODELS = ("gaussian", "student_t")
 _MINUTE = pd.Timedelta(minutes=1)
+# A responsibility can underflow to exact zero. log(0) is -inf, and the next
+# forward pass then drops the whole window. The floor binds only at zero, so a
+# probability that is already positive is unchanged.
+_PROBABILITY_FLOOR = 1e-12
 
 
 @dataclass(frozen=True)
@@ -411,8 +415,25 @@ def _maximisation(weight, weight_y, weight_y2, start_weight, transition_weight):
     transitions = transition_weight / row[:, None]
     if start_weight.sum() <= 0.0 or not np.isfinite(start_weight).all():
         raise RuntimeError(f"HMM initial state is not usable: {start_weight}")
-    initial = start_weight / start_weight.sum()
+    initial = _repair_probability_rows(start_weight / start_weight.sum())
+    transitions = _repair_probability_rows(transitions)
     return means, variances, transitions, initial
+
+
+def _repair_probability_rows(weights: np.ndarray) -> np.ndarray:
+    """Keep a probability row off exact zero without moving a positive row."""
+    rows = np.atleast_2d(np.asarray(weights, dtype=float))
+    if np.all(rows > 0.0):
+        return weights
+    logger.warning(
+        "HMM probability underflowed to zero and was floored at %.1e",
+        _PROBABILITY_FLOOR,
+    )
+    floored = np.maximum(rows, _PROBABILITY_FLOOR)
+    repaired = floored / floored.sum(axis=1, keepdims=True)
+    if np.ndim(weights) == 1:
+        return repaired[0]
+    return repaired
 
 
 def _initialise(sample: np.ndarray):

@@ -16,7 +16,7 @@ from oanda_portfolio.frontier import (
     frontier_portfolio,
     one_factor_covariance,
 )
-from oanda_portfolio.plan import RebalancePlan, build_plan
+from oanda_portfolio.plan import MARGIN_TARGET, RebalancePlan, build_plan, margin_notional_weights
 from oanda_portfolio.select import SelectionError, select_portfolio
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ class SimulationResult:
     exclusions: list[dict] = field(default_factory=list)
     final_symbols: tuple[str, ...] = ()
     final_weights: pd.Series | None = None
+    final_mix: pd.Series | None = None
     covariance_comparison: dict | None = None
     sharpe_by_size: dict[int, float] = field(default_factory=dict)
 
@@ -147,6 +148,18 @@ def simulate(
     config = config or FrontierConfig()
     if closes.empty:
         raise ValueError("close panel is empty")
+    if config.margin_rates is not None:
+        missing = [column for column in closes.columns if column not in config.margin_rates]
+        if missing:
+            preview = ", ".join(missing[:8])
+            raise ValueError(
+                f"margin rates missing for {len(missing)} symbols, including {preview}"
+            )
+        logger.info(
+            "Walk-forward marks to market margin notionals at %.0f%% of NAV using %d margin rates",
+            MARGIN_TARGET * 100,
+            len(config.margin_rates),
+        )
     spreads = spreads.reindex(index=closes.index, columns=closes.columns)
     returns = simple_returns(closes)
     dates = list(pd.DatetimeIndex(closes.index).sort_values())
@@ -154,6 +167,7 @@ def simulate(
     month_returns: dict[int, list[list[float]]] = {size: [] for size in config.portfolio_sizes}
     month_index: dict[int, list[pd.DatetimeIndex]] = {size: [] for size in config.portfolio_sizes}
     held: dict[int, dict[str, float]] = {size: {} for size in config.portfolio_sizes}
+    held_mix: dict[int, dict[str, float]] = {size: {} for size in config.portfolio_sizes}
     active: dict[int, tuple[str, ...] | None] = {size: None for size in config.portfolio_sizes}
     candidate: dict[int, tuple[str, ...] | None] = {size: None for size in config.portfolio_sizes}
     exclusions: list[dict] = []
@@ -232,7 +246,7 @@ def simulate(
             names = active[size]
             reason = ""
             if proposed is not None:
-                adopted, missing = _can_adopt(proposed, held[size], today_close)
+                adopted, missing = _can_adopt(proposed, held_mix[size], today_close)
                 if adopted:
                     active[size] = proposed
                     names = proposed
@@ -257,7 +271,8 @@ def simulate(
                 reason = f"missing daily candle: {missing_active}"
                 skips.append({"session_date": str(day.date()), "portfolio_size": size, "reason": reason, "symbols": missing_active})
                 logger.warning("%s size=%d %s", day.date(), size, reason)
-                new_weights = previous
+                mix = dict(held_mix[size])
+                traded = previous
                 skipped = True
                 target_used = None
                 note = ""
@@ -272,25 +287,36 @@ def simulate(
                 if optimized is None:
                     reason = reason or f"fewer than {config.lookback} joint sessions"
                     skips.append({"session_date": str(day.date()), "portfolio_size": size, "reason": reason, "symbols": list(names)})
-                    new_weights = previous
+                    mix = dict(held_mix[size])
+                    traded = previous
                     skipped = True
                     target_used = None
                     note = ""
                 else:
-                    new_weights, target_used, note = optimized
+                    mix, target_used, note = optimized
+                    traded = (
+                        margin_notional_weights(
+                            mix,
+                            config.margin_rates or {},
+                            margin_fraction=MARGIN_TARGET,
+                        )
+                        if config.margin_rates
+                        else mix
+                    )
                     skipped = False
                     reason = ""
-            net = _mark_to_market(previous, today_return, new_weights, today_spread, today_close)
+            net = _mark_to_market(previous, today_return, traded, today_spread, today_close)
             if net is not None:
                 month_bucket[size].append(net)
                 month_dates[size].append(day)
-            held[size] = new_weights
+            held[size] = traded
+            held_mix[size] = mix
             paths[size].append(
                 DayDecision(
                     session_date=str(day.date()),
                     portfolio_size=size,
                     net_return=net,
-                    weights=new_weights,
+                    weights=mix,
                     skipped=skipped,
                     reason=reason,
                     symbols=names,
@@ -298,22 +324,24 @@ def simulate(
                     note=note,
                 )
             )
-            if winner == size and not skipped and new_weights:
+            if winner == size and not skipped and mix:
                 chosen_size[str(day.date())] = size
                 if net is not None:
                     chosen_rows.append((day, net))
-                mids = {name: float(today_close[name]) for name in new_weights}
+                mids = {name: float(today_close[name]) for name in mix}
                 plan = build_plan(
                     session_date=day.date(),
                     list_version=f"{day.date().isoformat()}-k{size}",
                     nav=config.research_nav,
-                    weights=new_weights,
+                    weights=mix,
                     mids=mids,
                     current_units=research_units,
                     min_trade_units=config.min_trade_units,
                     target_return_used=target_used,
                     note=note,
                     sent_to_broker=False,
+                    margin_rates=config.margin_rates,
+                    margin_capacity=config.research_nav if config.margin_rates else None,
                 )
                 plan.status = "simulated"
                 plans.append(plan)
@@ -335,6 +363,7 @@ def simulate(
     )
     final_symbols: tuple[str, ...] = ()
     final_weights = None
+    final_mix = None
     comparison = None
     sharpe_by_size = {
         size: _sharpe(
@@ -345,8 +374,9 @@ def simulate(
     }
     if plans:
         last = plans[-1]
-        final_symbols = tuple(sorted(last.weights))
+        final_symbols = tuple(sorted(last.mix_weights or last.weights))
         final_weights = pd.Series(last.weights, name="weight")
+        final_mix = pd.Series(last.mix_weights or last.weights, name="mix")
         window = returns.loc[:, list(final_symbols)].dropna(how="any").iloc[-config.lookback :]
         if len(window) >= config.lookback:
             _, traded, _, alpha = annualize_moments(window)
@@ -375,6 +405,89 @@ def simulate(
         exclusions=exclusions,
         final_symbols=final_symbols,
         final_weights=final_weights,
+        final_mix=final_mix,
         covariance_comparison=comparison,
         sharpe_by_size=sharpe_by_size,
+    )
+
+
+@dataclass(frozen=True)
+class SessionBook:
+    """Target book for one closed session.
+
+    ``held`` is true when that session did not rebalance. The weights are
+    the book carried forward, and ``reason`` says why the session was skipped.
+    """
+
+    session_date: str
+    weights: dict[str, float]
+    list_version: str
+    target_return_used: float | None
+    held: bool
+    reason: str
+
+
+def _portfolio_size(list_version: str) -> int:
+    marker = "-k"
+    if marker not in list_version:
+        raise RuntimeError(f"list version {list_version!r} has no portfolio size")
+    suffix = list_version.rsplit(marker, 1)[-1]
+    if not suffix.isdigit():
+        raise RuntimeError(f"list version {list_version!r} has no portfolio size")
+    return int(suffix)
+
+
+def _decision_on(
+    result: SimulationResult,
+    session_date: str,
+    size: int,
+) -> DayDecision | None:
+    for item in result.paths.get(size, []):
+        if item.session_date == session_date:
+            return item
+    return None
+
+
+def book_for_session(result: SimulationResult, session_date: str) -> SessionBook:
+    """Return the chosen book's targets on one closed session.
+
+    A session that rebalanced returns that plan. A session that kept the
+    previous book, because a held name had no candle, returns those carried
+    weights. A session with no carried book raises.
+    """
+    plans = [plan for plan in result.plans if plan.session_date <= session_date]
+    if not plans:
+        raise RuntimeError(f"no research plan exists on or before {session_date}")
+    latest = plans[-1]
+    mix = latest.mix_weights or latest.weights
+    if latest.session_date == session_date:
+        return SessionBook(
+            session_date=latest.session_date,
+            weights=dict(mix),
+            list_version=latest.list_version,
+            target_return_used=latest.target_return_used,
+            held=False,
+            reason=latest.note,
+        )
+    size = _portfolio_size(latest.list_version)
+    decision = _decision_on(result, session_date, size)
+    if decision is None or not decision.skipped or not decision.weights:
+        detail = decision.reason if decision is not None and decision.reason else "no carried book"
+        raise RuntimeError(
+            f"latest session {session_date} has no plan "
+            f"(last plan is {latest.session_date}; {detail})"
+        )
+    logger.warning(
+        "Session %s has no new plan; holding %s weights because %s",
+        session_date,
+        latest.session_date,
+        decision.reason,
+    )
+    return SessionBook(
+        session_date=session_date,
+        weights=dict(decision.weights),
+        list_version=latest.list_version,
+        target_return_used=latest.target_return_used,
+        held=True,
+        reason=decision.reason,
     )

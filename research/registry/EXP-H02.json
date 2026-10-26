@@ -1,18 +1,22 @@
 {
-  "code_version": "",
+  "code_version": "ad29123c1ddb52450245342d704ab33b3ec748e4+dirty",
   "component": "research.regimes",
-  "config_digest": "",
-  "dataset_digest": "",
-  "dataset_id": "",
+  "config_digest": "c4d73024ca14d5d15ec0ff25106a599b2fb15114357a391d34dbbf5dba3b5c4e",
+  "dataset_digest": "c1192eca8fa673c386b4ff3aad751f4f2d4895e2b02d7b693a42aac1ecd28188",
+  "dataset_id": "btcusdt-1m",
   "decision": "",
   "experiment_id": "EXP-H02",
-  "horizons": [5, 15, 60],
+  "horizons": [
+    5,
+    15,
+    60
+  ],
   "hypothesis": "Filtered regime probabilities improve 5-, 15-, and 60-minute density forecasts relative to the unconditional distribution retained by H1.",
   "notebook": "notebooks/research/03_regime_models.ipynb",
   "null": "Filtered regime probabilities add no density-forecast value relative to the unconditional distribution retained by H1.",
   "parent_hypothesis": "EXP-H01",
-  "result": "",
+  "result": "regime_mixture",
   "run_id": "",
   "sealed_access": false,
-  "status": "Proposed"
+  "status": "Exploratory"
 }

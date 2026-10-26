@@ -39,6 +39,7 @@ class FrontierConfig:
     score_months: int = 12
     min_trade_units: int = 1
     research_nav: float = 100_000.0
+    margin_rates: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
