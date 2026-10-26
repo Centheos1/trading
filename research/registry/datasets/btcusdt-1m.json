@@ -1,8 +1,8 @@
 {
   "bucket": "trading-data-centheos",
   "dataset_id": "btcusdt-1m",
-  "digest": "c1192eca8fa673c386b4ff3aad751f4f2d4895e2b02d7b693a42aac1ecd28188",
-  "end": "2026-10-17T10:43:00+00:00",
+  "digest": "d67871b2eebd796cb37c7cafa89677fbca4b31ad0bdae959a5f0e2efeecc6c88",
+  "end": "2026-10-26T06:22:00+00:00",
   "exclusions": {
     "duplicate_timestamps": 0,
     "inconsistent_ohlc": 0,
@@ -18,9 +18,9 @@
       "version_id": "2ID349llU2NTv.oYdRWCaAc7Uym83TA4"
     },
     {
-      "etag": "b67bbf4dddd1bcb2658bac4d361452ec",
+      "etag": "b0d44f18eb613200b2a60b3c53423626",
       "key": "ohlcv/binance/BTCUSDT/1m/2026.parquet",
-      "size": 5482639,
+      "size": 5811263,
       "version_id": "null"
     }
   ],
