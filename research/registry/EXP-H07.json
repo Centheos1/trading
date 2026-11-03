@@ -1,0 +1,22 @@
+{
+  "code_version": "53df8883077c46048647a4e3a1a88f5d333bded6+dirty",
+  "component": "research.ripple",
+  "config_digest": "efd0fa5e7e2f3d8d67beeb80b546f12c0ba30236917f4445a946ede7a6895a1c",
+  "dataset_digest": "e5d6d33828b8b10c963b863b1d39f596c8470765d9e8cb8ada2a0304bb4a3cc4",
+  "dataset_id": "btcusdt-l2-trades",
+  "decision": "",
+  "experiment_id": "EXP-H07",
+  "horizons": [
+    5,
+    15,
+    60
+  ],
+  "hypothesis": "Trade-flow state known at the minute close improves 5-, 15-, and 60-minute conditional return densities and target-before-stop probabilities after a frozen trailing-return and trailing-volatility state.",
+  "notebook": "notebooks/research/09_ripple_information.ipynb",
+  "null": "Trade-flow state does not improve mean log score and Brier score at every horizon relative to that frozen slow state.",
+  "parent_hypothesis": null,
+  "result": "wave_tide",
+  "run_id": "",
+  "sealed_access": false,
+  "status": "Exploratory"
+}

@@ -63,6 +63,7 @@ from research.protocol import (
     H4_CONFIG,
     H5_CONFIG,
     H6_CONFIG,
+    H7_CONFIG,
     H20_CONFIG,
 )
 from research.quality import QualityReport, audit_minute_bars
@@ -85,7 +86,16 @@ from research.regimes import (
     score_regime_forecast,
 )
 from research.returns import horizon_log_returns
+from research.ripple import (
+    RippleQuality,
+    brier_score,
+    build_ripple_sample,
+    fit_bernoulli,
+    prospective_origins,
+    require_h7_protocol,
+)
 from research.splits import (
+    Origin,
     development_returns,
     rolling_origins,
     sealed_boundary,
@@ -4617,3 +4627,406 @@ def _require_h6_protocol(settings: dict) -> None:
         raise ValueError("H6 must inherit the H4 round-trip cost multiplier")
     if int(settings.get("volatility_lookback_minutes", 0)) < 2:
         raise ValueError("H6 volatility lookback must cover at least two returns")
+
+
+@dataclass(frozen=True)
+class H7Evaluation:
+    """Development scores for the trade-flow information test."""
+
+    scores: pd.DataFrame
+    comparison: pd.DataFrame
+    quality: RippleQuality
+    snapshot_features: pd.DataFrame
+    snapshot_matched: int
+    snapshot_identified: bool
+    failures: tuple[dict, ...]
+    boundary: pd.Timestamp | None
+    deferred: bool
+    defer_reason: str
+    sealed_access: bool = False
+    skipped_origins: tuple[str, ...] = ()
+
+
+def evaluate_h7(
+    bars: pd.DataFrame,
+    trades: pd.DataFrame,
+    config: dict | None = None,
+    *,
+    snapshots: pd.DataFrame | None = None,
+    depth_update_objects: int = 0,
+    depth_update_bytes: int = 0,
+    unreadable_objects: int = 0,
+) -> H7Evaluation:
+    """Score trade flow against the frozen slow state, or defer before fitting."""
+    settings = dict(H7_CONFIG)
+    if config:
+        settings.update(config)
+    require_h7_protocol(settings)
+    sample = build_ripple_sample(
+        trades,
+        bars,
+        settings,
+        snapshots=snapshots,
+        depth_update_objects=depth_update_objects,
+        depth_update_bytes=depth_update_bytes,
+        unreadable_objects=unreadable_objects,
+    )
+    empty_scores = pd.DataFrame()
+    if sample.quality.rows_kept == 0 or sample.quality.coverage_days < int(settings["minimum_coverage_days"]):
+        reason = (
+            f"trade coverage is {sample.quality.coverage_days} calendar days; "
+            f"H7 scores only at {int(settings['minimum_coverage_days'])} or more"
+        )
+        logger.warning("H7 deferred: %s", reason)
+        return _h7_deferred(sample, reason)
+    if sample.quality.decisions == 0 or sample.features.empty:
+        reason = "the closed bars and the trade tape share no decisions"
+        logger.warning("H7 deferred: %s", reason)
+        return _h7_deferred(sample, reason)
+    try:
+        origins, boundary = prospective_origins(
+            sample.features.index,
+            train_days=int(settings["train_days"]),
+            validation_days=int(settings["validation_days"]),
+            step_days=int(settings["step_days"]),
+            sealed_days=int(settings["sealed_days"]),
+        )
+    except ValueError as exc:
+        reason = str(exc)
+        logger.warning("H7 deferred: %s", reason)
+        return _h7_deferred(sample, reason)
+    minimum_rows = int(settings["minimum_window_rows"])
+    eligible: list[Origin] = []
+    skipped: list[str] = []
+    for origin in origins:
+        if _h7_origin_is_scoreable(sample.labels, origin, minimum_rows):
+            eligible.append(origin)
+        else:
+            skipped.append(origin.name)
+    if skipped:
+        logger.warning(
+            "H7 left %d sparse origins unscored; a train or validation window has fewer than %d labels: %s",
+            len(skipped),
+            minimum_rows,
+            ", ".join(skipped),
+        )
+    if not eligible:
+        reason = (
+            "no origin has a 14-day train block and a later 7-day validation block "
+            f"with at least {minimum_rows} labels"
+        )
+        logger.warning("H7 deferred: %s", reason)
+        return _h7_deferred(sample, reason)
+    origins = tuple(eligible)
+    rows: list[dict] = []
+    failures: list[dict] = []
+    expected = len(origins)
+    for horizon, labels in sample.labels.items():
+        for origin in origins:
+            try:
+                scored = _score_h7_origin(
+                    sample.features,
+                    labels,
+                    horizon=int(horizon),
+                    origin=origin,
+                    settings=settings,
+                    expected_origins=expected,
+                )
+            except (ValueError, RuntimeError, FloatingPointError, ArithmeticError) as exc:
+                failure = {"horizon_minutes": int(horizon), "origin": origin.name, "error": str(exc)}
+                failures.append(failure)
+                logger.warning(
+                    "H7 development origin failed horizon=%d origin=%s: %s",
+                    int(horizon),
+                    origin.name,
+                    exc,
+                )
+                continue
+            rows.extend(scored)
+    scores = pd.DataFrame(rows)
+    comparison = h7_comparison(scores) if not scores.empty else empty_scores
+    return H7Evaluation(
+        scores=scores,
+        comparison=comparison,
+        quality=sample.quality,
+        snapshot_features=sample.snapshot_features,
+        snapshot_matched=sample.snapshot_matched,
+        snapshot_identified=sample.snapshot_identified,
+        failures=tuple(failures),
+        boundary=boundary,
+        deferred=False,
+        defer_reason="",
+        sealed_access=False,
+        skipped_origins=tuple(skipped),
+    )
+
+
+def h7_comparison(scores: pd.DataFrame) -> pd.DataFrame:
+    """Candidate advantage by horizon. Positive means trade flow scored better."""
+    required = {
+        "horizon_minutes",
+        "origin",
+        "model",
+        "endpoint",
+        "score",
+        "expected_origins",
+        "sealed_access",
+    }
+    missing = required - set(scores.columns)
+    if missing:
+        raise ValueError(f"H7 scores are missing columns: {sorted(missing)}")
+    if scores.empty:
+        raise ValueError("H7 comparison has no scores")
+    if bool(scores["sealed_access"].fillna(False).any()):
+        raise RuntimeError("H7 comparison cannot include sealed observations")
+    expected_values = scores["expected_origins"].dropna().unique()
+    if len(expected_values) != 1 or int(expected_values[0]) < 1:
+        raise RuntimeError("H7 comparison needs one positive expected-origin count")
+    expected = int(expected_values[0])
+    rows = []
+    for endpoint, better_is_larger in (("log_score", True), ("brier", False)):
+        part = scores.loc[scores["endpoint"] == endpoint]
+        if part.empty:
+            raise RuntimeError(f"H7 comparison is missing endpoint {endpoint}")
+        pivot = part.pivot_table(
+            index=["horizon_minutes", "origin"],
+            columns="model",
+            values="score",
+            aggfunc="first",
+        )
+        needed = {"wave_tide", "trade_flow"}
+        if not needed.issubset(pivot.columns):
+            raise RuntimeError(f"H7 {endpoint} comparison is missing a model")
+        advantage = pivot["trade_flow"] - pivot["wave_tide"]
+        if not better_is_larger:
+            advantage = -advantage
+        summary = advantage.groupby("horizon_minutes").agg(["mean", "count"])
+        for horizon, values in summary.iterrows():
+            rows.append(
+                {
+                    "horizon_minutes": int(horizon),
+                    "endpoint": endpoint,
+                    "mean_advantage": float(values["mean"]),
+                    "origins": int(values["count"]),
+                    "expected_origins": expected,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def h7_development_decision(evaluation: H7Evaluation) -> pd.DataFrame:
+    """Accept the null unless both endpoints improve at every horizon."""
+    if evaluation.sealed_access:
+        raise RuntimeError("H7 development decision cannot read a sealed evaluation")
+    if evaluation.deferred or evaluation.scores.empty or evaluation.comparison.empty:
+        reason = evaluation.defer_reason or "H7 produced no development scores"
+        if evaluation.failures and not evaluation.defer_reason:
+            reason = "H7 evidence is incomplete because one or more registered origins failed"
+        return pd.DataFrame(
+            [{"null_decision": "defer", "benchmark": "wave_tide", "reason": reason}]
+        )
+    comparison = evaluation.comparison
+    required = {"horizon_minutes", "endpoint", "mean_advantage", "origins", "expected_origins"}
+    missing = required - set(comparison.columns)
+    if missing:
+        raise ValueError(f"H7 comparison is missing columns: {sorted(missing)}")
+    horizons = {int(value) for value in comparison["horizon_minutes"]}
+    endpoints = set(comparison["endpoint"])
+    complete = (
+        horizons == {5, 15, 60}
+        and endpoints == {"log_score", "brier"}
+        and bool((comparison["origins"] == comparison["expected_origins"]).all())
+    )
+    if not complete or not comparison["mean_advantage"].map(math.isfinite).all():
+        return pd.DataFrame(
+            [{
+                "null_decision": "defer",
+                "benchmark": "wave_tide",
+                "reason": "H7 evidence is incomplete because one or more registered origins failed",
+            }]
+        )
+    if bool((comparison["mean_advantage"] > 0.0).all()):
+        return pd.DataFrame(
+            [{
+                "null_decision": "reject",
+                "benchmark": "trade_flow",
+                "reason": (
+                    "Trade flow improves log score and Brier score at every horizon "
+                    "after the frozen slow state"
+                ),
+            }]
+        )
+    return pd.DataFrame(
+        [{
+            "null_decision": "accept",
+            "benchmark": "wave_tide",
+            "reason": (
+                "Trade flow does not improve both log score and Brier score at every horizon"
+            ),
+        }]
+    )
+
+
+def confirm_h7(*_args, config: dict | None = None, **_kwargs) -> None:
+    """Refuse confirmation while the archive has one clock and no book sequence ids."""
+    settings = dict(H7_CONFIG)
+    if config:
+        settings.update(config)
+    require_h7_protocol(settings)
+    raise RuntimeError(
+        "H7 confirmation refused: the stored archive has an exchange timestamp only "
+        "and no depth sequence ids"
+    )
+
+
+def h7_confirmation_blockers(*, root: Path | str, record: ExperimentRecord) -> list[str]:
+    """Reasons the sealed H7 test cannot be retained on this archive."""
+    blockers = []
+    version = code_version(root)
+    if version.endswith("+dirty") or not version:
+        blockers.append(f"the research code is uncommitted ({version})")
+    if record.experiment_id != "EXP-H07":
+        blockers.append(f"record is {record.experiment_id}, not EXP-H07")
+    if record.sealed_access or record.decision in {"retain", "reject"}:
+        blockers.append("EXP-H07 has already used a confirmatory decision")
+    blockers.append("the stored trade tape has an exchange timestamp and no receipt timestamp")
+    blockers.append("depth sequence ids are absent, so books are not reconstructed")
+    return blockers
+
+
+def _h7_deferred(sample, reason: str) -> H7Evaluation:
+    return H7Evaluation(
+        scores=pd.DataFrame(),
+        comparison=pd.DataFrame(),
+        quality=sample.quality,
+        snapshot_features=sample.snapshot_features,
+        snapshot_matched=sample.snapshot_matched,
+        snapshot_identified=sample.snapshot_identified,
+        failures=(),
+        boundary=None,
+        deferred=True,
+        defer_reason=reason,
+        sealed_access=False,
+    )
+
+
+def _h7_origin_is_scoreable(
+    labels: dict[int, pd.DataFrame],
+    origin: Origin,
+    minimum_rows: int,
+) -> bool:
+    """A sparse calendar step is not a registered origin."""
+    if minimum_rows < 2:
+        raise ValueError("H7 minimum window must cover at least two rows")
+    for horizon, frame in labels.items():
+        train = _h7_label_window(frame, int(horizon), origin.train_start, origin.train_end)
+        scored = _h7_label_window(frame, int(horizon), origin.train_end, origin.validation_end)
+        if len(train) < minimum_rows or len(scored) < minimum_rows:
+            return False
+    return True
+
+
+def _score_h7_origin(
+    features: pd.DataFrame,
+    labels: pd.DataFrame,
+    *,
+    horizon: int,
+    origin: Origin,
+    settings: dict,
+    expected_origins: int,
+) -> list[dict]:
+    train = _h7_label_window(labels, horizon, origin.train_start, origin.train_end)
+    scored = _h7_label_window(labels, horizon, origin.train_end, origin.validation_end)
+    if len(train) < 30 or len(scored) < 30:
+        raise RuntimeError(f"H7 {horizon}-minute {origin.name} window is too small")
+    nested_columns = list(settings["z_features"])
+    candidate_columns = list(settings["z_features"]) + list(settings["o_features"])
+    rows = []
+    for name, columns in (("wave_tide", nested_columns), ("trade_flow", candidate_columns)):
+        density = fit_conditional_density(
+            features.loc[train.index, columns],
+            train["log_return"],
+            family=str(settings["residual_family"]),
+            name=f"{name}_{horizon}m",
+        )
+        density_score = score_conditional_density(
+            density,
+            features.loc[scored.index, columns],
+            scored["log_return"],
+            alpha=float(settings["var_alpha"]),
+        )
+        bernoulli = fit_bernoulli(
+            features.loc[train.index, columns],
+            train["target_before_stop"],
+            name=f"{name}_{horizon}m",
+            l2=float(settings["logistic_l2"]),
+            iterations=int(settings["logistic_iterations"]),
+            clip=float(settings["probability_clip"]),
+        )
+        brier = brier_score(
+            bernoulli.probability(features.loc[scored.index, columns]),
+            scored["target_before_stop"],
+        )
+        rows.append(
+            _h7_score_row(
+                horizon=horizon,
+                origin=origin.name,
+                model=name,
+                endpoint="log_score",
+                score=density_score.mean_log_score,
+                observations=density_score.observations,
+                expected_origins=expected_origins,
+            )
+        )
+        rows.append(
+            _h7_score_row(
+                horizon=horizon,
+                origin=origin.name,
+                model=name,
+                endpoint="brier",
+                score=brier,
+                observations=len(scored),
+                expected_origins=expected_origins,
+            )
+        )
+    return rows
+
+
+def _h7_label_window(
+    labels: pd.DataFrame,
+    horizon: int,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    index = as_utc_index(labels.index)
+    start = pd.Timestamp(start).tz_convert("UTC")
+    end = pd.Timestamp(end).tz_convert("UTC")
+    if start >= end:
+        raise ValueError(f"H7 window start {start} is not before end {end}")
+    label_time = index + pd.Timedelta(minutes=horizon)
+    chosen = (index >= start) & (label_time < end)
+    return labels.loc[chosen]
+
+
+def _h7_score_row(
+    *,
+    horizon: int,
+    origin: str,
+    model: str,
+    endpoint: str,
+    score: float,
+    observations: int,
+    expected_origins: int,
+) -> dict:
+    if not math.isfinite(score):
+        raise RuntimeError(f"H7 {model} {endpoint} score is not finite")
+    return {
+        "horizon_minutes": horizon,
+        "origin": origin,
+        "model": model,
+        "endpoint": endpoint,
+        "score": float(score),
+        "observations": int(observations),
+        "expected_origins": int(expected_origins),
+        "sealed_access": False,
+    }

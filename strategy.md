@@ -1511,7 +1511,7 @@ always-in-market baselines.
 
 **H7 (Ripple increment).** $O_t$ improves short-horizon forecasts or first-passage probabilities after conditioning on Wave/Tide.
 
-*Implementation.* Hard prerequisites: prospective L2 with dual timestamps, and a frozen Wave/Tide conditioning set. Parallel workstream: the running L2 collector. Notebook: `09_ripple_information`. Component: order-flow feature engine. This is an information hypothesis; economic use is a separate after-cost test. Registry: `EXP-H07`. Status: **Proposed**. Confirmatory sample is prospective only.
+*Implementation.* Hard prerequisites: prospective L2 with dual timestamps, and a frozen Wave/Tide conditioning set. Parallel workstream: the running L2 collector. Notebook: `09_ripple_information`. Component: order-flow feature engine. This is an information hypothesis; economic use is a separate after-cost test. Registry: `EXP-H07`. Status: **Exploratory**. Development accepts the null and keeps the frozen slow state as the working forecast. The lifecycle decision stays blank. Confirmation stays closed on this archive because receipt time and depth sequence ids were not stored.
 
 **H8 (execution).** The best declared fixed execution policy with realistic
 fill mechanics reduces $C_{\text{execution}}$ or improves fill quality versus
@@ -1863,7 +1863,7 @@ No row below is a result. Status is the lifecycle state, not a performance claim
 | H4 | Do distribution or first-passage decisions improve after-cost outcomes vs hard-label Wave and always-in-market? | 1-minute; costs declared | `06_wave_probability` | H1; H2/H3/H20 only if retained; frozen dumb sizer | Decision-quality result | Wave forecast used by a decision experiment | Wave → Decision | Economic, after cost, component isolation | Exploratory |
 | H5 | Does an ES/margin budget improve the left tail vs unconstrained Wave? | Same parent decisions as the control | `07_tide_risk` | Unconstrained parent (H4 or a declared simpler parent) | Constrained vs unconstrained outcomes | Risk-budget constraint | Decision, under Tide | Economic + risk | Proposed |
 | H6 | Does a pre-registered opportunity/risk ratio beat equal or vol-targeted sizing under the same budget? | Same | `08_allocation` | H5 | Sizing comparison | Candidate allocator | Decision | Economic under a common ES budget | Proposed |
-| H7 | Does \(O_t\) still move short-horizon or first-passage forecasts after Tide/Wave? | Prospective L2 only | `09_ripple_information` | Running L2 collector; frozen Tide/Wave state | Information increment | Order-flow feature engine | Ripple information | Forecast increment; economic test is separate | Proposed |
+| H7 | Does \(O_t\) still move short-horizon or first-passage forecasts after Tide/Wave? | Prospective L2 only | `09_ripple_information` | Running L2 collector; frozen Tide/Wave state | Information increment | Order-flow feature engine | Ripple information | Forecast increment; economic test is separate | Exploratory |
 | H8 | Does the best fixed execution policy beat market-on-signal with the parent decision held fixed? | Frozen parent decisions; L2 for confirmatory fills; 1-minute proxies are exploration only | `10_execution_baselines` | Frozen parent stream; L2 for confirmation | Fixed-policy implementation shortfall | Execution simulator | Execution, under Ripple | Execution gate; counterfactual parent | Proposed |
 | H9 | Do frozen bounce/breakout policies beat nested non-microstructure policies after costs? | Prospective L2 | `11_archetypes` | L2 sufficient for walls; pre-registered parameters | Archetype increment or rejection | Candidate policy only if retained | Ripple policy | Economic after cost | Proposed |
 | H10 | Does the composed system beat the best simpler rung after costs on untouched data? | The composed event stream | `12_composition` | Retained pieces integrated; untouched test unused for selection | Stack increment or rejection | Composed strategy under test | Full pipeline | Full §19 plus composition | Proposed |
@@ -1959,8 +1959,9 @@ physical notebooks are `notebooks/research/00_data_validation.ipynb`,
 `notebooks/research/04_factor_models.ipynb`,
 `notebooks/research/05_cross_market_factors.ipynb`, and
 `notebooks/research/06_wave_probability.ipynb`, and
-`notebooks/research/07_tide_risk.ipynb`. The next physical notebook is
-`notebooks/research/08_allocation.ipynb`. Later paths are recorded in the
+`notebooks/research/07_tide_risk.ipynb`, and
+`notebooks/research/08_allocation.ipynb`. The next physical notebook is
+`notebooks/research/09_ripple_information.ipynb`. Later paths are recorded in the
 experiment registry (§34).
 
 | Notebook | Work |

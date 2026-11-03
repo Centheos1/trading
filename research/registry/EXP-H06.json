@@ -1,10 +1,10 @@
 {
-  "code_version": "",
+  "code_version": "53df8883077c46048647a4e3a1a88f5d333bded6+dirty",
   "component": "research.allocation",
-  "config_digest": "",
-  "dataset_digest": "",
+  "config_digest": "bc90d7b0ebb7fdaddc3cce73edbef8c49be4428c509269cdc964ffeaaa51b9ae",
+  "dataset_digest": "d67871b2eebd796cb37c7cafa89677fbca4b31ad0bdae959a5f0e2efeecc6c88",
   "dataset_id": "btcusdt-1m",
-  "decision": "",
+  "decision": "defer",
   "experiment_id": "EXP-H06",
   "horizons": [
     5,
@@ -15,8 +15,8 @@
   "notebook": "notebooks/research/08_allocation.ipynb",
   "null": "The RORAC allocator does not beat both equal-notional and volatility-targeted sizing in after-cost Sharpe at every horizon under Holm correction while satisfying the same point-in-time ES budget.",
   "parent_hypothesis": "EXP-H05",
-  "result": "",
+  "result": "volatility_targeted",
   "run_id": "",
   "sealed_access": false,
-  "status": "Proposed"
+  "status": "Deferred"
 }

@@ -24,16 +24,20 @@ from research.evaluate import (
     evaluate_baselines,
     confirm_h1,
     confirm_h2,
+    confirm_h7,
     evaluate_h1,
     evaluate_h2,
+    evaluate_h7,
     freeze_dataset,
     h1_development_decision,
     h1_var_coverage_family,
     h2_development_decision,
     h2_log_score_comparison,
     h2_var_coverage_family,
+    h7_development_decision,
     require_frozen_dataset,
 )
+from research.ripple import build_ripple_sample, snapshot_ablation
 from research.protocol import BASELINE_CONFIG, H1_CONFIG, H2_CONFIG
 from research.distributions import (
     GaussianModel,
@@ -1277,6 +1281,174 @@ class TestRegimes(unittest.TestCase):
                             config=config,
                         )
             self.assertFalse(load_record(rejected_path).sealed_access)
+
+
+class RippleInformationTests(unittest.TestCase):
+    """H7 uses the exchange-time tape and does not invent a book."""
+
+    def test_trade_flow_ignores_prints_after_the_decision(self):
+        bars, trades = _ripple_market(days=3, seed=11)
+        sample = build_ripple_sample(trades, bars)
+        decision = sample.features.index[80]
+        future = trades.copy()
+        future.loc[len(future)] = {
+            "timestamp": decision + pd.Timedelta(milliseconds=1),
+            "price": float(trades["price"].iloc[-1]) * 1.5,
+            "quantity": 1_000_000.0,
+            "is_buyer_maker": False,
+        }
+        again = build_ripple_sample(future, bars)
+        pd.testing.assert_series_equal(
+            sample.features.loc[decision],
+            again.features.loc[decision],
+            check_names=False,
+        )
+        self.assertNotIn("spread", sample.features.columns)
+        self.assertEqual(
+            list(sample.features.columns),
+            ["own_return_60m", "own_vol_60m", "signed_volume_60s", "trade_count_60s", "signed_volume_5m"],
+        )
+
+    def test_horizon_gap_is_counted_and_dropped(self):
+        index = pd.date_range("2026-03-01", periods=180, freq="min", tz="UTC")
+        returns = np.resize([0.001, -0.0004, 0.0007, -0.0011], len(index))
+        price = 100.0 * np.exp(np.cumsum(returns))
+        bars = pd.DataFrame(
+            {"open": price, "high": price, "low": price, "close": price},
+            index=index,
+        )
+        times = []
+        prices = []
+        for stamp, value in zip(index, price):
+            times.extend((stamp, stamp + pd.Timedelta(seconds=30)))
+            prices.extend((value, value))
+        trades = pd.DataFrame(
+            {
+                "timestamp": times,
+                "price": prices,
+                "quantity": np.resize([1.0, 2.0], len(times)),
+                "is_buyer_maker": np.resize([False, True], len(times)),
+            }
+        )
+        hole = (trades["timestamp"] > index[70]) & (trades["timestamp"] < index[72])
+        sample = build_ripple_sample(trades.loc[~hole].reset_index(drop=True), bars)
+        decision = index[60]
+        self.assertIn(decision, sample.labels[5].index)
+        self.assertNotIn(decision, sample.labels[15].index)
+        exclusions = {
+            row.horizon_minutes: row.gap_exclusions for row in sample.quality.horizon_exclusions
+        }
+        self.assertGreater(exclusions[15], 0)
+        self.assertTrue(sample.labels[15]["log_return"].map(np.isfinite).all())
+
+    def test_depth_updates_are_not_a_book(self):
+        decisions = pd.date_range("2026-03-01", periods=2, freq="min", tz="UTC")
+        updates = pd.DataFrame(
+            {
+                "timestamp": [decisions[0].value // 1_000_000, decisions[1].value // 1_000_000],
+                "side": [0, 1],
+                "price": [100.0, 101.0],
+                "quantity": [2.0, 3.0],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "not reconstructed into a book"):
+            snapshot_ablation(
+                updates,
+                decisions,
+                kind="depth_updates",
+                max_age_seconds=60,
+                minimum_decisions=1,
+            )
+
+    def test_short_sample_defers_without_scores(self):
+        bars, trades = _ripple_market(days=10, seed=3)
+        evaluation = evaluate_h7(bars, trades)
+        self.assertTrue(evaluation.deferred)
+        self.assertTrue(evaluation.scores.empty)
+        self.assertTrue(evaluation.comparison.empty)
+        self.assertIsNone(evaluation.boundary)
+        self.assertFalse(evaluation.sealed_access)
+        verdict = h7_development_decision(evaluation).iloc[0]
+        self.assertEqual(verdict.null_decision, "defer")
+        self.assertEqual(verdict.benchmark, "wave_tide")
+
+    def test_development_does_not_read_the_sealed_tail(self):
+        bars, trades = _ripple_market(days=40, seed=19)
+        first = evaluate_h7(bars, trades)
+        self.assertFalse(first.deferred, first.defer_reason)
+        self.assertFalse(first.failures, first.failures)
+        self.assertEqual(set(first.scores["horizon_minutes"]), {5, 15, 60})
+        self.assertIsNotNone(first.boundary)
+        self.assertFalse(first.sealed_access)
+        self.assertTrue((first.scores["sealed_access"] == False).all())
+        changed = trades.copy()
+        changed_clock = pd.to_datetime(changed["timestamp"], utc=True)
+        sealed = changed_clock >= first.boundary
+        changed.loc[sealed, "price"] = changed.loc[sealed, "price"] * 1.25
+        second = evaluate_h7(bars, changed)
+        pd.testing.assert_frame_equal(first.scores, second.scores)
+        self.assertTrue((first.scores["origin"] != "sealed").all())
+
+    def test_sparse_prefix_is_not_a_registered_origin(self):
+        bars, trades = _ripple_market(days=50, seed=23)
+        clock = pd.to_datetime(trades["timestamp"], utc=True)
+        sparse_end = bars.index.min() + pd.Timedelta(days=15)
+        keep = clock >= sparse_end
+        daily = clock.dt.floor("D")
+        first_of_day = ~daily.duplicated()
+        trades = trades.loc[keep | first_of_day].reset_index(drop=True)
+        evaluation = evaluate_h7(bars, trades)
+        self.assertFalse(evaluation.deferred, evaluation.defer_reason)
+        self.assertGreater(len(evaluation.skipped_origins), 0)
+        self.assertFalse(evaluation.failures, evaluation.failures)
+        self.assertTrue((evaluation.comparison["origins"] == evaluation.comparison["expected_origins"]).all())
+        verdict = h7_development_decision(evaluation).iloc[0]
+        self.assertIn(verdict.null_decision, {"accept", "reject"})
+
+    def test_confirmation_refuses_single_clock_archive(self):
+        with self.assertRaisesRegex(RuntimeError, "exchange timestamp only"):
+            confirm_h7()
+
+
+def _ripple_market(days: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Minute bars and a dense trade tape with heavy-tailed increments."""
+    rng = np.random.default_rng(seed)
+    index = pd.date_range("2026-01-01", periods=days * 1440, freq="min", tz="UTC")
+    shocks = rng.standard_t(5, len(index)) * 0.0008
+    jumps = rng.random(len(index)) < 0.01
+    shocks = shocks + jumps * rng.choice([-1.0, 1.0], len(index)) * 0.03
+    price = 30_000.0 * np.exp(np.cumsum(shocks))
+    bars = pd.DataFrame(
+        {"open": price, "high": price, "low": price, "close": price},
+        index=index,
+    )
+    times = []
+    prices = []
+    quantities = []
+    makers = []
+    for stamp, value, shock in zip(index, price, shocks):
+        times.append(stamp)
+        prices.append(float(value))
+        quantities.append(float(rng.uniform(0.1, 2.0)))
+        makers.append(bool(shock < 0))
+        times.append(stamp + pd.Timedelta(seconds=20))
+        prices.append(float(value))
+        quantities.append(float(rng.uniform(0.1, 2.0)))
+        makers.append(bool(shock >= 0))
+        if rng.random() < 0.4:
+            times.append(stamp + pd.Timedelta(seconds=40))
+            prices.append(float(value))
+            quantities.append(float(rng.uniform(0.1, 3.0)))
+            makers.append(bool(rng.random() < 0.5))
+    trades = pd.DataFrame(
+        {
+            "timestamp": times,
+            "price": prices,
+            "quantity": quantities,
+            "is_buyer_maker": makers,
+        }
+    )
+    return bars, trades
 
 
 if __name__ == "__main__":

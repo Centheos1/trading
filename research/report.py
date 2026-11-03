@@ -885,6 +885,85 @@ def residual_parameters(fits: Iterable[object]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def ripple_quality_table(quality) -> pd.DataFrame:
+    """One row for the trade tape and one row per horizon exclusion."""
+    rows = [
+        {
+            "item": "trades",
+            "rows_in": int(quality.rows_in),
+            "rows_kept": int(quality.rows_kept),
+            "duplicate_rows": int(quality.duplicate_rows),
+            "nonpositive_rows": int(quality.nonpositive_rows),
+            "coverage_days": int(quality.coverage_days),
+            "decisions": int(quality.decisions),
+            "feature_exclusions": int(quality.feature_exclusions),
+            "gap_exclusions": 0,
+            "endpoint_exclusions": 0,
+            "labels": 0,
+            "depth_update_objects": int(quality.depth_update_objects),
+            "depth_update_bytes": int(quality.depth_update_bytes),
+            "unreadable_objects": int(quality.unreadable_objects),
+            "clocks": ",".join(quality.clocks),
+            "depth_sequence_ids": bool(quality.depth_sequence_ids),
+        }
+    ]
+    for horizon in quality.horizon_exclusions:
+        rows.append(
+            {
+                "item": f"{horizon.horizon_minutes}m",
+                "rows_in": int(quality.rows_in),
+                "rows_kept": int(quality.rows_kept),
+                "duplicate_rows": int(quality.duplicate_rows),
+                "nonpositive_rows": int(quality.nonpositive_rows),
+                "coverage_days": int(quality.coverage_days),
+                "decisions": int(quality.decisions),
+                "feature_exclusions": int(quality.feature_exclusions),
+                "gap_exclusions": int(horizon.gap_exclusions),
+                "endpoint_exclusions": int(horizon.endpoint_exclusions),
+                "labels": int(horizon.labels),
+                "depth_update_objects": int(quality.depth_update_objects),
+                "depth_update_bytes": int(quality.depth_update_bytes),
+                "unreadable_objects": int(quality.unreadable_objects),
+                "clocks": ",".join(quality.clocks),
+                "depth_sequence_ids": bool(quality.depth_sequence_ids),
+            }
+        )
+    return pd.DataFrame(rows).set_index("item")
+
+
+def ripple_comparison_table(comparison: pd.DataFrame) -> pd.DataFrame:
+    """Development advantages. A positive value means trade flow scored better."""
+    columns = ["horizon_minutes", "endpoint", "mean_advantage", "origins", "expected_origins"]
+    missing = set(columns) - set(comparison.columns)
+    if missing:
+        raise ValueError(f"H7 comparison is missing columns: {sorted(missing)}")
+    if comparison.empty:
+        raise ValueError("H7 comparison table has no rows")
+    if "sealed_access" in comparison.columns and bool(comparison["sealed_access"].any()):
+        raise RuntimeError("H7 comparison table contains sealed observations")
+    return comparison.loc[:, columns].sort_values(["endpoint", "horizon_minutes"]).reset_index(drop=True)
+
+
+def plot_ripple_advantage(comparison: pd.DataFrame):
+    """Bar chart of the trade-flow advantage at each horizon and endpoint."""
+    import matplotlib.pyplot as plt
+
+    table = ripple_comparison_table(comparison)
+    endpoints = list(dict.fromkeys(table["endpoint"]))
+    fig, axes = plt.subplots(1, len(endpoints), figsize=(5 * len(endpoints), 4), sharey=False)
+    if len(endpoints) == 1:
+        axes = [axes]
+    for axis, endpoint in zip(axes, endpoints):
+        part = table.loc[table["endpoint"] == endpoint]
+        axis.bar(part["horizon_minutes"].astype(str), part["mean_advantage"], color="#4c78a8")
+        axis.axhline(0.0, color="black", linewidth=0.8)
+        axis.set_xlabel("horizon (minutes)")
+        axis.set_title(endpoint)
+    axes[0].set_ylabel("trade-flow advantage")
+    fig.tight_layout()
+    return fig
+
+
 def plot_coefficients(
     coefficients: pd.DataFrame,
     *,

@@ -366,6 +366,62 @@ def load_panel_manifest(path: Path | str) -> PanelManifest:
     return manifest
 
 
+def list_parquet_objects(
+    *,
+    bucket: str,
+    prefix: str,
+    profile: str = CANONICAL_PROFILE,
+    region: str = CANONICAL_REGION,
+    client=None,
+) -> tuple[DatasetObject, ...]:
+    """List Parquet objects under one prefix. An empty prefix is an empty result.
+
+    Listing metadata supplies the ETag and size. A missing prefix is not an
+    error. A failed request is.
+    """
+    if not bucket or not prefix:
+        raise ValueError("bucket and prefix are required")
+    s3 = client if client is not None else _s3_client(profile, region)
+    token: str | None = None
+    found: list[DatasetObject] = []
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": prefix}
+        if token:
+            kwargs["ContinuationToken"] = token
+        try:
+            page = s3.list_objects_v2(**kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to list s3://{bucket}/{prefix} with profile {profile!r}: {exc}"
+            ) from exc
+        for item in page.get("Contents", []):
+            key = str(item.get("Key", ""))
+            if not key.endswith(".parquet"):
+                continue
+            etag = str(item.get("ETag", "")).strip('"')
+            if not etag or "Size" not in item:
+                raise RuntimeError(f"s3://{bucket}/{key} listing is missing ETag or size")
+            found.append(
+                DatasetObject(
+                    key=key,
+                    etag=etag,
+                    size=int(item["Size"]),
+                    version_id=None,
+                )
+            )
+        if not page.get("IsTruncated"):
+            break
+        token = page.get("NextContinuationToken")
+        if not token:
+            raise RuntimeError(f"truncated listing for s3://{bucket}/{prefix} has no continuation token")
+    objects = tuple(sorted(found, key=lambda item: item.key))
+    if objects:
+        logger.info("Identified %d parquet objects under s3://%s/%s", len(objects), bucket, prefix)
+    else:
+        logger.warning("No parquet objects under s3://%s/%s", bucket, prefix)
+    return objects
+
+
 def verify_manifest(manifest: DatasetManifest) -> None:
     """Raise when a loaded manifest does not match its recorded digest."""
     actual = content_digest(manifest)
