@@ -656,11 +656,15 @@ def load_ticks_parquet(
 
     Returns a dict with one DataFrame per dataset (defaults to all three):
 
-    * ``trades``           — columns ``timestamp, price, quantity, is_buyer_maker``
-    * ``depth_snapshots``  — columns ``timestamp, side, price, quantity``
-    * ``depth_updates``    — columns ``timestamp, side, price, quantity``
+    * ``trades``           — ``timestamp, price, quantity, is_buyer_maker``,
+      and on new shards ``ts_recv_ms``, ``trade_id``
+    * ``depth_snapshots``  — ``timestamp, side, price, quantity``, and on new
+      shards ``ts_recv_ms``, ``last_update_id`` (exchange ``timestamp`` is null)
+    * ``depth_updates``    — ``timestamp, side, price, quantity``, and on new
+      shards ``ts_recv_ms``, ``first_update_id``, ``final_update_id``
 
-    Schema matches :func:`load_ticks`. Timestamps are ``int64`` ms-since-epoch.
+    Shards written before that schema omit the new columns. Timestamps are
+    ``int64`` ms-since-epoch.
     """
     from tick_parquet_store import TickParquetStore  # late import keeps notebook startup quick
 
@@ -701,13 +705,9 @@ def load_ticks_parquet(
                 frames.append(df)
         if frames:
             merged = pd.concat(frames, ignore_index=True)
-            if dataset == "trades":
-                subset = ["timestamp", "price", "quantity", "is_buyer_maker"]
-            else:
-                subset = ["timestamp", "side", "price", "quantity"]
             merged = (
-                merged.drop_duplicates(subset=subset, keep="last")
-                      .sort_values("timestamp")
+                merged.drop_duplicates(keep="last")
+                      .sort_values("timestamp", na_position="last")
                       .reset_index(drop=True)
             )
             out[dataset] = merged

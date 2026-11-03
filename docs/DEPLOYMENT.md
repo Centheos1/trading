@@ -957,6 +957,17 @@ data = load_ticks_parquet(
 trades = data["trades"]    # int64 ms timestamp + price/quantity/is_buyer_maker
 ```
 
+Shards written after the sequence-id schema also store `ts_recv_ms`.
+Trades store `trade_id`. Depth diffs store `first_update_id` (`U`) and
+`final_update_id` (`u`) on every level. Snapshots store `last_update_id`
+and a receipt time; their exchange `timestamp` is null because the REST
+book has no exchange event time. Older shards do not have these columns
+and cannot be reconstructed into a book. A depth event that arrives
+without its sequence id is written under `quarantine/`, not into
+`depth_updates` or `depth_snapshots`. Redeploy the collector before
+expecting new shards to carry the columns. The objects already in S3
+stay as they were written.
+
 Downloaded day-files are cached at
 ``data/cache/ticks_parquet/binance/{SYMBOL}/{dataset}/``; subsequent
 calls without ``refresh=True`` read directly from cache.

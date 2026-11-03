@@ -59,7 +59,8 @@ class BinanceAdapter(VenueAdapter):
                     venue=self.name,
                     symbol=symbol,
                     kind=EventKind.DEPTH_SNAPSHOT,
-                    ts_exchange_ms=now_ms,
+                    # REST depth has lastUpdateId and no exchange event time.
+                    ts_exchange_ms=None,
                     ts_recv_ms=now_ms,
                     payload={
                         "bids": book.bids,

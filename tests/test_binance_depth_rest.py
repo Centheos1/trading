@@ -8,6 +8,22 @@ from data_feed.binance_depth_rest import (
 )
 
 
+def test_snapshot_event_has_receipt_time_and_no_exchange_time():
+    from adapters.binance import BinanceAdapter
+    from data_feed.binance_depth_rest import BinanceDepthBook
+
+    book = BinanceDepthBook(last_update_id=42, bids=[(100.0, 1.0)], asks=[(101.0, 2.0)])
+    seen = []
+    adapter = BinanceAdapter()
+    with patch("data_feed.binance_depth_rest.fetch_binance_depth_book", return_value=book):
+        adapter._emit_depth_snapshot("BTCUSDT", seen.append)
+    event = seen[0]
+    assert event.ts_exchange_ms is None
+    assert event.ts_recv_ms > 0
+    assert event.payload["last_update_id"] == 42
+    assert event.seq == 42
+
+
 def test_fetch_binance_depth_book_parses_json():
     mock_resp = MagicMock()
     mock_resp.json.return_value = {

@@ -10,11 +10,29 @@ loses at most the open buffer; prior shards are never overwritten.
 
 Schema (trades)::
 
-    venue, timestamp, price, quantity, is_buyer_maker
+    venue, timestamp, price, quantity, is_buyer_maker, ts_recv_ms, trade_id
 
-Schema (depth_snapshots / depth_updates)::
+    ``timestamp`` is the exchange time. ``ts_recv_ms`` is the local receipt
+    time. ``trade_id`` is the venue trade id when the adapter has one.
 
-    venue, timestamp, side (0=bid 1=ask), price, quantity
+Schema (depth_updates)::
+
+    venue, timestamp, side (0=bid 1=ask), price, quantity,
+    ts_recv_ms, first_update_id, final_update_id, last_update_id
+
+    ``timestamp`` is the exchange event time. ``first_update_id`` and
+    ``final_update_id`` are the packet's ``U`` and ``u``. ``last_update_id``
+    is null on a diff.
+
+Schema (depth_snapshots)::
+
+    the same depth columns. ``timestamp`` is null: a REST book has a
+    ``last_update_id`` and no exchange event time. ``ts_recv_ms`` is the
+    local receipt time and is the shard clock.
+
+Shards written before this schema do not have the new columns. They cannot
+be backfilled. A depth event with no usable sequence id is not written into
+the book datasets; the levels are stored under ``quarantine`` and counted.
 """
 
 from __future__ import annotations
@@ -38,12 +56,26 @@ logger = logging.getLogger(__name__)
 
 DATASETS: Tuple[str, ...] = ("trades", "depth_snapshots", "depth_updates")
 
-_TRADES_COLS = ["venue", "timestamp", "price", "quantity", "is_buyer_maker"]
-_DEPTH_COLS = ["venue", "timestamp", "side", "price", "quantity"]
+_TRADES_COLS = [
+    "venue", "timestamp", "price", "quantity", "is_buyer_maker", "ts_recv_ms", "trade_id",
+]
+_DEPTH_COLS = [
+    "venue", "timestamp", "side", "price", "quantity",
+    "ts_recv_ms", "first_update_id", "final_update_id", "last_update_id",
+]
+_QUARANTINE_COLS = [
+    "venue", "kind", "reason", "timestamp", "ts_recv_ms",
+    "side", "price", "quantity", "trade_id",
+    "first_update_id", "final_update_id", "last_update_id",
+]
 
 
 def _columns_for(dataset: str) -> List[str]:
-    return list(_TRADES_COLS if dataset == "trades" else _DEPTH_COLS)
+    if dataset == "trades":
+        return list(_TRADES_COLS)
+    if dataset == "quarantine":
+        return list(_QUARANTINE_COLS)
+    return list(_DEPTH_COLS)
 
 
 def _arrow_schema(dataset: str):
@@ -56,14 +88,48 @@ def _arrow_schema(dataset: str):
             ("price", pa.float64()),
             ("quantity", pa.float64()),
             ("is_buyer_maker", pa.bool_()),
+            pa.field("ts_recv_ms", pa.int64(), nullable=True),
+            pa.field("trade_id", pa.int64(), nullable=True),
+        ])
+    if dataset == "quarantine":
+        return pa.schema([
+            ("venue", pa.string()),
+            ("kind", pa.string()),
+            ("reason", pa.string()),
+            pa.field("timestamp", pa.int64(), nullable=True),
+            pa.field("ts_recv_ms", pa.int64(), nullable=True),
+            pa.field("side", pa.int8(), nullable=True),
+            pa.field("price", pa.float64(), nullable=True),
+            pa.field("quantity", pa.float64(), nullable=True),
+            pa.field("trade_id", pa.int64(), nullable=True),
+            pa.field("first_update_id", pa.int64(), nullable=True),
+            pa.field("final_update_id", pa.int64(), nullable=True),
+            pa.field("last_update_id", pa.int64(), nullable=True),
         ])
     return pa.schema([
         ("venue", pa.string()),
-        ("timestamp", pa.int64()),
+        pa.field("timestamp", pa.int64(), nullable=True),
         ("side", pa.int8()),
         ("price", pa.float64()),
         ("quantity", pa.float64()),
+        pa.field("ts_recv_ms", pa.int64(), nullable=True),
+        pa.field("first_update_id", pa.int64(), nullable=True),
+        pa.field("final_update_id", pa.int64(), nullable=True),
+        pa.field("last_update_id", pa.int64(), nullable=True),
     ])
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """A venue id or millisecond clock. Zero and unparsable values are absent."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +421,56 @@ def sweep_local_shards(root: Path, publisher: S3ShardPublisher) -> SweepStats:
 # ---------------------------------------------------------------------------
 
 
+def _depth_level_rows(
+    venue: str,
+    ts_ms: Optional[int],
+    bids: Sequence,
+    asks: Sequence,
+    *,
+    ts_recv_ms: Optional[int],
+    first_update_id: Optional[int] = None,
+    final_update_id: Optional[int] = None,
+    last_update_id: Optional[int] = None,
+) -> List[dict]:
+    rows: List[dict] = []
+    for side, levels in ((0, bids), (1, asks)):
+        for level in levels:
+            if isinstance(level, (list, tuple)):
+                price, quantity = float(level[0]), float(level[1])
+            else:
+                price, quantity = float(level.price), float(level.quantity)
+            rows.append({
+                "venue": venue,
+                "timestamp": None if ts_ms is None else int(ts_ms),
+                "side": np.int8(side),
+                "price": price,
+                "quantity": quantity,
+                "ts_recv_ms": ts_recv_ms,
+                "first_update_id": first_update_id,
+                "final_update_id": final_update_id,
+                "last_update_id": last_update_id,
+            })
+    return rows
+
+
+def _table_for_schema(frame: pd.DataFrame, schema):
+    import pyarrow as pa
+
+    arrays = [
+        pa.array(frame[field.name].tolist(), type=field.type, from_pandas=True)
+        for field in schema
+    ]
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+def _placement_clock(frame: pd.DataFrame) -> pd.Series:
+    """Exchange time, or receipt time when the exchange time is absent."""
+    clock = pd.to_numeric(frame["timestamp"], errors="coerce")
+    if "ts_recv_ms" in frame.columns:
+        clock = clock.fillna(pd.to_numeric(frame["ts_recv_ms"], errors="coerce"))
+    return clock
+
+
 def shard_dir(
     root: Path, venue: str, symbol: str, dataset: str, ts_ms: int
 ) -> Path:
@@ -414,6 +530,8 @@ class ImmutableShardWriter:
         self._shards_written = 0
         self._rows_written = 0
         self._rows_dropped = 0
+        self._rows_quarantined = 0
+        self._events_without_levels = 0
 
     # -- ingest -------------------------------------------------------------
 
@@ -423,6 +541,9 @@ class ImmutableShardWriter:
         price: float,
         quantity: float,
         is_buyer_maker: bool,
+        *,
+        ts_recv_ms: Optional[int] = None,
+        trade_id: Optional[int] = None,
     ) -> None:
         row = {
             "venue": self.venue,
@@ -430,6 +551,8 @@ class ImmutableShardWriter:
             "price": float(price),
             "quantity": float(quantity),
             "is_buyer_maker": bool(is_buyer_maker),
+            "ts_recv_ms": ts_recv_ms,
+            "trade_id": trade_id,
         }
         with self._lock:
             self._bufs["trades"].append(row)
@@ -440,55 +563,158 @@ class ImmutableShardWriter:
 
     def add_depth(
         self,
-        ts_ms: int,
+        ts_ms: Optional[int],
         bids: Sequence,
         asks: Sequence,
         *,
         is_snapshot: bool = False,
+        ts_recv_ms: Optional[int] = None,
+        first_update_id: Optional[int] = None,
+        final_update_id: Optional[int] = None,
+        last_update_id: Optional[int] = None,
     ) -> None:
         dataset = "depth_snapshots" if is_snapshot else "depth_updates"
-        rows: List[dict] = []
-        for side, levels in ((0, bids), (1, asks)):
-            for lv in levels:
-                if isinstance(lv, (list, tuple)):
-                    price, qty = float(lv[0]), float(lv[1])
-                else:
-                    price, qty = float(lv.price), float(lv.quantity)
-                rows.append({
-                    "venue": self.venue,
-                    "timestamp": int(ts_ms),
-                    "side": np.int8(side),
-                    "price": price,
-                    "quantity": qty,
-                })
+        rows = _depth_level_rows(
+            self.venue,
+            ts_ms,
+            bids,
+            asks,
+            ts_recv_ms=ts_recv_ms,
+            first_update_id=first_update_id,
+            final_update_id=final_update_id,
+            last_update_id=last_update_id,
+        )
         if not rows:
+            with self._lock:
+                self._events_without_levels += 1
+            logger.warning(
+                "Depth event has no levels venue=%s symbol=%s snapshot=%s "
+                "first_update_id=%s final_update_id=%s last_update_id=%s",
+                self.venue, self.symbol, is_snapshot,
+                first_update_id, final_update_id, last_update_id,
+            )
             return
+        placed = ts_recv_ms if ts_ms is None else int(ts_ms)
         with self._lock:
             self._bufs[dataset].extend(rows)
-            self._last_event_ms[dataset] = int(ts_ms)
+            self._last_event_ms[dataset] = int(placed)
             overflow = len(self._bufs[dataset]) >= self.max_buffer_rows
         if overflow:
             self.flush()
 
     def on_market_event(self, event) -> None:
-        """Ingest a :class:`market_data.MarketEvent`."""
+        """Ingest a :class:`market_data.MarketEvent`.
+
+        A depth event without its sequence id is quarantined. A REST snapshot
+        does not receive an exchange timestamp; receipt time places the shard.
+        """
         from market_data import EventKind
 
-        p = event.payload
+        payload = event.payload or {}
+        recv = _positive_int(event.ts_recv_ms)
         if event.kind == EventKind.TRADE:
+            exchange = _positive_int(event.ts_exchange_ms)
+            if exchange is None or recv is None:
+                self._quarantine(
+                    kind="trade",
+                    reason="missing_receipt_or_exchange_timestamp",
+                    rows=[{
+                        "timestamp": event.ts_exchange_ms,
+                        "ts_recv_ms": event.ts_recv_ms,
+                        "price": payload.get("price"),
+                        "quantity": payload.get("qty", payload.get("quantity")),
+                        "trade_id": event.seq,
+                    }],
+                )
+                return
             self.add_trade(
-                event.ts_exchange_ms,
-                float(p["price"]),
-                float(p.get("qty", p.get("quantity", 0))),
-                bool(p.get("is_buyer_maker", False)),
+                exchange,
+                float(payload["price"]),
+                float(payload.get("qty", payload.get("quantity", 0))),
+                bool(payload.get("is_buyer_maker", False)),
+                ts_recv_ms=recv,
+                trade_id=_positive_int(event.seq),
             )
-        elif event.kind in (EventKind.DEPTH_UPDATE, EventKind.DEPTH_SNAPSHOT):
+            return
+        if event.kind not in (EventKind.DEPTH_UPDATE, EventKind.DEPTH_SNAPSHOT):
+            logger.error(
+                "Unhandled market event kind=%s venue=%s symbol=%s",
+                event.kind, event.venue, event.symbol,
+            )
+            return
+        bids = payload.get("bids") or []
+        asks = payload.get("asks") or []
+        snapshot = event.kind == EventKind.DEPTH_SNAPSHOT
+        if snapshot:
+            last = _positive_int(payload.get("last_update_id")) or _positive_int(event.seq)
+            if recv is None or last is None:
+                self._quarantine(
+                    kind="depth_snapshot",
+                    reason="missing_snapshot_update_id" if last is None else "missing_receipt_timestamp",
+                    rows=_depth_level_rows(
+                        self.venue, None, bids, asks, ts_recv_ms=event.ts_recv_ms, last_update_id=last,
+                    ) or [{"timestamp": None, "ts_recv_ms": event.ts_recv_ms, "last_update_id": last}],
+                )
+                return
             self.add_depth(
-                event.ts_exchange_ms,
-                p.get("bids") or [],
-                p.get("asks") or [],
-                is_snapshot=event.kind == EventKind.DEPTH_SNAPSHOT,
+                None, bids, asks,
+                is_snapshot=True, ts_recv_ms=recv, last_update_id=last,
             )
+            return
+        exchange = _positive_int(event.ts_exchange_ms)
+        first = _positive_int(payload.get("first_update_id"))
+        final = _positive_int(payload.get("final_update_id"))
+        if recv is None or exchange is None or first is None or final is None or final < first:
+            if first is None or final is None or (first is not None and final is not None and final < first):
+                reason = "missing_depth_sequence_ids"
+            elif exchange is None:
+                reason = "missing_exchange_timestamp"
+            else:
+                reason = "missing_receipt_timestamp"
+            self._quarantine(
+                kind="depth_update",
+                reason=reason,
+                rows=_depth_level_rows(
+                    self.venue, exchange, bids, asks,
+                    ts_recv_ms=event.ts_recv_ms,
+                    first_update_id=first,
+                    final_update_id=final,
+                ) or [{
+                    "timestamp": exchange,
+                    "ts_recv_ms": event.ts_recv_ms,
+                    "first_update_id": first,
+                    "final_update_id": final,
+                }],
+            )
+            return
+        self.add_depth(
+            exchange, bids, asks,
+            is_snapshot=False,
+            ts_recv_ms=recv,
+            first_update_id=first,
+            final_update_id=final,
+        )
+
+    def _quarantine(self, *, kind: str, reason: str, rows: List[dict]) -> None:
+        """Keep a rejected event out of the book datasets and count it."""
+        stored = []
+        for row in rows:
+            item = {"venue": self.venue, "kind": kind, "reason": reason}
+            item.update(row)
+            item["venue"] = self.venue
+            item["kind"] = kind
+            item["reason"] = reason
+            stored.append(item)
+        logger.error(
+            "Quarantined %d %s rows venue=%s symbol=%s reason=%s",
+            len(stored), kind, self.venue, self.symbol, reason,
+        )
+        with self._lock:
+            self._rows_quarantined += len(stored)
+            self._bufs["quarantine"].extend(stored)
+            overflow = len(self._bufs["quarantine"]) >= self.max_buffer_rows
+        if overflow:
+            self.flush()
 
     # -- flush --------------------------------------------------------------
 
@@ -557,22 +783,37 @@ class ImmutableShardWriter:
                 f"free {free} bytes < floor {self.min_free_bytes} "
                 f"venue={self.venue} symbol={self.symbol} dataset={dataset}"
             )
-        import pyarrow as pa
         import pyarrow.parquet as pq
 
         cols = _columns_for(dataset)
-        df = pd.DataFrame(rows, columns=cols)
-        if dataset != "trades":
-            df["side"] = df["side"].astype("int8")
-        start_ms = int(df["timestamp"].min())
-        end_ms = int(df["timestamp"].max())
+        df = pd.DataFrame(rows)
+        for col in cols:
+            if col not in df.columns:
+                df[col] = pd.NA
+        df = df.loc[:, cols]
+        clock = _placement_clock(df)
+        if clock.isna().any():
+            missing = int(clock.isna().sum())
+            if dataset != "quarantine":
+                raise ValueError(
+                    f"{dataset} shard has {missing} rows with no exchange or receipt time"
+                )
+            placed = int(datetime.now(timezone.utc).timestamp() * 1000)
+            logger.error(
+                "Quarantine shard has %d rows with no clock; placing the file at %d "
+                "without writing that value into the row",
+                missing, placed,
+            )
+            clock = clock.fillna(placed)
+        start_ms = int(clock.min())
+        end_ms = int(clock.max())
         out_dir = shard_dir(self.root, self.venue, self.symbol, dataset, start_ms)
         out_dir.mkdir(parents=True, exist_ok=True)
         name = shard_filename(start_ms, end_ms)
         final = out_dir / name
         tmp = out_dir / f".{name}.tmp"
 
-        table = pa.Table.from_pandas(df, schema=_arrow_schema(dataset), preserve_index=False)
+        table = _table_for_schema(df, _arrow_schema(dataset))
         pq.write_table(table, tmp, compression="zstd")
         # fsync file then atomic rename
         with open(tmp, "rb") as fh:
@@ -727,6 +968,8 @@ class ImmutableShardWriter:
             "shards_written": self._shards_written,
             "rows_written": self._rows_written,
             "rows_dropped": self._rows_dropped,
+            "rows_quarantined": self._rows_quarantined,
+            "events_without_levels": self._events_without_levels,
             "buffered": self.buffered_rows(),
         }
 
@@ -819,11 +1062,16 @@ class TickParquetStore:
             return pd.DataFrame(columns=_columns_for(dataset))
 
         out = pd.concat(frames, ignore_index=True)
-        if start_ms is not None:
-            out = out[out["timestamp"] >= start_ms]
-        if end_ms is not None:
-            out = out[out["timestamp"] <= end_ms]
-        out = out.sort_values("timestamp").drop_duplicates().reset_index(drop=True)
+        clock = _placement_clock(out) if "timestamp" in out.columns else pd.Series(dtype="float64")
+        if start_ms is not None and len(out):
+            out = out.loc[clock >= start_ms]
+            clock = clock.loc[out.index]
+        if end_ms is not None and len(out):
+            out = out.loc[clock <= end_ms]
+            clock = clock.loc[out.index]
+        if len(out):
+            out = out.assign(_clock=clock).sort_values("_clock").drop(columns="_clock")
+            out = out.drop_duplicates().reset_index(drop=True)
         return out
 
     def latest_day(self, venue: str, symbol: str, dataset: str) -> Optional[str]:

@@ -70,7 +70,9 @@ class RedisMDBus:
                 "venue": event.venue,
                 "symbol": event.symbol,
                 "kind": event.kind.value,
-                "ts_exchange_ms": int(event.ts_exchange_ms),
+                "ts_exchange_ms": (
+                    int(event.ts_exchange_ms) if event.ts_exchange_ms is not None else None
+                ),
                 "ts_recv_ms": int(event.ts_recv_ms),
                 "seq": int(event.seq) if event.seq is not None else -1,
                 **event.payload,

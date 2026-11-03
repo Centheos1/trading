@@ -71,7 +71,7 @@ class TestImmutableShardWriter(unittest.TestCase):
             df = TickParquetStore(tmp).read("binance", "BTCUSDT", "trades")
             self.assertEqual(len(df), 1)
 
-    def test_on_market_event_trade_and_depth(self):
+    def test_on_market_event_persists_clocks_and_sequence_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             w = ImmutableShardWriter(tmp, "binance", "BTCUSDT")
             w.on_market_event(
@@ -80,8 +80,25 @@ class TestImmutableShardWriter(unittest.TestCase):
                     symbol="BTCUSDT",
                     kind=EventKind.TRADE,
                     ts_exchange_ms=_DAY0,
-                    ts_recv_ms=_DAY0,
+                    ts_recv_ms=_DAY0 + 15,
                     payload={"price": 1.0, "qty": 2.0, "is_buyer_maker": False},
+                    seq=9001,
+                )
+            )
+            w.on_market_event(
+                MarketEvent(
+                    venue="binance",
+                    symbol="BTCUSDT",
+                    kind=EventKind.DEPTH_UPDATE,
+                    ts_exchange_ms=_DAY0 + 20,
+                    ts_recv_ms=_DAY0 + 25,
+                    payload={
+                        "bids": [(1.0, 10.0)],
+                        "asks": [(1.1, 5.0)],
+                        "first_update_id": 50,
+                        "final_update_id": 52,
+                    },
+                    seq=52,
                 )
             )
             w.on_market_event(
@@ -89,16 +106,107 @@ class TestImmutableShardWriter(unittest.TestCase):
                     venue="binance",
                     symbol="BTCUSDT",
                     kind=EventKind.DEPTH_SNAPSHOT,
-                    ts_exchange_ms=_DAY0,
-                    ts_recv_ms=_DAY0,
-                    payload={"bids": [(1.0, 10.0)], "asks": [(1.1, 5.0)]},
+                    ts_exchange_ms=None,
+                    ts_recv_ms=_DAY0 + 30,
+                    payload={
+                        "bids": [(1.0, 8.0)],
+                        "asks": [(1.2, 4.0)],
+                        "last_update_id": 40,
+                    },
+                    seq=40,
                 )
             )
             w.flush()
             store = TickParquetStore(tmp)
-            self.assertEqual(len(store.read("binance", "BTCUSDT", "trades")), 1)
-            depth = store.read("binance", "BTCUSDT", "depth_snapshots")
-            self.assertEqual(len(depth), 2)
+            trades = store.read("binance", "BTCUSDT", "trades")
+            self.assertEqual(len(trades), 1)
+            self.assertEqual(int(trades.iloc[0]["ts_recv_ms"]), _DAY0 + 15)
+            self.assertEqual(int(trades.iloc[0]["trade_id"]), 9001)
+            updates = store.read("binance", "BTCUSDT", "depth_updates")
+            self.assertEqual(len(updates), 2)
+            self.assertTrue((updates["first_update_id"] == 50).all())
+            self.assertTrue((updates["final_update_id"] == 52).all())
+            self.assertTrue((updates["ts_recv_ms"] == _DAY0 + 25).all())
+            self.assertTrue(updates["last_update_id"].isna().all())
+            snapshots = store.read("binance", "BTCUSDT", "depth_snapshots")
+            self.assertEqual(len(snapshots), 2)
+            self.assertTrue(snapshots["timestamp"].isna().all())
+            self.assertTrue((snapshots["last_update_id"] == 40).all())
+            self.assertTrue((snapshots["ts_recv_ms"] == _DAY0 + 30).all())
+            self.assertTrue(snapshots["first_update_id"].isna().all())
+            self.assertEqual(w.stats()["rows_quarantined"], 0)
+
+    def test_reader_keeps_shards_written_before_sequence_ids(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "binance" / "BTCUSDT" / "depth_updates" / "date=2021-01-01" / "hour=00"
+            out.mkdir(parents=True)
+            table = pa.table({
+                "venue": ["binance"],
+                "timestamp": [_DAY0],
+                "side": pa.array([0], type=pa.int8()),
+                "price": [100.0],
+                "quantity": [1.5],
+            })
+            pq.write_table(table, out / "part-1-1-old.parquet")
+            frame = TickParquetStore(tmp).read("binance", "BTCUSDT", "depth_updates")
+            self.assertEqual(len(frame), 1)
+            self.assertEqual(frame.iloc[0]["price"], 100.0)
+            self.assertNotIn("first_update_id", frame.columns)
+
+    def test_depth_event_missing_sequence_ids_is_quarantined(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            w = ImmutableShardWriter(tmp, "binance", "BTCUSDT")
+            w.on_market_event(
+                MarketEvent(
+                    venue="binance",
+                    symbol="BTCUSDT",
+                    kind=EventKind.DEPTH_UPDATE,
+                    ts_exchange_ms=_DAY0,
+                    ts_recv_ms=_DAY0 + 5,
+                    payload={"bids": [(100.0, 1.0)], "asks": [(101.0, 2.0)]},
+                )
+            )
+            w.on_market_event(
+                MarketEvent(
+                    venue="binance",
+                    symbol="BTCUSDT",
+                    kind=EventKind.DEPTH_SNAPSHOT,
+                    ts_exchange_ms=None,
+                    ts_recv_ms=_DAY0 + 6,
+                    payload={"bids": [(100.0, 1.0)], "asks": []},
+                )
+            )
+            w.on_market_event(
+                MarketEvent(
+                    venue="binance",
+                    symbol="BTCUSDT",
+                    kind=EventKind.DEPTH_UPDATE,
+                    ts_exchange_ms=_DAY0,
+                    ts_recv_ms=_DAY0 + 7,
+                    payload={
+                        "bids": [(100.0, 1.0)],
+                        "asks": [],
+                        "first_update_id": 80,
+                        "final_update_id": 70,
+                    },
+                )
+            )
+            w.flush()
+            store = TickParquetStore(tmp)
+            self.assertTrue(store.read("binance", "BTCUSDT", "depth_updates").empty)
+            self.assertTrue(store.read("binance", "BTCUSDT", "depth_snapshots").empty)
+            quarantine = store.read("binance", "BTCUSDT", "quarantine")
+            self.assertEqual(len(quarantine), 4)
+            self.assertEqual(
+                set(quarantine["reason"]),
+                {"missing_depth_sequence_ids", "missing_snapshot_update_id"},
+            )
+            self.assertEqual(w.stats()["rows_quarantined"], 4)
+            self.assertTrue((quarantine.loc[quarantine["kind"] == "depth_update", "price"] == 100.0).any())
 
     def test_symbol_isolation_separate_roots(self):
         """Two writers for different symbols never share buffers/files."""

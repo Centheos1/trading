@@ -29,7 +29,7 @@ class MarketEvent:
     venue: str
     symbol: str
     kind: EventKind
-    ts_exchange_ms: int
+    ts_exchange_ms: Optional[int]
     ts_recv_ms: int
     payload: Dict[str, Any] = field(default_factory=dict)
     seq: Optional[int] = None
